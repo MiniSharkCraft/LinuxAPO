@@ -1,8 +1,11 @@
 #include "DeviceManager.h"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <pipewire/keys.h>
 #include <pipewire/pipewire.h>
 #include <stdexcept>
+#include <utility>
 namespace {
 std::string prop(const spa_dict *p, const char *k) {
   auto *v = spa_dict_lookup(p, k);
@@ -19,9 +22,22 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
     return;
   auto &s = *static_cast<State *>(data);
   if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
-      prop(props, PW_KEY_MEDIA_CLASS) == "Audio/Source")
-    s.devices.sources.push_back({id, prop(props, PW_KEY_NODE_NAME),
-                                 prop(props, PW_KEY_NODE_DESCRIPTION)});
+      prop(props, PW_KEY_MEDIA_CLASS) == "Audio/Source") {
+    AudioDevice device{id, prop(props, PW_KEY_NODE_NAME),
+                       prop(props, PW_KEY_NODE_DESCRIPTION)};
+    const auto channels = prop(props, PW_KEY_AUDIO_CHANNELS);
+    const auto sampleRate = prop(props, PW_KEY_AUDIO_RATE);
+    try {
+      if (!channels.empty())
+        device.channels = std::stoul(channels);
+      if (!sampleRate.empty())
+        device.sampleRate = std::stoul(sampleRate);
+    } catch (const std::exception &) {
+      // Some session managers publish nonnumeric metadata; port enumeration
+      // below supplies a reliable channel count fallback.
+    }
+    s.devices.sources.push_back(std::move(device));
+  }
   if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
     auto n = prop(props, PW_KEY_NODE_ID);
     if (!n.empty())
@@ -77,5 +93,12 @@ Devices enumerateDevices() {
   pw_deinit();
   if (!ok)
     throw std::runtime_error("PipeWire enumeration failed or timed out");
+  for (auto &device : s.devices.sources)
+    if (!device.channels)
+      device.channels = std::count_if(
+          s.devices.ports.begin(), s.devices.ports.end(),
+          [&](const AudioPort &port) {
+            return port.node == device.id && port.direction == "out";
+          });
   return s.devices;
 }

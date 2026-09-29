@@ -293,6 +293,12 @@ int main(int argc, char **argv) {
     std::cerr << "GUI event loop stalled while CLI fixture was running\n";
     return 1;
   }
+  auto *deviceCombo = window.findChild<QComboBox *>();
+  if (!deviceCombo || deviceCombo->count() != 1 ||
+      !deviceCombo->currentText().contains("2 ch, 48000 Hz")) {
+    std::cerr << "device selector did not display enumerated format details\n";
+    return 1;
+  }
   std::cout << "upstream editor widgets, selection/reordering, config "
                "preservation, and async UI "
                "tests passed\n";

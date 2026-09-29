@@ -5,6 +5,7 @@
 struct AudioDevice {
   uint32_t id;
   std::string name, description;
+  unsigned channels{}, sampleRate{};
 };
 struct AudioPort {
   uint32_t id, node;

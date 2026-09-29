@@ -458,7 +458,14 @@ void MainWindow::refreshDevices() {
                continue;
              const QString nodeName = columns[1];
              const QString description = columns[2];
-             deviceCombo->addItem(description + "  —  " + nodeName, nodeName);
+             QString label = description + "  —  " + nodeName;
+             if (columns.size() >= 6) {
+               const QString channelCount = columns[4];
+               const QString sampleRate = columns[5];
+               if (channelCount != "unknown" || sampleRate != "unknown")
+                 label += tr("  (%1 ch, %2 Hz)").arg(channelCount, sampleRate);
+             }
+             deviceCombo->addItem(label, nodeName);
              if (columns[3] == "yes")
                deviceCombo->setCurrentIndex(deviceCombo->count() - 1);
            }

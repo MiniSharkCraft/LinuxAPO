@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added physical input channel counts and published sample-rate metadata to `skyapo device list`; the GUI selector displays known values and leaves unavailable rates unknown.
 - Fixed config comment stripping so `#` inside quoted Include paths is preserved; added nested-file regression coverage.
 - Added row focus/selection, Delete removal, and Alt+Up/Alt+Down config reordering to the Linux-hosted upstream filter rows.
 - Added a Linux Include editor with config-relative path validation and a native file picker.

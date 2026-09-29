@@ -179,11 +179,17 @@ int main(int argc, char **argv) {
 #ifdef SKYAPO_HAVE_PIPEWIRE
       auto ds = enumerateDevices();
       if (action == "list") {
-        std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\n";
+        std::cout
+            << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n";
         for (auto &d : ds.sources)
           if (d.name != "skyapo.virtual_mic")
             std::cout << d.id << '\t' << d.name << '\t' << d.description << '\t'
-                      << (d.name == settings::device() ? "yes" : "") << '\n';
+                      << (d.name == settings::device() ? "yes" : "") << '\t'
+                      << (d.channels ? std::to_string(d.channels) : "unknown")
+                      << '\t'
+                      << (d.sampleRate ? std::to_string(d.sampleRate)
+                                       : "unknown")
+                      << '\n';
         return 0;
       }
       if (action == "set" && argc == 4) {

@@ -10,6 +10,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] PipeWire device selection, physical capture links, DSP, virtual source, CLI status.
 - [x] Independent client records `SkyAPO Virtual Mic`; -6 dB numerical regression.
 - [x] Reconnect after virtual node loss; callback allocator audit.
+- [x] Show enumerated source channel count and any published sample-rate metadata in CLI and GUI device selectors; unknown rates remain explicit.
 - [x] Linux portability adaptation generated at build time.
 
 ## 0.2.x — config compatibility and graph routing
