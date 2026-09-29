@@ -74,6 +74,11 @@ void Engine::loadConfig(const std::string &path) {
   const bool newFixedBlock = std::any_of(
       newGraph.begin(), newGraph.end(),
       [](const auto &node) { return node.fixedBlock; });
+  std::vector<std::string> newDescriptions;
+  newDescriptions.reserve(candidate.size());
+  for (const auto &parsed : candidate)
+    newDescriptions.push_back(parsed.directive + " — " + parsed.source.string() +
+                              ":" + std::to_string(parsed.line));
 
   std::vector<FilterInfo *> infos;
   infos.reserve(newGraph.size());
@@ -136,6 +141,7 @@ void Engine::loadConfig(const std::string &path) {
 
   graph.swap(newGraph);
   configuration.swap(newConfiguration);
+  descriptions.swap(newDescriptions);
   fixedBlock = newFixedBlock;
 }
 
@@ -365,7 +371,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                " parameters");
     for (auto *filter : made)
       candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, lineNo});
+                           normalizedPath, lineNo,
+                           StringHelper::toString(command, 65001)});
   }
   if (in.bad())
     throw std::runtime_error("error reading config: " +

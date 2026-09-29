@@ -19,6 +19,9 @@ public:
   unsigned channels() const { return channelCount; }
   unsigned maxFrames() const { return maxFrameCount; }
   bool requiresFixedBlock() const { return fixedBlock; }
+  const std::vector<std::string> &filterDescriptions() const {
+    return descriptions;
+  }
 
 private:
   struct FilterDeleter {
@@ -31,6 +34,7 @@ private:
     std::unique_ptr<IFilter, FilterDeleter> filter;
     std::filesystem::path source;
     unsigned line;
+    std::string directive;
   };
   using FilterList = std::vector<ParsedFilter>;
   struct FilterNode {
@@ -46,6 +50,7 @@ private:
   std::vector<FilterNode> buildGraph(FilterList &candidate);
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
+  std::vector<std::string> descriptions;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;

@@ -36,6 +36,8 @@ build/skyapod --config examples/preamp.txt
 # In another terminal:
 build/skyapo status
 build/skyapo config reload
+build/skyapo filters
+build/skyapo diagnostics
 build/skyapo stop
 wpctl status
 ```
@@ -58,7 +60,7 @@ This checks correlation and measured amplitude, not just graph visibility. An op
 
 Realtime stereo 48 kHz capture, virtual-source consumption, -6 dB processing, reconnect, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware/rates/layouts need validation. Quantum is measured from the graph, not guessed.
 
-The adapter now uses the actual upstream `FilterConfiguration` read/process/write implementation and selected upstream filters, but **not the complete Windows `FilterEngine` or EAPO parser**. Nested `Include:`, capture `Stage:`, transactional hot config reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot currently expose extra channels created by Copy, so that config is rejected with a file/line diagnostic. Upstream GraphicEQ and Convolution/libHybridConv are built when FFTW3f is available; convolution uses the negotiated fixed PipeWire block size and relative impulse-response paths. Loudness correction, plugin hosting, user service installation, and advanced CLI inspection are not implemented. Unsupported active-stage config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
+The adapter now uses the actual upstream `FilterConfiguration` read/process/write implementation and selected upstream filters, but **not the complete Windows `FilterEngine` or EAPO parser**. Nested `Include:`, capture `Stage:`, transactional hot config reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot currently expose extra channels created by Copy, so that config is rejected with a file/line diagnostic. Upstream GraphicEQ and Convolution/libHybridConv are built when FFTW3f is available; convolution uses the negotiated fixed PipeWire block size and relative impulse-response paths. Loudness correction, plugin hosting, and advanced CLI inspection are not implemented. Unsupported active-stage config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
 
 No heap allocation, parsing, files, enumeration, or logging occurs in the processing callback. Allocation counters cover executable C++ and linked/wrapped C calls, not shared PipeWire library internals. Status timing instrumentation is diagnostic, not a scheduling guarantee.
 

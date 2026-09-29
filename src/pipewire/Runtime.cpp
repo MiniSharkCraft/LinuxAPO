@@ -445,8 +445,14 @@ struct Runtime {
       s << quantum.load();
     else
       s << "unknown";
-    s << "\nFilters: " << (e ? e->filterCount() : 0) << "\nConfig: " << config
-      << "\nProcessed blocks: " << b << "\nOverruns: " << overruns.load();
+    s << "\nFilters: " << (e ? e->filterCount() : 0) << "\nFilter chain:";
+    if (!e || e->filterDescriptions().empty())
+      s << "\n  (none)";
+    else
+      for (const auto &filter : e->filterDescriptions())
+        s << "\n  " << filter;
+    s << "\nConfig: " << config << "\nProcessed blocks: " << b
+      << "\nOverruns: " << overruns.load();
     s << "\nActive capture links: "
       << std::count(linked.begin(), linked.begin() + channels, true) << '/'
       << channels;

@@ -100,6 +100,27 @@ int main(int argc, char **argv) {
       std::cout << settings::queryStatus();
       return 0;
     }
+    if (cmd == "diagnostics" && argc == 2) {
+      std::cout << "SkyAPO version: " << SKYAPO_VERSION
+                << "\nEqualizer APO upstream: " << SKYAPO_UPSTREAM_REVISION
+                << '\n'
+                << settings::queryStatus();
+      return 0;
+    }
+    if (cmd == "filters" && argc == 2) {
+      const auto status = settings::queryStatus();
+      if (status.find("Daemon: not reachable") != std::string::npos)
+        throw std::runtime_error("daemon is not reachable; active filters unavailable");
+      const auto begin = status.find("Filter chain:");
+      const auto end = status.find("\nConfig:", begin);
+      if (begin == std::string::npos)
+        throw std::runtime_error("daemon status does not contain filter data");
+      std::cout << status.substr(begin, end == std::string::npos
+                                         ? std::string::npos
+                                         : end - begin)
+                << '\n';
+      return 0;
+    }
     if (cmd == "start" && argc == 2) {
       startDaemon();
       return 0;

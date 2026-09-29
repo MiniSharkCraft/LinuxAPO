@@ -18,6 +18,13 @@ if(SKYAPO_SANITIZERS)
 endif()
 
 set(EAPO ${CMAKE_CURRENT_SOURCE_DIR}/upstream/equalizerapo)
+execute_process(COMMAND git -C ${EAPO} rev-parse HEAD
+  OUTPUT_VARIABLE SKYAPO_UPSTREAM_REVISION
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE SKYAPO_UPSTREAM_GIT_RESULT)
+if(NOT SKYAPO_UPSTREAM_GIT_RESULT EQUAL 0)
+  set(SKYAPO_UPSTREAM_REVISION unknown)
+endif()
 include(cmake/PortableEapo.cmake)
 add_library(skyapo-eapo-dsp STATIC
   ${EAPO_SOURCES}
@@ -48,6 +55,9 @@ add_executable(skyapo-render src/render/main.cpp)
 target_link_libraries(skyapo-render PRIVATE skyapo-core PkgConfig::SNDFILE)
 
 add_executable(skyapo src/cli/main.cpp)
+target_compile_definitions(skyapo PRIVATE
+  SKYAPO_VERSION="${PROJECT_VERSION}"
+  SKYAPO_UPSTREAM_REVISION="${SKYAPO_UPSTREAM_REVISION}")
 target_link_libraries(skyapo PRIVATE skyapo-core)
 if(PIPEWIRE_FOUND)
   add_library(skyapo-pipewire STATIC src/pipewire/DeviceManager.cpp src/pipewire/Runtime.cpp src/platform/RealtimeAudit.cpp)

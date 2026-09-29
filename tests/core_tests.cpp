@@ -19,6 +19,12 @@ int main() {
     return 1;
   Engine e(48000, 2, 128);
   e.loadConfig(path);
+  if (e.filterDescriptions().size() != 1 ||
+      e.filterDescriptions()[0].find("Preamp") == std::string::npos ||
+      e.filterDescriptions()[0].find(":1") == std::string::npos) {
+    std::cerr << "active filter source-line description mismatch\n";
+    return 1;
+  }
   float data[8] = {1, 1, .5f, .5f, -1, -1, .25f, .25f};
   e.process(data, 4);
   const float gain = std::pow(10.0f, -6.0f / 20.0f);
