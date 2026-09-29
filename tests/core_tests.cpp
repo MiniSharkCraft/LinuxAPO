@@ -85,6 +85,49 @@ int main() {
       return 1;
     }
 
+  if (!write(path, "Channel: L\nPreamp: -6 dB\n"))
+    return 1;
+  Engine selected(48000, 2, 128, {L"L", L"R"});
+  selected.loadConfig(path);
+  float selectedSamples[2] = {1.0f, 10.0f};
+  selected.process(selectedSamples, 1);
+  if (std::abs(selectedSamples[0] - gain) > 1e-5f ||
+      std::abs(selectedSamples[1] - 10.0f) > 1e-5f) {
+    std::cerr << "upstream Channel selection did not limit Preamp to L\n";
+    return 1;
+  }
+  if (!write(path, "Copy: L=R R=L\n"))
+    return 1;
+  Engine copied(48000, 2, 128, {L"L", L"R"});
+  copied.loadConfig(path);
+  float copiedSamples[2] = {1.0f, 10.0f};
+  copied.process(copiedSamples, 1);
+  if (std::abs(copiedSamples[0] - 10.0f) > 1e-5f ||
+      std::abs(copiedSamples[1] - 1.0f) > 1e-5f) {
+    std::cerr << "upstream Copy channel swap mismatch\n";
+    return 1;
+  }
+  if (!write(path, "Copy: L=unknown\n"))
+    return 1;
+  bool badCopyRejected = false;
+  try {
+    copied.loadConfig(path);
+  } catch (const std::exception &ex) {
+    badCopyRejected = std::string(ex.what()).find("unknown source channel") !=
+                      std::string::npos;
+  }
+  if (!badCopyRejected) {
+    std::cerr << "Copy with an unknown source channel was not rejected\n";
+    return 1;
+  }
+  float retainedCopy[2] = {1.0f, 10.0f};
+  copied.process(retainedCopy, 1);
+  if (std::abs(retainedCopy[0] - 10.0f) > 1e-5f ||
+      std::abs(retainedCopy[1] - 1.0f) > 1e-5f) {
+    std::cerr << "failed Copy reload replaced the last valid graph\n";
+    return 1;
+  }
+
   char dirTemplate[] = "/tmp/skyapo-include-XXXXXX";
   char *dirName = mkdtemp(dirTemplate);
   if (!dirName)

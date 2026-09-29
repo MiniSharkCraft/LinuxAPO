@@ -14,12 +14,13 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.2.x — config compatibility and graph routing
 
-- [ ] Implement actual upstream `ChannelFilter` and `CopyFilter` behavior with ordered channel routing and fixed physical output mapping.
+- [x] Implement actual upstream `ChannelFilter` and `CopyFilter` behavior with ordered channel routing and fixed physical output mapping.
 - [x] Implement relative/nested `Include`, cycle/depth detection, source/line diagnostics, and last-valid graph preservation during parse failure.
 - [x] Add inotify config hot reload with debouncing, control-thread graph creation, atomic pointer swap and deferred retirement after callback quiescence.
 - [ ] Expand parser to preserve comments/quoting, validate numeric ranges, and return structured diagnostics.
-- [ ] Add exhaustive mono/stereo directive tests and offline WAV tests for routing.
+- [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
 - Acceptance: Include trees, Channel selection, Copy remapping and error paths have deterministic offline expected-sample tests; realtime allocation test still passes; -6 dB capture probe still passes.
+- [x] Core and allocation tests exercise actual upstream Channel/Copy implementations; new Copy output channels are rejected with file/line because the current virtual source layout is fixed.
 - Acceptance: hot reload also passes a live valid→valid and valid→invalid daemon check without changing the active audio chain on failure.
 - [x] Live acceptance: an independent PipeWire client measured −3 dB after valid reload, then still measured −3 dB after an invalid replacement; status remained streaming and showed the parse error.
 

@@ -6,6 +6,10 @@
 - Config loads remain transactional: a parse or include failure does not replace the active filter list.
 - Added debounced inotify reload; candidate graphs are built on the control loop, atomically activated, and old graphs are reclaimed only after audio callbacks leave them.
 - Added nested-include, sample-output, error-location, cycle, and last-valid-config tests.
+- Reused upstream ChannelFilter/CopyFilter and factories with Linux channel-name compatibility and preallocated channel routing; unknown Copy sources and output layouts outside the fixed PipeWire ports fail with source/line errors.
+- Expanded channel-selection and Copy-swap sample tests plus variable-block allocation tests.
+- Revalidated the unchanged realtime -6 dB path after channel-routing refactor: 192000 captured frames, correlation 1, ratio 0.501187, zero audited callback allocations/deallocations.
+- Repeated the real PipeWire recording with both normal and ASan/UBSan daemons after routing changes; both captured 192000 frames at the expected -6 dB.
 - Added the staged 0.2.0 through 1.0.0 roadmap and acceptance criteria.
 
 ## 0.1.0 — realtime prototype baseline

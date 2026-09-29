@@ -12,8 +12,8 @@ Upstream is the official SourceForge repository `https://git.code.sf.net/p/equal
 
 | Classification | Inspected components | Findings |
 | --- | --- | --- |
-| Portable unchanged in principle | `IFilter.h`, `IFilterFactory.h`, Preamp/BiQuad/IIR/Delay implementations | The virtual filter API and DSP equations are independent of Windows. `FilterConfiguration`'s processing loop is portable, though this target currently uses its own equivalent adapter loop. |
-| Small platform fixes | `BiQuad.h`, aligned allocation | MSVC `__forceinline` / `__declspec(align)` and AERT allocator need POSIX/C++ equivalents. |
+| Portable unchanged in principle | `IFilter.h`, `IFilterFactory.h`, Preamp/BiQuad/IIR/Delay/Channel/Copy filter implementations | The virtual filter API, DSP equations, channel selection and copy assignments are independent of Windows. `FilterConfiguration`'s processing loop is portable in principle, though this target currently uses a compatible adapter loop. |
+| Small platform fixes | `BiQuad.h`, aligned allocation, `ChannelHelper` API | MSVC `__forceinline` / `__declspec(align)` and AERT allocator need POSIX/C++ equivalents; Windows speaker-mask lookup for the used Channel/Copy operations is supplied by a Linux implementation. |
 | Platform abstraction required | `FilterEngine`, `MemoryHelper`, `ChannelHelper`, `LogHelper`, `StringHelper`, config path and watcher | Registry, Win32 I/O/sync, Windows codepages and speaker masks are used in implementations. |
 | Windows integration replaced | `EqualizerAPO/`, `DeviceSelector/`, APO setup and registration | COM classes, APO installation, Windows audio engine and registry setup are outside the PipeWire backend. |
 | Plugin host replacement | `VSTPluginFilter*`, `VSTPluginInstance/Library` | Existing implementation loads the Windows VST ABI and includes Windows file/memory-mapping assumptions; editor embeds Windows plugin GUI windows. Reuse chain concept only; native LV2/CLAP/VST hosts are not implemented yet. |
@@ -22,7 +22,7 @@ Upstream is the official SourceForge repository `https://git.code.sf.net/p/equal
 
 ## Current Linux adapter scope
 
-The current build compiles actual upstream `PreampFilter`, `BiQuad`, `BiQuadFilter`, `IIRFilter`, `DelayFilter`, and their config factories. `Engine` is a small Linux adapter that initializes and calls those actual `IFilter` implementations using preallocated planar buffers. It is not the Windows `FilterEngine` class and does not claim full EAPO parser compatibility. At present it accepts `Preamp:`, `Filter:` (BiQuad and IIR forms), and `Delay:` and rejects everything else with a file and line number.
+The current build compiles actual upstream `PreampFilter`, `BiQuad`, `BiQuadFilter`, `IIRFilter`, `DelayFilter`, `ChannelFilter`, `CopyFilter`, and their config factories. `Engine` is a Linux adapter that initializes and calls those actual `IFilter` implementations using preallocated channel buses and routing metadata. It is not the Windows `FilterEngine` class and does not claim full EAPO parser compatibility. It accepts `Preamp:`, `Filter:` (BiQuad and IIR forms), `Delay:`, `Channel:`, `Copy:` and relative/nested `Include:`. New Copy output channels are rejected because PipeWire ports are fixed at startup.
 
 Memory uses `posix_memalign`; WAV I/O uses libsndfile. Native PipeWire enumeration, stable node-name selection, a capture-linked DSP filter/source, daemon supervision and status IPC are now implemented. The physical input passes through this existing adapter before reaching `SkyAPO Virtual Mic`. See `REALTIME.md` for hardware proof and audit boundaries. The complete upstream FilterEngine/parser port remains separate work; muParserX availability must be resolved before that can build.
 

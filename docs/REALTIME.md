@@ -16,6 +16,8 @@ An earlier implementation was visible but failed WirePlumber format negotiation;
 
 The debounced inotify config watcher was subsequently tested live. The daemon loaded `tests/data/reload_minus6.txt`, then a replacement with `Preamp: -3 dB`; status reset per-chain meters and reported ratio 0.707946. An independent client then captured 192000 frames from the virtual source: correlation 1 and ratio 0.707946. Replacing the config with `UnsupportedDirective: true` produced a source/line reload error; status stayed streaming and an independent recording still measured ratio 0.707946. Callback allocation/deallocation counts remained zero. This verifies valid reload, bad reload rollback and real consumption of the retained graph.
 
+After adding Channel/Copy routing, the normal PipeWire regression was repeated on the same physical device, and repeated with the ASan/UBSan daemon and recorder using `ASAN_OPTIONS=detect_leaks=0`. Both recordings independently consumed 192000 virtual-source frames with correlation 1 and RMS ratio 0.501187 (−6 dB). Runtime status reported zero audited callback allocations/deallocations and zero overruns. The sanitizer run shut down without memory-access diagnostics; disabling leak checking is needed only for the independently reproduced PipeWire context leak described below.
+
 ## Commands and results
 
 ```sh
@@ -38,9 +40,9 @@ build/skyapo-realtime-probe alsa_input.pci-0000_00_1f.3.analog-stereo build/fina
 build/skyapo-realtime-probe alsa_input.pci-0000_00_1f.3.analog-stereo build/reload-proof -3
 ```
 
-Both builds succeeded; both CTest suites passed **3/3** (core, realtime allocation safety, offline WAV). Normal final CTest: 1.15 s; sanitizer CTest: 2.42 s. Core tests include actual upstream Preamp/BiQuad/IIR/Delay, errors and varying blocks. Unsupported commands remain errors, not silently skipped.
+Both builds succeeded; both CTest suites passed **3/3** (core, realtime allocation safety, offline WAV). After adding Channel/Copy, the latest normal CTest was 1.25 s and ASan/UBSan CTest 3.48 s. Core tests include actual upstream Preamp/BiQuad/IIR/Delay/Channel/Copy, nested Include, errors and varying blocks. Unsupported commands remain errors, not silently skipped.
 
-Realtime allocation tests first verify allocator hooks detect deliberate allocations, then process 1000 variable-size blocks each in mono and stereo, with Preamp/BiQuad/Delay/IIR: zero callback allocations/deallocations. Live status likewise reported **0 allocations / 0 deallocations**, and zero processing overruns in sampled normal/instrumented runs. Counters cover executable C++ and wrapped C allocation paths (including linked EAPO code), **not shared-library C allocator internals**. Buffers/pointer arrays/DSP states are initialized outside the callback. Process timing uses lock-free atomics and monotonic timestamps; logging/status serialization runs in the main loop.
+Realtime allocation tests first verify allocator hooks detect deliberate allocations, then process 1000 variable-size blocks each in mono and stereo, plus 1000 blocks through Channel/Copy/Preamp/BiQuad/Delay routing: zero callback allocations/deallocations. Live status likewise reported **0 allocations / 0 deallocations**, and zero processing overruns in sampled normal/instrumented runs. Counters cover executable C++ and wrapped C allocation paths (including linked EAPO code), **not shared-library C allocator internals**. Buffers/pointer arrays/DSP states are initialized outside the callback. Process timing uses lock-free atomics and monotonic timestamps; logging/status serialization runs in the main loop.
 
 Singleton startup was tested: a second daemon exits with an explicit lock error. Destroying only the SkyAPO node with `pw-cli destroy 170` caused reconnect after two seconds and recreated source node 174 with physical links. SIGINT teardown removed the source/socket; subsequent status explicitly reported `Daemon: not reachable`. The physical device/default source was not removed or rerouted. Full PipeWire-server restart and physical device unplug were not exercised.
 
@@ -53,17 +55,19 @@ The realtime daemon, live graph reload, and recording test were subsequently run
 ## Implementation file changes in this milestone
 
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.
-- `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; relative/nested Include expansion; transactional config construction; unchanged actual upstream DSP math.
+- `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; relative/nested Include expansion; ordered upstream Channel/Copy channel routing with preallocated buses; transactional config construction; unchanged actual upstream DSP math.
+- `src/platform/linux/ChannelHelper.cpp`: Linux channel-name implementation backing the upstream ChannelFilter/CopyFilter API.
+- `src/platform/linux/ChannelHelper.cpp`: Linux implementation of the upstream ChannelHelper API with EAPO aliases and Windows mask values for the portable operations.
 - `src/pipewire/DeviceManager.h`, `src/pipewire/DeviceManager.cpp`: physical source/port registry enumeration.
 - `src/pipewire/Runtime.h`, `src/pipewire/Runtime.cpp`: native capture links, source DSP ports, negotiation, buffers, rate rebuild, recovery, inotify hot reload, safe graph lifetime swap, telemetry and status socket.
 - `src/platform/Settings.h`, `src/platform/PlatformChannels.h`, `src/platform/RealtimeAudit.h`, `src/platform/RealtimeAudit.cpp`: XDG selection/config/IPC/singleton, SPA-to-EAPO names, allocator audit.
 - `src/daemon/main.cpp`, `src/cli/main.cpp`: real daemon lifecycle and device/status commands.
 - `tests/realtime_probe.cpp`, `tests/realtime_safety_tests.cpp`, `tests/pipewire_lifetime.cpp`, `tests/data/reload_*.txt`: recording with selectable expected gain, realtime allocation, dependency lifetime and reload fixtures.
 - `README.md`, `ROADMAP.md`, `CHANGELOG.md`, `docs/PORTING.md`, `docs/REALTIME.md`, `docs/CONFIG.md`, `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/PLUGINS.md`, `docs/UI.md`, `docs/TROUBLESHOOTING.md`: staged product plan and current usage/maintenance/compatibility notes.
-- `upstream/equalizerapo/filters/BiQuad.h`: previous local modification removed; upstream checkout now clean.
+- `upstream/equalizerapo/filters/BiQuad.h`: previous local modification removed; upstream checkout now clean. CMake also compiles the actual upstream ChannelFilter and CopyFilter implementations.
 
 The initial implementation was committed as `a7b187f`; the config/reload milestone is a subsequent commit. The upstream Git directory is absorbed into `.git/modules/upstream/equalizerapo`; only a mode-160000 gitlink is tracked. See `GIT-STATUS.md` for current root status.
 
 ## Remaining limitations / next task
 
-The end-to-end hardware milestone and transactional hot reload are proven, with no missing audio environment blocker. Full upstream FilterEngine/FilterConfiguration integration remains unimplemented, as do Channel/Copy and advanced filters. Other hardware/layouts/rates and server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: port upstream channel routing and Copy semantics with offline expected-sample tests.
+The end-to-end hardware milestone and transactional hot reload are proven, with no missing audio environment blocker. Channel and Copy now pass offline expected-sample and callback-allocation tests, but their output-channel expansion is rejected because the PipeWire virtual node has a fixed layout. Full upstream FilterEngine/FilterConfiguration integration and advanced filters remain unimplemented. Other hardware/layouts/rates and server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: integrate GraphicEQ/convolution dependencies or port upstream configuration orchestration.

@@ -20,6 +20,7 @@ include(cmake/PortableEapo.cmake)
 add_library(skyapo-eapo-dsp STATIC
   ${EAPO_SOURCES}
   src/platform/linux/compat.cpp
+  src/platform/linux/ChannelHelper.cpp
   src/platform/linux/MemoryHelper.cpp
 )
 target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO})

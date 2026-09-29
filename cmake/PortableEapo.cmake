@@ -1,9 +1,10 @@
 # Upstream remains pristine. Only selected DSP translation units and their
 # relative headers are copied into the build directory, preserving notices.
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
-file(MAKE_DIRECTORY ${EAPO_PORT}/filters)
+file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
 set(EAPO_FILTERS PreampFilter PreampFilterFactory BiQuad BiQuadFilter
-    BiQuadFilterFactory IIRFilter IIRFilterFactory DelayFilter DelayFilterFactory)
+    BiQuadFilterFactory IIRFilter IIRFilterFactory DelayFilter DelayFilterFactory
+    ChannelFilter ChannelFilterFactory CopyFilter CopyFilterFactory)
 set(EAPO_SOURCES)
 foreach(component IN LISTS EAPO_FILTERS)
   foreach(ext cpp h)

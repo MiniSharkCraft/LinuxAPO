@@ -51,6 +51,31 @@ int main() {
       }
     }
   }
+  {
+    char routePath[] = "/tmp/skyapo-route-test-XXXXXX";
+    int routeFd = mkstemp(routePath);
+    if (routeFd < 0)
+      return 1;
+    close(routeFd);
+    {
+      std::ofstream f(routePath);
+      f << "Channel: L\nCopy: L=R R=L\nPreamp: -6 dB\n"
+           "Filter: ON PK Fc 1000 Hz Gain 2 dB Q 1\nDelay: 3 Samples\n";
+    }
+    Engine route(48000, 2, 8192, {L"L", L"R"});
+    route.loadConfig(routePath);
+    std::vector<float> audio(2 * 8192);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      unsigned frames = (iteration * 43) % 8192 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::cos(float(i));
+      {
+        realtime::Scope scope;
+        route.process(audio.data(), frames);
+      }
+    }
+    unlink(routePath);
+  }
   unlink(path);
   if (realtime::allocations.load() || realtime::deallocations.load()) {
     std::cerr << "DSP process allocated/freed in realtime scope\n";
@@ -59,7 +84,7 @@ int main() {
   if (eapoChannel("FC") != L"C" || eapoChannel("LFE") != L"LFE" ||
       eapoChannel("SL") != L"SL")
     return 1;
-  std::cout << "Allocation hooks verified; 2000 mono/stereo DSP blocks without "
-               "heap allocation or freeing\n";
+  std::cout << "Allocation hooks verified; 2000 mono/stereo and 1000 channel-"
+               "routing DSP blocks without heap allocation/freeing\n";
   return 0;
 }
