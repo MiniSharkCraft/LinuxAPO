@@ -92,7 +92,27 @@ if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
   if(Qt6Widgets_FOUND)
     set(SKYAPO_EDITOR ${EAPO}/Editor)
+    # The upstream row includes "FilterTable.h" relative to its source tree.
+    # Build a copy beside the row with a narrow Linux adapter instead of
+    # pulling the Windows APO/Registry-bound full FilterTable into this target.
+    file(MAKE_DIRECTORY ${EAPO_PORT}/Editor)
+    configure_file(${SKYAPO_EDITOR}/FilterTableRow.cpp
+      ${EAPO_PORT}/Editor/FilterTableRow.cpp COPYONLY)
+    configure_file(${SKYAPO_EDITOR}/FilterTableRow.h
+      ${EAPO_PORT}/Editor/FilterTableRow.h COPYONLY)
+    configure_file(${SKYAPO_EDITOR}/FilterTableRow.ui
+      ${EAPO_PORT}/Editor/FilterTableRow.ui COPYONLY)
+    configure_file(src/ui/upstream/FilterTable.h
+      ${EAPO_PORT}/Editor/FilterTable.h COPYONLY)
     add_library(skyapo-eapo-editor STATIC
+      ${EAPO_PORT}/Editor/FilterTableRow.cpp
+      ${EAPO_PORT}/Editor/FilterTableRow.h
+      ${EAPO_PORT}/Editor/FilterTableRow.ui
+      ${SKYAPO_EDITOR}/Editor.qrc
+      ${SKYAPO_EDITOR}/widgets/CompactToolBar.cpp
+      ${SKYAPO_EDITOR}/widgets/CompactToolBar.h
+      ${SKYAPO_EDITOR}/widgets/EscapableLineEdit.cpp
+      ${SKYAPO_EDITOR}/widgets/EscapableLineEdit.h
       ${SKYAPO_EDITOR}/IFilterGUI.cpp
       ${SKYAPO_EDITOR}/IFilterGUI.h
       ${SKYAPO_EDITOR}/IFilterGUIFactory.cpp
@@ -122,14 +142,15 @@ if(SKYAPO_BUILD_UI)
       ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.cpp
       ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.h
     )
-    set_target_properties(skyapo-eapo-editor PROPERTIES AUTOMOC ON AUTOUIC ON)
+    set_target_properties(skyapo-eapo-editor PROPERTIES
+      AUTOMOC ON AUTOUIC ON AUTORCC ON)
     set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS
-      "${SKYAPO_EDITOR}/guis")
+      "${EAPO_PORT}/Editor;${SKYAPO_EDITOR};${SKYAPO_EDITOR}/guis;${SKYAPO_EDITOR}/widgets")
     target_include_directories(skyapo-eapo-editor BEFORE PUBLIC ${EAPO_PORT} ${EAPO})
     # The upstream editor's legacy stable.h supplied these Qt declarations
     # globally; provide only the declarations needed by the selected sources.
     target_precompile_headers(skyapo-eapo-editor PRIVATE
-      <QString> <QStringList> <QMetaType>)
+      <QString> <QStringList> <QMetaType> <QDateTime>)
     target_compile_definitions(skyapo-eapo-editor PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-eapo-editor PUBLIC skyapo-core Qt6::Widgets)
 

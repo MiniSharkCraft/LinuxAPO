@@ -71,6 +71,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Build the first Qt 6 daemon-client editor using actual upstream Preamp/BiQuad/Delay/Stage widgets and factories, with byte-preserving config editing and widget-serialization tests.
 - [ ] Port the upstream FilterTable/model and additional reusable editor/analysis components.
 - [x] Run GUI-side CLI control requests asynchronously and coalesce periodic status/device queries.
+- [x] Reuse the actual upstream `FilterTableRow` widget/resources through a narrow Linux adapter; full upstream table model/selection/drag behavior remains open.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 

@@ -1,17 +1,19 @@
 #pragma once
 
 #include "ConfigFile.h"
+#include "Editor/FilterTable.h"
 #include <QMainWindow>
 #include <QString>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QComboBox;
 class QCloseEvent;
 class QLabel;
 class QLineEdit;
+class QMenu;
 class QScrollArea;
-class QVBoxLayout;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -32,6 +34,8 @@ private:
   void refreshStatus();
   void refreshDevices();
   void selectDevice(int index);
+  void populateAddPopupMenu(QMenu *menu);
+  void syncRowsToDocument();
   using CliCompletion = std::function<void(int, QByteArray, QByteArray)>;
   void runCli(const QStringList &arguments, CliCompletion completion);
   QString defaultConfigPath() const;
@@ -44,7 +48,8 @@ private:
   QLineEdit *pathEdit{};
   QLabel *statusLabel{};
   QComboBox *deviceCombo{};
-  QVBoxLayout *rowsLayout{};
+  FilterTable *rowTable{};
+  std::vector<std::shared_ptr<FilterTable::Item>> rowItems;
   bool statusRequestPending{};
   bool deviceRequestPending{};
 };

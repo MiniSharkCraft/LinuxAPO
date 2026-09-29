@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "Editor/FilterTableRow.h"
 #include "Editor/FilterTemplate.h"
 #include "Editor/IFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
@@ -13,7 +14,6 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -26,7 +26,6 @@
 #include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 #include <memory>
 #include <utility>
@@ -77,12 +76,22 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
 
   auto *scroll = new QScrollArea(root);
   scroll->setWidgetResizable(true);
-  auto *rows = new QWidget(scroll);
-  rowsLayout = new QVBoxLayout(rows);
-  rowsLayout->setContentsMargins(8, 8, 8, 8);
-  rowsLayout->setSpacing(5);
-  rowsLayout->addStretch(1);
-  scroll->setWidget(rows);
+  rowTable = new FilterTable(scroll);
+  rowTable->setHandlers(
+      [this](QMenu *menu) { populateAddPopupMenu(menu); },
+      [this](const QString &line, FilterTable::Item *before) {
+        document.insert(before ? before->index : document.lineCount(), line);
+        markModified();
+      },
+      [this](FilterTable::Item *item) {
+        if (item && item->index >= 0 && item->index < document.lineCount()) {
+          document.remove(item->index);
+          markModified();
+        }
+      },
+      [this] { rebuildRows(); }, [this] { syncRowsToDocument(); });
+  rowTable->createAddPopupMenu();
+  scroll->setWidget(rowTable);
   outer->addWidget(scroll, 1);
   statusLabel = new QLabel(tr("Checking daemon…"), root);
   statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -107,32 +116,10 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   connect(reloadButton, &QPushButton::clicked, this, &MainWindow::reloadConfig);
   connect(addButton, &QPushButton::clicked, this, [this, addButton] {
     QMenu menu(addButton);
-    PreampFilterGUIFactory preamp;
-    BiQuadFilterGUIFactory biquad;
-    DelayFilterGUIFactory delay;
-    StageFilterGUIFactory stage;
-    for (const auto &filter : preamp.createFilterTemplates()) {
-      auto *action = menu.addAction(filter.getName());
-      action->setData(filter.getLine());
-    }
-    auto *section = menu.addSection(tr("Parametric filters"));
-    Q_UNUSED(section);
-    for (const auto &filter : biquad.createFilterTemplates()) {
-      auto *action = menu.addAction(filter.getName());
-      action->setData(filter.getLine());
-    }
-    menu.addSeparator();
-    for (const auto &filter : delay.createFilterTemplates()) {
-      auto *action = menu.addAction(filter.getName());
-      action->setData(filter.getLine());
-    }
-    for (const auto &filter : stage.createFilterTemplates()) {
-      auto *action = menu.addAction(filter.getName());
-      action->setData(filter.getLine());
-    }
+    populateAddPopupMenu(&menu);
     if (auto *action =
             menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height()))))
-      addFilter(action->data().toString());
+      addFilter(action->data().value<FilterTemplate>().getLine());
   });
   connect(refreshButton, &QPushButton::clicked, this,
           &MainWindow::refreshDevices);
@@ -253,12 +240,8 @@ void MainWindow::openConfig(const QString &path) {
 }
 
 void MainWindow::rebuildRows() {
-  while (rowsLayout->count() > 1) {
-    auto *item = rowsLayout->takeAt(0);
-    if (item->widget())
-      item->widget()->deleteLater();
-    delete item;
-  }
+  rowTable->clearRows();
+  rowItems.clear();
 
   static PreampFilterGUIFactory preampFactory;
   static BiQuadFilterGUIFactory biquadFactory;
@@ -266,13 +249,9 @@ void MainWindow::rebuildRows() {
   static StageFilterGUIFactory stageFactory;
   for (qsizetype index = 0; index < document.lineCount(); ++index) {
     const QString raw = document.line(index).toQString();
-    auto *frame = new QFrame(this);
-    frame->setFrameShape(QFrame::StyledPanel);
-    auto *layout = new QHBoxLayout(frame);
-    layout->setContentsMargins(6, 4, 6, 4);
-    auto *number = new QLabel(QString::number(index + 1), frame);
-    number->setMinimumWidth(32);
-    layout->addWidget(number);
+    auto item = std::make_shared<FilterTable::Item>();
+    item->text = raw;
+    item->index = static_cast<int>(index);
 
     IFilterGUI *editor = nullptr;
     const qsizetype colon = raw.indexOf(':');
@@ -297,44 +276,64 @@ void MainWindow::rebuildRows() {
       }
     }
 
+    item->gui = editor;
+    auto *row = new FilterTableRow(rowTable, static_cast<int>(index + 1),
+                                   item.get(), editor);
+    rowTable->addRow(row);
     if (editor) {
-      layout->addWidget(editor, 1);
       connect(
-          editor, &IFilterGUI::updateModel, this, [this, editor, index, raw] {
+          editor, &IFilterGUI::updateModel, this, [this, editor, item, index] {
             QString command, parameters;
             editor->store(command, parameters);
-            const qsizetype colon = raw.indexOf(':');
+            const QString original = document.line(index).toQString();
+            const qsizetype colon = original.indexOf(':');
             const QString key =
-                colon >= 0 ? raw.left(colon + 1) : command + ':';
+                colon >= 0 ? original.left(colon + 1) : command + ':';
             const QString afterColon =
-                colon >= 0 ? raw.mid(colon + 1) : QString{};
+                colon >= 0 ? original.mid(colon + 1) : QString{};
             qsizetype spacing = 0;
             while (spacing < afterColon.size() && afterColon[spacing].isSpace())
               ++spacing;
-            document.replace(index,
-                             key + afterColon.left(spacing) + parameters);
+            const QString updated = key + afterColon.left(spacing) + parameters;
+            document.replace(index, updated);
+            item->text = updated;
             markModified();
           });
-    } else {
-      auto *rawEditor = new QLineEdit(raw, frame);
-      layout->addWidget(rawEditor, 1);
-      connect(rawEditor, &QLineEdit::textEdited, this,
-              [this, index](const QString &text) {
-                document.replace(index, text);
-                markModified();
-              });
     }
 
-    auto *remove = new QToolButton(frame);
-    remove->setText(QStringLiteral("×"));
-    remove->setToolTip(tr("Remove this line"));
-    layout->addWidget(remove);
-    connect(remove, &QToolButton::clicked, this, [this, index] {
-      document.remove(index);
+    connect(row, &QObject::destroyed, this, [item] { Q_UNUSED(item); });
+    rowItems.push_back(std::move(item));
+  }
+}
+
+void MainWindow::populateAddPopupMenu(QMenu *menu) {
+  PreampFilterGUIFactory preamp;
+  BiQuadFilterGUIFactory biquad;
+  DelayFilterGUIFactory delay;
+  StageFilterGUIFactory stage;
+  const auto append = [menu](const QList<FilterTemplate> &templates) {
+    for (const auto &filter : templates) {
+      auto *action = menu->addAction(filter.getName());
+      action->setData(QVariant::fromValue(filter));
+    }
+  };
+  append(preamp.createFilterTemplates());
+  menu->addSection(tr("Parametric filters"));
+  append(biquad.createFilterTemplates());
+  menu->addSeparator();
+  append(delay.createFilterTemplates());
+  append(stage.createFilterTemplates());
+}
+
+void MainWindow::syncRowsToDocument() {
+  const qsizetype common =
+      std::min<qsizetype>(rowItems.size(), document.lineCount());
+  for (qsizetype index = 0; index < common; ++index) {
+    const auto &item = rowItems[static_cast<size_t>(index)];
+    if (document.line(index).toQString() != item->text) {
+      document.replace(index, item->text);
       markModified();
-      rebuildRows();
-    });
-    rowsLayout->insertWidget(rowsLayout->count() - 1, frame);
+    }
   }
 }
 

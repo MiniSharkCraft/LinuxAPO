@@ -1,6 +1,8 @@
 #include "ConfigFile.h"
 #include "MainWindow.h"
 
+#include "Editor/FilterTableRow.h"
+#include "Editor/FilterTemplate.h"
 #include "Editor/guis/BiQuadFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
 #include "Editor/guis/DelayFilterGUI.h"
@@ -180,6 +182,23 @@ int main(int argc, char **argv) {
   QElapsedTimer construction;
   construction.start();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
+  if (window.findChildren<FilterTableRow *>().size() != 1) {
+    std::cerr << "upstream FilterTableRow was not used by the Linux editor\n";
+    return 1;
+  }
+  auto *rowMenu = window.findChild<QMenu *>("upstreamFilterAddMenu");
+  if (!rowMenu) {
+    std::cerr << "Linux FilterTable row adapter was not created\n";
+    return 1;
+  }
+  const auto addActions = rowMenu->actions();
+  if (addActions.isEmpty() ||
+      !addActions.first()->data().canConvert<FilterTemplate>() ||
+      addActions.first()->data().value<FilterTemplate>().getLine() !=
+          "Preamp: 0 dB") {
+    std::cerr << "upstream row add-menu did not preserve filter templates\n";
+    return 1;
+  }
   if (construction.elapsed() >= 1000) {
     std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
     return 1;
