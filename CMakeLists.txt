@@ -140,12 +140,16 @@ if(SKYAPO_BUILD_UI)
     target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-ui PRIVATE skyapo-eapo-editor)
 
-    add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/ConfigFile.cpp)
+    add_executable(skyapo-ui-test-cli tests/ui_cli_stub.cpp)
+    add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/MainWindow.cpp
+      src/ui/MainWindow.h src/ui/ConfigFile.cpp)
+    set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui-tests PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-ui-tests PRIVATE skyapo-eapo-editor)
-    add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests)
+    add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests
+      $<TARGET_FILE:skyapo-ui-test-cli>)
     set_tests_properties(skyapo-ui-editor PROPERTIES
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

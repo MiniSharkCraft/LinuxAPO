@@ -1,4 +1,5 @@
 #include "ConfigFile.h"
+#include "MainWindow.h"
 
 #include "Editor/guis/BiQuadFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
@@ -12,6 +13,11 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QFile>
+#include <QTemporaryDir>
+#include <QTimer>
 #include <iostream>
 
 int main(int argc, char **argv) {
@@ -152,6 +158,45 @@ int main(int argc, char **argv) {
     std::cerr << "upstream Stage editor failed to serialize selections\n";
     return 1;
   }
-  std::cout << "upstream editor widget and config preservation tests passed\n";
+
+  if (argc != 2) {
+    std::cerr << "UI integration test needs the delayed CLI fixture path\n";
+    return 1;
+  }
+  QTemporaryDir temporary;
+  if (!temporary.isValid()) {
+    std::cerr << "could not create temporary UI test directory\n";
+    return 1;
+  }
+  const QString configPath = temporary.filePath("config.txt");
+  QFile config(configPath);
+  if (!config.open(QIODevice::WriteOnly) ||
+      config.write("Preamp: 0 dB\n") < 0) {
+    std::cerr << "could not create temporary UI config\n";
+    return 1;
+  }
+  config.close();
+
+  QElapsedTimer construction;
+  construction.start();
+  MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
+  if (construction.elapsed() >= 1000) {
+    std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
+    return 1;
+  }
+  unsigned heartbeat = 0;
+  QTimer pulse;
+  pulse.setInterval(10);
+  QObject::connect(&pulse, &QTimer::timeout, [&heartbeat] { ++heartbeat; });
+  pulse.start();
+  QEventLoop loop;
+  QTimer::singleShot(1500, &loop, &QEventLoop::quit);
+  loop.exec();
+  if (heartbeat < 50) {
+    std::cerr << "GUI event loop stalled while CLI fixture was running\n";
+    return 1;
+  }
+  std::cout << "upstream editor widgets, config preservation, and async UI "
+               "tests passed\n";
   return 0;
 }

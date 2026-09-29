@@ -16,7 +16,7 @@ class QVBoxLayout;
 class MainWindow final : public QMainWindow {
   Q_OBJECT
 public:
-  explicit MainWindow(QString path = {});
+  explicit MainWindow(QString path = {}, QString cliExecutable = {});
 
 protected:
   void closeEvent(QCloseEvent *event) override;
@@ -38,6 +38,7 @@ private:
   void updateTitle();
 
   QString configPath;
+  QString cliExecutable;
   ConfigFile document;
   bool modified{};
   QLineEdit *pathEdit{};

@@ -29,16 +29,18 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <memory>
+#include <utility>
 
 namespace {
-QString cliProgram() {
+QString defaultCliProgram() {
   const QString sibling = QCoreApplication::applicationDirPath() + "/skyapo";
   return QFileInfo::exists(sibling) ? sibling : QStringLiteral("skyapo");
 }
 
 } // namespace
 
-MainWindow::MainWindow(QString path) {
+MainWindow::MainWindow(QString path, QString cliExecutable)
+    : cliExecutable(std::move(cliExecutable)) {
   setWindowTitle(tr("Equalizer APO Configuration Editor — SkyAPO"));
   resize(1080, 760);
 
@@ -231,7 +233,9 @@ void MainWindow::runCli(const QStringList &arguments,
               finish(-1, process->readAllStandardOutput(),
                      process->errorString().toUtf8());
           });
-  process->start(cliProgram(), arguments);
+  process->start(this->cliExecutable.isEmpty() ? defaultCliProgram()
+                                               : this->cliExecutable,
+                 arguments);
 }
 
 void MainWindow::openConfig(const QString &path) {
