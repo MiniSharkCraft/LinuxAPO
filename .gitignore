@@ -1,2 +1,6 @@
 /build*/
 *.wav
+/packaging/skyapo/
+/packaging/src/
+/packaging/pkg/
+/packaging/*.pkg.tar.zst

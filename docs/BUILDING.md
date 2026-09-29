@@ -23,4 +23,4 @@ skyapo device set <node-name>
 systemctl --user enable --now skyapod
 ```
 
-The installed user unit is `skyapod.service`; it starts after the user's PipeWire and WirePlumber units, restarts on failure, and runs without root. To remove the service, use `systemctl --user disable --now skyapod` before removing the package.
+The installed user unit is `skyapod.service`; it starts after the user's PipeWire and WirePlumber units, restarts on failure, and runs without root. The PKGBUILD was built and tested locally with `makepkg --noconfirm --force`; it initializes the official pinned submodule and runs CTest during packaging. To remove the service, use `systemctl --user disable --now skyapod` before removing the package.
