@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a PipeWire-ordered systemd user service, CMake install rules, and an Arch PKGBUILD that builds the pinned SourceForge submodule.
 - Added CLI daemon start/stop/restart and config show/reload over the private Unix socket; CLI-launched daemon detaches and logs to the user's config directory.
 - Made `skyapo start` wait for negotiated sample rate/quantum instead of returning while the DSP graph is still uninitialized.
 - Added capture-stage selection and cleanly skipped Windows pre/post-mix stages; nested Includes inherit stage context without mutating their parent.

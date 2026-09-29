@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(SkyAPO VERSION 0.1.0 LANGUAGES C CXX)
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -90,4 +91,14 @@ target_link_libraries(skyapo-realtime-probe PRIVATE PkgConfig::PIPEWIRE PkgConfi
 add_executable(skyapo-pipewire-lifetime tests/pipewire_lifetime.cpp)
 target_link_libraries(skyapo-pipewire-lifetime PRIVATE PkgConfig::PIPEWIRE)
 
-install(TARGETS skyapo skyapod skyapo-render RUNTIME DESTINATION bin)
+configure_file(packaging/skyapod.service.in
+  ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)
+install(TARGETS skyapo skyapod skyapo-render
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
+install(FILES README.md ROADMAP.md CHANGELOG.md
+  DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES upstream/equalizerapo/License.txt
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+  RENAME EqualizerAPO-License.txt)

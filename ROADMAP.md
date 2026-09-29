@@ -72,7 +72,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Implement CLI daemon start/stop/restart, config show/reload, and local Unix-socket control.
 - [ ] Version the IPC protocol and add structured diagnostics/filter inspection.
-- [ ] User systemd unit, Arch PKGBUILD, install layout, desktop/appstream assets where GUI is ready, man pages.
+- [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
+- [ ] Desktop/AppStream assets when GUI is ready; man pages.
 - [ ] CI: configure/build/CTest/format/sanitizers/package checks without physical hardware.
 - [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.

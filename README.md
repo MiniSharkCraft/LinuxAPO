@@ -40,6 +40,8 @@ build/skyapo stop
 wpctl status
 ```
 
+After installing the package, enable the user service with `systemctl --user enable --now skyapod`. On Arch Linux, build/install the local PKGBUILD from the repository with `cd packaging && makepkg -si`; select the input device first. The service is user-scoped and does not require a root daemon.
+
 Select **SkyAPO Virtual Mic** in your recording/application input picker. The physical source is linked using native PipeWire links to planar float DSP ports; actual upstream filters process samples before source output. No external processing processes are spawned. Device selection persists the stable `node.name`, not its runtime numeric ID. Changing selection causes a reconnect. The daemon retries transient disconnects and SIGINT/SIGTERM cleanly remove its node.
 
 State lives in `$XDG_CONFIG_HOME/skyapo` (fallback `~/.config/skyapo`); default config is `config.txt`, initialized to unity preamp only when absent. `skyapo start/stop/restart` launches or controls the per-user daemon; start waits for PipeWire format negotiation. `skyapo config show/reload` reads the active config or asks the daemon to validate and swap it. IPC uses a mode-0600 Unix socket at `$XDG_RUNTIME_DIR/skyapo.sock`; `skyapo status` reports actual metrics or explicitly reports an unreachable daemon. The detached CLI-launched daemon logs to the user config directory as `skyapod.log`. Only one daemon can run per runtime directory.

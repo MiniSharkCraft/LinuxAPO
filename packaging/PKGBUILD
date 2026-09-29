@@ -1,0 +1,32 @@
+pkgname=skyapo
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Linux audio processing port based on Equalizer APO DSP'
+arch=('x86_64')
+url='https://sourceforge.net/projects/equalizerapo/'
+license=('GPL-2.0-or-later')
+depends=('pipewire' 'libsndfile' 'fftw')
+makedepends=('cmake' 'gcc' 'pkgconf')
+source=("skyapo::git+file://${startdir}/..")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/skyapo"
+  git submodule update --init --recursive
+}
+
+build() {
+  cmake -S "$srcdir/skyapo" -B "$srcdir/skyapo-build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib
+  cmake --build "$srcdir/skyapo-build" --parallel
+}
+
+check() {
+  ctest --test-dir "$srcdir/skyapo-build" --output-on-failure
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/skyapo-build"
+}
