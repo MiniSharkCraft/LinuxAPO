@@ -14,6 +14,8 @@ Two independent native recording streams explicitly target physical and virtual 
 
 An earlier implementation was visible but failed WirePlumber format negotiation; a client could fall back to the physical source, producing ratio 1. This was not accepted as success. The source now advertises Format/EnumFormat and acknowledges PortConfig transitions, and the test refuses fallback. Real consumption and numerical DSP gain were verified afterward.
 
+The debounced inotify config watcher was subsequently tested live. The daemon loaded `tests/data/reload_minus6.txt`, then a replacement with `Preamp: -3 dB`; status reset per-chain meters and reported ratio 0.707946. An independent client then captured 192000 frames from the virtual source: correlation 1 and ratio 0.707946. Replacing the config with `UnsupportedDirective: true` produced a source/line reload error; status stayed streaming and an independent recording still measured ratio 0.707946. Callback allocation/deallocation counts remained zero. This verifies valid reload, bad reload rollback and real consumption of the retained graph.
+
 ## Commands and results
 
 ```sh
@@ -32,7 +34,8 @@ build/skyapod --config examples/preamp.txt
 build/skyapo status
 wpctl status
 pw-dump
-build/skyapo-realtime-probe alsa_input.pci-0000_00_1f.3.analog-stereo build/final-proof
+build/skyapo-realtime-probe alsa_input.pci-0000_00_1f.3.analog-stereo build/final-proof [-6]
+build/skyapo-realtime-probe alsa_input.pci-0000_00_1f.3.analog-stereo build/reload-proof -3
 ```
 
 Both builds succeeded; both CTest suites passed **3/3** (core, realtime allocation safety, offline WAV). Normal final CTest: 1.15 s; sanitizer CTest: 2.42 s. Core tests include actual upstream Preamp/BiQuad/IIR/Delay, errors and varying blocks. Unsupported commands remain errors, not silently skipped.
@@ -45,22 +48,22 @@ Singleton startup was tested: a second daemon exits with an explicit lock error.
 
 Unit/offline/allocation CTest ran with leak checking enabled and passed. Real PipeWire daemon/probe teardown triggers LeakSanitizer reports in installed module/context initialization. The standalone `skyapo-pipewire-lifetime` diagnostic, containing only PipeWire init/context/connect/disconnect/destroy/deinit and no SkyAPO/EAPO code, reproduces **3677 bytes / 34 allocations**. Daemon teardown reported 7354 bytes / 68 allocations (two contexts); the two-stream probe reported 3709 bytes / 34 allocations. This is an observed dependency-lifetime issue, not a clean realtime LeakSanitizer pass.
 
-The realtime daemon and recording test were subsequently run with `ASAN_OPTIONS=detect_leaks=0`; address/undefined behavior instrumentation remained enabled, recording passed with the gain above, and shutdown exited 0 without ASan/UBSan memory-access diagnostics. No blanket suppression was added to project builds or CTest. Investigate the installed PipeWire modules' leaks separately.
+The realtime daemon, live graph reload, and recording test were subsequently run with `ASAN_OPTIONS=detect_leaks=0`; address/undefined behavior instrumentation remained enabled, the reloaded recording passed at -3 dB, and shutdown exited 0 without ASan/UBSan memory-access diagnostics. No blanket suppression was added to project builds or CTest. Investigate the installed PipeWire modules' leaks separately.
 
 ## Implementation file changes in this milestone
 
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.
-- `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; unchanged actual upstream DSP math.
+- `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; relative/nested Include expansion; transactional config construction; unchanged actual upstream DSP math.
 - `src/pipewire/DeviceManager.h`, `src/pipewire/DeviceManager.cpp`: physical source/port registry enumeration.
-- `src/pipewire/Runtime.h`, `src/pipewire/Runtime.cpp`: native capture links, source DSP ports, negotiation, buffers, rate rebuild, recovery, telemetry and status socket.
+- `src/pipewire/Runtime.h`, `src/pipewire/Runtime.cpp`: native capture links, source DSP ports, negotiation, buffers, rate rebuild, recovery, inotify hot reload, safe graph lifetime swap, telemetry and status socket.
 - `src/platform/Settings.h`, `src/platform/PlatformChannels.h`, `src/platform/RealtimeAudit.h`, `src/platform/RealtimeAudit.cpp`: XDG selection/config/IPC/singleton, SPA-to-EAPO names, allocator audit.
 - `src/daemon/main.cpp`, `src/cli/main.cpp`: real daemon lifecycle and device/status commands.
-- `tests/realtime_probe.cpp`, `tests/realtime_safety_tests.cpp`, `tests/pipewire_lifetime.cpp`: recording/gain, realtime allocation, dependency lifetime diagnostics.
-- `README.md`, `docs/PORTING.md`, `docs/REALTIME.md`: usage, upstream maintenance and honest verification results.
+- `tests/realtime_probe.cpp`, `tests/realtime_safety_tests.cpp`, `tests/pipewire_lifetime.cpp`, `tests/data/reload_*.txt`: recording with selectable expected gain, realtime allocation, dependency lifetime and reload fixtures.
+- `README.md`, `ROADMAP.md`, `CHANGELOG.md`, `docs/PORTING.md`, `docs/REALTIME.md`, `docs/CONFIG.md`, `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/PLUGINS.md`, `docs/UI.md`, `docs/TROUBLESHOOTING.md`: staged product plan and current usage/maintenance/compatibility notes.
 - `upstream/equalizerapo/filters/BiQuad.h`: previous local modification removed; upstream checkout now clean.
 
-Root Git was initialized during this milestone, so there is no pre-existing root commit against which to compute a historical diff. The upstream Git directory was absorbed into `.git/modules/upstream/equalizerapo`; only a mode-160000 gitlink is tracked. No commit was created. See `GIT-STATUS.md` for final root status/diff summary.
+The initial implementation was committed as `a7b187f`; the config/reload milestone is a subsequent commit. The upstream Git directory is absorbed into `.git/modules/upstream/equalizerapo`; only a mode-160000 gitlink is tracked. See `GIT-STATUS.md` for current root status.
 
 ## Remaining limitations / next task
 
-The end-to-end hardware milestone is proven, with no missing audio environment blocker. Full upstream FilterEngine/FilterConfiguration integration and hot config reload remain unimplemented, as do Channel/Copy/Include and advanced filters. Other hardware/layouts/rates and server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: transactional config hot reload retaining the last valid chain, with destruction deferred outside realtime processing.
+The end-to-end hardware milestone and transactional hot reload are proven, with no missing audio environment blocker. Full upstream FilterEngine/FilterConfiguration integration remains unimplemented, as do Channel/Copy and advanced filters. Other hardware/layouts/rates and server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: port upstream channel routing and Copy semantics with offline expected-sample tests.

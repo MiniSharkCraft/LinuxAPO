@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <pipewire/pipewire.h>
@@ -149,9 +150,14 @@ void wav(const std::string &path, const Capture &c) {
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc != 3) {
+  if (argc != 3 && argc != 4) {
     std::cerr << "usage: skyapo-realtime-probe <physical-node-name> "
-                 "<output-prefix>\n";
+                 "<output-prefix> [expected-gain-db]\n";
+    return 2;
+  }
+  const double expectedDb = argc == 4 ? std::strtod(argv[3], nullptr) : -6.0;
+  if (!std::isfinite(expectedDb) || expectedDb < -120.0 || expectedDb > 24.0) {
+    std::cerr << "expected gain must be a finite value from -120 to 24 dB\n";
     return 2;
   }
   pw_init(nullptr, nullptr);
@@ -214,7 +220,7 @@ int main(int argc, char **argv) {
               << "\nGain: " << (ratio > 0 ? 20 * std::log10(ratio) : -INFINITY)
               << " dB\n";
     bool matched =
-        corr > .99 && std::abs(ratio - std::pow(10., -6. / 20.)) < .005;
+        corr > .99 && std::abs(ratio - std::pow(10., expectedDb / 20.)) < .005;
     pw_stream_destroy(p.raw.stream);
     p.raw.stream = nullptr;
     pw_stream_destroy(p.processed.stream);

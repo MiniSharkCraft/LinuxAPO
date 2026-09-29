@@ -22,7 +22,7 @@ For AddressSanitizer and UBSan: configure with `-DSKYAPO_SANITIZERS=ON`.
 build/skyapo-render --input input.wav --output output.wav --config examples/basic.txt
 ```
 
-The WAV sample rate/channel count are preserved. Supported commands currently are `Preamp:`, Equalizer APO parametric and IIR `Filter:` commands, and `Delay:`. Invalid and unsupported lines report the config path and line number. This uses upstream filter implementations and factories, but the complete Equalizer APO parser is not yet ported.
+The WAV sample rate/channel count are preserved. Supported commands currently are `Preamp:`, Equalizer APO parametric and IIR `Filter:` commands, `Delay:`, and nested `Include:` with relative paths. Invalid and unsupported lines report the config path and line number. This uses upstream filter implementations and factories, but the complete Equalizer APO parser is not yet ported.
 
 Check a config with `build/skyapo config check examples/basic.txt`. `build/skyapo device list` enumerates PipeWire source nodes if PipeWire development files were present at configure time.
 
@@ -48,14 +48,14 @@ Hardware test (records four seconds of your microphone to the supplied prefix, w
 build/skyapo-realtime-probe "$(build/skyapo device current)" build/proof
 ```
 
-This checks correlation and measured amplitude, not just graph visibility. Recordings contain microphone audio; remove them when no longer needed. See [verified realtime results](docs/REALTIME.md).
+This checks correlation and measured amplitude, not just graph visibility. An optional expected-gain argument validates other configs, for example `build/skyapo-realtime-probe "$(build/skyapo device current)" build/proof -3`. Recordings contain microphone audio; remove them when no longer needed. See [verified realtime results](docs/REALTIME.md).
 
 ## Status and limitations
 
 Realtime stereo 48 kHz capture, virtual-source consumption, -6 dB processing, reconnect, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware/rates/layouts need validation. Quantum is measured from the graph, not guessed.
 
-The adapter uses actual upstream filter implementations, **not yet the complete upstream FilterEngine/FilterConfiguration or parser**. Channel/Copy/Include, GraphicEQ, convolution, loudness correction, hot config reload, plugin hosting, service installation, and CLI start/stop/restart are not implemented. Unsupported config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
+The adapter uses actual upstream filter implementations, **not yet the complete upstream FilterEngine/FilterConfiguration or parser**. Nested `Include:` and transactional hot config reload are implemented. Channel/Copy routing, GraphicEQ, convolution, loudness correction, plugin hosting, service installation, and CLI start/stop/restart are not implemented. Unsupported config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
 
 No heap allocation, parsing, files, enumeration, or logging occurs in the processing callback. Allocation counters cover executable C++ and linked/wrapped C calls, not shared PipeWire library internals. Status timing instrumentation is diagnostic, not a scheduling guarantee.
 
-Troubleshooting: run as your normal user, ensure PipeWire/WirePlumber is running, select a physical audio source first, and check daemon stderr/status. A silent mic, wrong source, or failed target makes the recording test fail. Config is loaded at startup/reconnect; restart after edits. Sanitizer builds are for diagnostics, not low-latency production.
+Troubleshooting: run as your normal user, ensure PipeWire/WirePlumber is running, select a physical audio source first, and check daemon stderr/status. A silent mic, wrong source, or failed target makes the recording test fail. Config edits are watched and debounced; invalid replacements leave the last valid graph active, and the error appears in status. Sanitizer builds are for diagnostics, not low-latency production.

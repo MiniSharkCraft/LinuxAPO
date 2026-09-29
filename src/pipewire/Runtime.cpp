@@ -17,6 +17,7 @@
 #include <spa/param/port-config.h>
 #include <spa/param/props.h>
 #include <sstream>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -24,7 +25,9 @@ namespace {
 constexpr unsigned MaxFrames = 8192, MaxChannels = 8;
 static_assert(std::atomic<double>::is_always_lock_free &&
                   std::atomic<uint64_t>::is_always_lock_free &&
-                  std::atomic<Engine *>::is_always_lock_free,
+                  std::atomic<Engine *>::is_always_lock_free &&
+                  std::atomic<unsigned>::is_always_lock_free &&
+                  std::atomic<bool>::is_always_lock_free,
               "Realtime atomics must be lock free");
 uint64_t now() {
   timespec t{};
@@ -47,7 +50,8 @@ struct Runtime {
   pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
   spa_source *rateEvent{}, *statusEvent{}, *sigint{}, *sigterm{},
-      *selectionTimer{};
+      *selectionTimer{}, *configEvent{}, *reloadTimer{};
+  int configWatch = -1;
   int server = -1;
   bool ownsSocket = false;
   bool cleaning = false;
@@ -63,14 +67,18 @@ struct Runtime {
   std::array<spa_hook, MaxChannels> linkHooks{};
   std::array<bool, MaxChannels> linked{};
   std::vector<float> work;
-  std::vector<std::unique_ptr<Engine>> engines;
+  std::unique_ptr<Engine> activeEngine;
+  std::vector<std::unique_ptr<Engine>> retiredEngines;
   std::atomic<Engine *> active{nullptr};
+  std::atomic<unsigned> callbacksInFlight{0};
+  std::atomic<bool> resetMetrics{false};
   std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0};
   std::atomic<uint64_t> blocks{0}, samples{0}, totalNs{0}, maxNs{0},
       overruns{0};
   std::atomic<double> rawEnergy{0}, processedEnergy{0};
   double rawSum = 0, processedSum = 0;
   unsigned channels = 0;
+  std::string configError;
   pw_filter_state state = PW_FILTER_STATE_UNCONNECTED;
   explicit Runtime(volatile sig_atomic_t &stop) : stopping(stop) {
     ownInputs.fill(SPA_ID_INVALID);
@@ -88,10 +96,13 @@ struct Runtime {
       pw_core_disconnect(core);
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
-      for (auto *s : {rateEvent, statusEvent, sigint, sigterm, selectionTimer})
+      for (auto *s : {rateEvent, statusEvent, sigint, sigterm, selectionTimer,
+                      configEvent, reloadTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
+    if (configWatch >= 0)
+      close(configWatch);
     if (server >= 0)
       close(server);
     if (ownsSocket)
@@ -110,23 +121,79 @@ struct Runtime {
   void buildEngine(unsigned hz) {
     if (hz < 8000 || hz > 384000)
       throw std::runtime_error("unsupported graph rate " + std::to_string(hz));
-    for (auto &e : engines)
-      if (e->sampleRate() == hz) {
-        active.store(e.get(), std::memory_order_release);
-        return;
-      }
-    if (engines.size() >= 16)
-      throw std::runtime_error("too many graph rate changes; reconnecting");
+    auto *current = active.load(std::memory_order_acquire);
+    if (current && current->sampleRate() == hz)
+      return;
     std::vector<std::wstring> names;
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
     auto engine = std::make_unique<Engine>(hz, channels, MaxFrames, names);
     engine->loadConfig(config);
-    auto *pointer = engine.get();
-    engines.push_back(std::move(engine));
-    active.store(pointer, std::memory_order_release);
+    installEngine(std::move(engine));
+    auto *pointer = active.load(std::memory_order_acquire);
     std::cerr << "skyapod: DSP ready at " << hz << " Hz, " << channels
               << " channels, " << pointer->filterCount() << " filters\n";
+  }
+  void installEngine(std::unique_ptr<Engine> replacement) {
+    // Keep the old graph owned until every callback that could have loaded it
+    // has left. All graph destruction remains on this control thread.
+    if (activeEngine)
+      retiredEngines.push_back(std::move(activeEngine));
+    auto *pointer = replacement.get();
+    active.store(pointer, std::memory_order_seq_cst);
+    activeEngine = std::move(replacement);
+    reclaimRetired();
+  }
+  void reclaimRetired() {
+    if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
+      retiredEngines.clear();
+  }
+  void reloadConfig() {
+    auto *current = active.load(std::memory_order_acquire);
+    const unsigned hz = current ? current->sampleRate() : 48000;
+    std::vector<std::wstring> names;
+    for (auto &p : ports)
+      names.push_back(eapoChannel(p.channel));
+    auto replacement = std::make_unique<Engine>(hz, channels, MaxFrames, names);
+    replacement->loadConfig(config);
+    const unsigned count = replacement->filterCount();
+    installEngine(std::move(replacement));
+    resetMetrics.store(true, std::memory_order_release);
+    configError.clear();
+    std::cerr << "skyapod: config reload succeeded (" << count << " filters)\n";
+  }
+  static void configReady(void *data, int, uint32_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    alignas(inotify_event) char buffer[4096];
+    bool relevant = false;
+    for (;;) {
+      const ssize_t length = read(r.configWatch, buffer, sizeof(buffer));
+      if (length <= 0)
+        break;
+      for (size_t offset = 0; offset < static_cast<size_t>(length);) {
+        const auto *event =
+            reinterpret_cast<const inotify_event *>(buffer + offset);
+        if (!event->len ||
+            std::filesystem::path(r.config).filename() == event->name)
+          relevant = true;
+        offset += sizeof(inotify_event) + event->len;
+      }
+    }
+    if (relevant) {
+      timespec debounce{0, 150000000};
+      pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.reloadTimer,
+                           &debounce, nullptr, false);
+    }
+  }
+  static void reloadReady(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    try {
+      r.reloadConfig();
+    } catch (const std::exception &e) {
+      r.configError = e.what();
+      std::cerr << "skyapod: config reload failed; retaining last valid graph: "
+                << e.what() << '\n';
+    }
   }
   static void rateChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
@@ -139,6 +206,13 @@ struct Runtime {
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
     auto &r = *static_cast<Runtime *>(data);
+    struct FlightGuard {
+      std::atomic<unsigned> &count;
+      explicit FlightGuard(std::atomic<unsigned> &value) : count(value) {
+        count.fetch_add(1, std::memory_order_seq_cst);
+      }
+      ~FlightGuard() { count.fetch_sub(1, std::memory_order_seq_cst); }
+    } flight(r.callbacksInFlight);
     const uint64_t begin = now();
     const auto frames = position->clock.duration;
     const unsigned hz = position->clock.rate.num ? position->clock.rate.denom /
@@ -146,6 +220,17 @@ struct Runtime {
                                                  : 0;
     if (!frames || frames > 65536)
       return;
+    if (r.resetMetrics.exchange(false, std::memory_order_acq_rel)) {
+      r.rawSum = 0;
+      r.processedSum = 0;
+      r.samples.store(0, std::memory_order_relaxed);
+      r.blocks.store(0, std::memory_order_relaxed);
+      r.totalNs.store(0, std::memory_order_relaxed);
+      r.maxNs.store(0, std::memory_order_relaxed);
+      r.overruns.store(0, std::memory_order_relaxed);
+      r.rawEnergy.store(0, std::memory_order_relaxed);
+      r.processedEnergy.store(0, std::memory_order_relaxed);
+    }
     r.rate.store(hz, std::memory_order_relaxed);
     r.quantum.store(frames, std::memory_order_relaxed);
     std::array<float *, MaxChannels> in{}, out{};
@@ -209,6 +294,7 @@ struct Runtime {
   }
   static void selectionChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
+    r.reclaimRetired();
     try {
       if (settings::device() != r.device.name)
         r.fail("device selection changed");
@@ -364,6 +450,8 @@ struct Runtime {
       << "\nCallback deallocations: " << realtime::deallocations.load()
       << "\nAudit scope: executable C++ and wrapped C allocation calls; "
          "shared-library C allocators excluded\n";
+    if (!configError.empty())
+      s << "Config reload error: " << configError << '\n';
     return s.str();
   }
   static void statusReady(void *data, int, uint32_t) {
@@ -427,7 +515,20 @@ struct Runtime {
     sigint = pw_loop_add_signal(loop, SIGINT, signal, this);
     sigterm = pw_loop_add_signal(loop, SIGTERM, signal, this);
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
-    if (!rateEvent || !sigint || !sigterm || !selectionTimer)
+    reloadTimer = pw_loop_add_timer(loop, reloadReady, this);
+    configWatch = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+    if (configWatch < 0)
+      throw std::runtime_error("cannot create config file watcher");
+    const auto parent = std::filesystem::path(config).parent_path();
+    if (inotify_add_watch(configWatch, parent.c_str(),
+                          IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB |
+                              IN_DELETE | IN_Q_OVERFLOW) < 0)
+      throw std::runtime_error("cannot watch config directory: " +
+                               parent.string());
+    configEvent =
+        pw_loop_add_io(loop, configWatch, SPA_IO_IN, false, configReady, this);
+    if (!rateEvent || !sigint || !sigterm || !selectionTimer || !reloadTimer ||
+        !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);
