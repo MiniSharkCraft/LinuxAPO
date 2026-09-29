@@ -253,10 +253,10 @@ int main() {
     return 1;
   }
 #endif
-  fs::create_directories(dir / "sub dir");
+  fs::create_directories(dir / "sub#dir");
   const auto root = dir / "root.txt";
-  if (!write(root, "Preamp: -6 dB\nInclude: \"sub dir/child file.txt\"\n") ||
-      !write(dir / "sub dir/child file.txt",
+  if (!write(root, "Preamp: -6 dB\nInclude: \"sub#dir/child # file.txt\"\n") ||
+      !write(dir / "sub#dir/child # file.txt",
              "Preamp: 6 dB\nInclude: ../nested.txt\n") ||
       !write(dir / "nested.txt", "Preamp: 0 dB\n"))
     return 1;

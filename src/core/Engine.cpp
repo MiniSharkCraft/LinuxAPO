@@ -29,6 +29,26 @@
 #include <sstream>
 #include <stdexcept>
 
+namespace {
+void stripInlineComment(std::string &line) {
+  bool quoted = false;
+  bool escaped = false;
+  for (size_t i = 0; i < line.size(); ++i) {
+    const char ch = line[i];
+    if (ch == '#' && !quoted) {
+      line.resize(i);
+      return;
+    }
+    if (ch == '"' && !escaped)
+      quoted = !quoted;
+    if (quoted && ch == '\\' && !escaped)
+      escaped = true;
+    else
+      escaped = false;
+  }
+}
+} // namespace
+
 void Engine::FilterDeleter::operator()(IFilter *filter) const {
   if (!filter)
     return;
@@ -312,9 +332,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   unsigned lineNo = 0;
   while (std::getline(in, raw)) {
     ++lineNo;
-    auto comment = raw.find('#');
-    if (comment != std::string::npos)
-      raw.resize(comment);
+    stripInlineComment(raw);
     auto line = StringHelper::trim(StringHelper::toWString(raw, 65001));
     if (line.empty())
       continue;

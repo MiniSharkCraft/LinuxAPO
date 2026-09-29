@@ -18,6 +18,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Implement relative/nested `Include`, cycle/depth detection, source/line diagnostics, and last-valid graph preservation during parse failure.
 - [x] Add inotify config hot reload with debouncing, control-thread graph creation, atomic pointer swap and deferred retirement after callback quiescence.
 - [ ] Expand parser to preserve comments/quoting, validate numeric ranges, and return structured diagnostics.
+- [x] Preserve `#` inside double-quoted values (including relative Include filenames) while retaining unquoted trailing-comment behavior.
 - [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
 - [x] Map `Stage: capture` to the Linux processing path and skip Windows pre/post-mix sections with Include-local stage scope.
 - Acceptance: Include trees, Channel selection, Copy remapping and error paths have deterministic offline expected-sample tests; realtime allocation test still passes; -6 dB capture probe still passes.

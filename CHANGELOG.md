@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed config comment stripping so `#` inside quoted Include paths is preserved; added nested-file regression coverage.
 - Added row focus/selection, Delete removal, and Alt+Up/Alt+Down config reordering to the Linux-hosted upstream filter rows.
 - Added a Linux Include editor with config-relative path validation and a native file picker.
 - Added a Qt 6 `skyapo-ui` editor that reuses upstream Preamp/BiQuad/Delay/Stage GUI widgets, preserves untouched config bytes, and drives daemon/device/config actions through the existing CLI.
