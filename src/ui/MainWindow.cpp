@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "IncludeEditor.h"
 
 #include "Editor/FilterTableRow.h"
 #include "Editor/FilterTemplate.h"
@@ -278,7 +279,10 @@ void MainWindow::rebuildRows() {
     if (colon >= 0) {
       QString command = raw.left(colon).trimmed();
       QString parameters = raw.mid(colon + 1).trimmed();
-      editor = preampFactory.createFilterGUI(command, parameters);
+      if (command == "Include")
+        editor = new IncludeEditor(parameters, configPath, rowTable);
+      if (!editor)
+        editor = preampFactory.createFilterGUI(command, parameters);
       if (!editor) {
         command = raw.left(colon).trimmed();
         parameters = raw.mid(colon + 1).trimmed();

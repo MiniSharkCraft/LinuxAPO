@@ -1,4 +1,5 @@
 #include "ConfigFile.h"
+#include "IncludeEditor.h"
 #include "MainWindow.h"
 
 #include "Editor/FilterTable.h"
@@ -19,6 +20,8 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
+#include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -181,9 +184,33 @@ int main(int argc, char **argv) {
     return 1;
   }
   const QString configPath = temporary.filePath("config.txt");
+  QFile includeFile(temporary.filePath("child.txt"));
+  if (!includeFile.open(QIODevice::WriteOnly) ||
+      includeFile.write("Preamp: 0 dB\n") < 0) {
+    std::cerr << "could not create Include editor fixture\n";
+    return 1;
+  }
+  includeFile.close();
+  IncludeEditor includeEditor("child.txt", configPath);
+  auto *includePath = includeEditor.findChild<QLineEdit *>("includePathEdit");
+  auto *includeStatus = includeEditor.findChild<QLabel *>("includeStatus");
+  if (!includePath || !includeStatus ||
+      !includeStatus->text().contains("found")) {
+    std::cerr
+        << "Include editor did not resolve a path relative to its config\n";
+    return 1;
+  }
+  QString includeCommand, includeParameters;
+  includeEditor.store(includeCommand, includeParameters);
+  if (includeCommand != "Include" || includeParameters != "child.txt") {
+    std::cerr << "Include editor changed the directive path on serialization\n";
+    return 1;
+  }
   QFile config(configPath);
   if (!config.open(QIODevice::WriteOnly) ||
-      config.write("Preamp: 0 dB\n; keep order\nPreamp: -6 dB\n") < 0) {
+      config.write(
+          "Preamp: 0 dB\n; keep order\nPreamp: -6 dB\nInclude: child.txt\n") <
+          0) {
     std::cerr << "could not create temporary UI config\n";
     return 1;
   }
@@ -192,7 +219,8 @@ int main(int argc, char **argv) {
   QElapsedTimer construction;
   construction.start();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.findChildren<FilterTableRow *>().size() != 3) {
+  if (window.findChildren<FilterTableRow *>().size() != 4 ||
+      window.findChildren<IncludeEditor *>().size() != 1) {
     std::cerr << "upstream FilterTableRow was not used by the Linux editor\n";
     return 1;
   }
@@ -248,7 +276,8 @@ int main(int argc, char **argv) {
       button->click();
   QFile reordered(configPath);
   if (!reordered.open(QIODevice::ReadOnly) ||
-      reordered.readAll() != "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\n") {
+      reordered.readAll() !=
+          "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\nInclude: child.txt\n") {
     std::cerr << "Alt+Down did not reorder and save the selected config row\n";
     return 1;
   }
