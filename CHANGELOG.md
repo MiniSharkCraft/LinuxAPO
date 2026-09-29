@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added optional upstream GraphicEQ/Convolution and libHybridConv build support when FFTW3f is present.
+- Added Linux libsndfile impulse-response loading with config-relative paths and validation.
+- Deferred daemon DSP graph construction until actual PipeWire rate/quantum negotiation, so fixed-block convolution never rebuilds in the audio callback.
+- Made offline rendering pad the last partial convolution block and added impulse-response/fixed-block tests; GraphicEQ executes in the core tests.
+- Added a 1000-block upstream convolution realtime-safety audit; normal and ASan/UBSan CTest remain green.
+- Extended the generated upstream compatibility patch for Windows headers, optional FFTW thread-helper calls, and GraphicEQ's mismatched array deallocation.
 - Added portable recursive `Include:` expansion with relative paths, quoted paths, nesting/cycle guards, and file/line errors.
 - Config loads remain transactional: a parse or include failure does not replace the active filter list.
 - Added debounced inotify reload; candidate graphs are built on the control loop, atomically activated, and old graphs are reclaimed only after audio callbacks leave them.

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "helpers/LogHelper.h"
 #include "helpers/StringHelper.h"
+#include <sndfile.h>
 #include <cstdarg>
 #include <iostream>
 #include <locale>
@@ -12,6 +13,10 @@ bool LogHelper::enableTrace = false;
 FILE* LogHelper::presetFP = nullptr;
 bool LogHelper::compact = true;
 bool LogHelper::useConsoleColors = false;
+
+SNDFILE *sf_wchar_open(const wchar_t *path, int mode, SF_INFO *info) {
+  return sf_open(StringHelper::toString(path, 65001).c_str(), mode, info);
+}
 
 void LogHelper::log(const char*, int, const void*, bool trace, const wchar_t* format, ...)
 {

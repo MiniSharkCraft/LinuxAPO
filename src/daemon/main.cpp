@@ -1,6 +1,5 @@
 #include "../pipewire/Runtime.h"
 #include "../platform/Settings.h"
-#include "Engine.h"
 #include <iostream>
 #include <thread>
 namespace {
@@ -20,8 +19,6 @@ int main(int argc, char **argv) {
     if (config.empty())
       config = settings::config();
     config = std::filesystem::absolute(config).string();
-    Engine check(48000, 2, 8192);
-    check.loadConfig(config);
     if (settings::device().empty())
       throw std::runtime_error(
           "select an input with skyapo device set <id-or-name>");

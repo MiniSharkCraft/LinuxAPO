@@ -40,7 +40,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.5.x — remaining core DSP
 
-- [ ] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical.
+- [x] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical (FFTW3f optional; convolution has fixed negotiated block size).
 - [ ] Port Channel/Copy/Include conditional details and LoudnessCorrection only where Linux equivalents preserve behavior; document endpoint-volume semantics.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
 - Acceptance: every claimed directive has golden reference tests and sanitizer coverage; known latency only is reported.
@@ -78,7 +78,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [ ] Stable daemon, major EAPO directives, hot reload with rollback.
 - [ ] PipeWire capture/virtual mic, recovery, mono/stereo at 44.1/48/96 kHz.
-- [ ] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include, GraphicEQ, Convolution validated.
+- [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include and Convolution validated; GraphicEQ compiles with its actual upstream implementation.
 - [ ] VST2/VST3/LV2/CLAP, yabridge compatibility, plugin state/bypass/failure and known-latency reporting.
 - [ ] Ported/evolved original editor; full CLI and diagnostics.
 - [ ] Packaging, user service, desktop integration, licensing and clean-install docs.

@@ -52,12 +52,18 @@ Unit/offline/allocation CTest ran with leak checking enabled and passed. Real Pi
 
 The realtime daemon, live graph reload, and recording test were subsequently run with `ASAN_OPTIONS=detect_leaks=0`; address/undefined behavior instrumentation remained enabled, the reloaded recording passed at -3 dB, and shutdown exited 0 without ASan/UBSan memory-access diagnostics. No blanket suppression was added to project builds or CTest. Investigate the installed PipeWire modules' leaks separately.
 
+### Current realtime revalidation
+
+On 2026-09-30 the selected source was `alsa_input.pci-0000_00_1f.3.analog-stereo`, runtime node 88 (Built-in Audio Analog Stereo). PipeWire negotiated F32 planar DSP, 48 kHz, stereo FL/FR, quantum 1024. `SkyAPO Virtual Mic` appeared as `Audio/Source`, node 174. `skyapo-realtime-probe` captured 192000 frames from both the physical device and virtual source: lag 1024 frames, correlation 1, and measured amplitude ratio 0.501187 for the `Preamp: -6 dB` example. The daemon reported 0 callback allocations, 0 callback deallocations, and 0 overruns. The same two-client capture succeeded with the ASan/UBSan daemon (`detect_leaks=0` for the known external PipeWire context leak).
+
+The actual upstream Convolution and GraphicEQ implementations now execute in offline core tests. A separate allocation audit executes 1000 fixed-size upstream Convolution blocks with zero audited callback allocations/deallocations. Convolution is fixed-block: Engine rejects variable callback blocks; the daemon delays graph construction until negotiated quantum and handles rate/quantum changes on the control loop. The current physical-device recording exercise used Preamp, not a convolution IR. Exact PipeWire hardware tests of convolution at alternate rates/quantums remain outstanding.
+
 ## Implementation file changes in this milestone
 
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.
 - `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; relative/nested Include expansion; ordered upstream Channel/Copy channel routing with preallocated buses; transactional config construction; unchanged actual upstream DSP math.
 - `src/platform/linux/ChannelHelper.cpp`: Linux channel-name implementation backing the upstream ChannelFilter/CopyFilter API.
-- `src/platform/linux/ChannelHelper.cpp`: Linux implementation of the upstream ChannelHelper API with EAPO aliases and Windows mask values for the portable operations.
+- `src/platform/linux/ConvolutionFilterLinux.cpp`, `src/platform/linux/compat.cpp`, `src/platform/linux/stdafx.h`: Linux libsndfile IR loader and narrow upstream compatibility declarations.
 - `src/pipewire/DeviceManager.h`, `src/pipewire/DeviceManager.cpp`: physical source/port registry enumeration.
 - `src/pipewire/Runtime.h`, `src/pipewire/Runtime.cpp`: native capture links, source DSP ports, negotiation, buffers, rate rebuild, recovery, inotify hot reload, safe graph lifetime swap, telemetry and status socket.
 - `src/platform/Settings.h`, `src/platform/PlatformChannels.h`, `src/platform/RealtimeAudit.h`, `src/platform/RealtimeAudit.cpp`: XDG selection/config/IPC/singleton, SPA-to-EAPO names, allocator audit.
@@ -70,4 +76,4 @@ The initial implementation was committed as `a7b187f`; the config/reload milesto
 
 ## Remaining limitations / next task
 
-The end-to-end hardware milestone and transactional hot reload are proven, with no missing audio environment blocker. Channel and Copy now pass offline expected-sample and callback-allocation tests, but their output-channel expansion is rejected because the PipeWire virtual node has a fixed layout. Full upstream FilterEngine/FilterConfiguration integration and advanced filters remain unimplemented. Other hardware/layouts/rates and server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: integrate GraphicEQ/convolution dependencies or port upstream configuration orchestration.
+The end-to-end hardware chain and transactional hot reload are proven, with no missing audio environment blocker. Channel and Copy pass offline expected-sample and callback-allocation tests, but their output-channel expansion is rejected because the PipeWire virtual node has a fixed layout. Full upstream FilterEngine/FilterConfiguration integration and complete parser compatibility remain unimplemented. Convolution hardware/rate variation, other device layouts, and PipeWire server restart need testing. Source gain control is fixed unity. No plugin/GUI work was added. Highest-value next step: test fixed-block convolution through PipeWire, then expand integration to more device layouts and formats.

@@ -17,7 +17,12 @@ int main(int argc,char** argv)
         SF_INFO oi=info; oi.format=SF_FORMAT_WAV|SF_FORMAT_FLOAT; out=sf_open(output.c_str(),SFM_WRITE,&oi); if(!out)throw std::runtime_error(sf_strerror(nullptr));
         std::vector<float> block(static_cast<size_t>(4096)*info.channels);
         sf_count_t total=0;
-        for(;;){auto n=sf_readf_float(in,block.data(),4096);if(n<=0)break;engine.process(block.data(),static_cast<unsigned>(n));if(sf_writef_float(out,block.data(),n)!=n)throw std::runtime_error(sf_strerror(out));total+=n;}
+        for(;;){auto n=sf_readf_float(in,block.data(),4096);if(n<=0)break;
+            if (engine.requiresFixedBlock()) {
+                std::fill(block.begin() + static_cast<size_t>(n) * info.channels, block.end(), 0.0f);
+                engine.process(block.data(), 4096);
+            } else engine.process(block.data(),static_cast<unsigned>(n));
+            if(sf_writef_float(out,block.data(),n)!=n)throw std::runtime_error(sf_strerror(out));total+=n;}
         sf_close(in);in=nullptr;sf_close(out);out=nullptr;
         std::cout<<"Processed "<<total<<" frames at "<<info.samplerate<<" Hz, "<<info.channels<<" channels, "<<engine.filterCount()<<" filters\n";
     } catch(const std::exception& e){if(in)sf_close(in);if(out)sf_close(out);std::cerr<<"skyapo-render: "<<e.what()<<"\n";return 1;}

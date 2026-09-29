@@ -5,6 +5,12 @@
 #include "CopyFilter.h"
 #include "CopyFilterFactory.h"
 #include "DelayFilterFactory.h"
+#ifdef SKYAPO_HAVE_CONVOLUTION
+#include "ConvolutionFilter.h"
+#include "ConvolutionFilterFactory.h"
+#include "GraphicEQFilter.h"
+#include "GraphicEQFilterFactory.h"
+#endif
 #include "IFilterFactory.h"
 #include "IIRFilterFactory.h"
 #include "PreampFilterFactory.h"
@@ -12,6 +18,7 @@
 #include "helpers/StringHelper.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -25,7 +32,7 @@ void Engine::FilterDeleter::operator()(IFilter *filter) const {
 
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
                std::vector<std::wstring> names)
-    : rate(sampleRate), channelCount(channels), maxFrames(maxFrames) {
+    : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames) {
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
@@ -54,11 +61,15 @@ void Engine::loadConfig(const std::string &path) {
   std::vector<float *> newInputs, newOutputs;
   auto newGraph =
       buildGraph(candidate, newBus, newScratch, newInputs, newOutputs);
+  const bool newFixedBlock = std::any_of(
+      newGraph.begin(), newGraph.end(),
+      [](const auto &node) { return node.fixedBlock; });
   graph.swap(newGraph);
   bus.swap(newBus);
   scratch.swap(newScratch);
   inputPtrs.swap(newInputs);
   outputPtrs.swap(newOutputs);
+  fixedBlock = newFixedBlock;
 }
 
 std::vector<Engine::FilterNode> Engine::buildGraph(
@@ -85,8 +96,36 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
                 parsed.source.string() + ":" + std::to_string(parsed.line) +
                 ": Copy references unknown source channel '" +
                 StringHelper::toString(summand.channel, 65001) + "'");
-    auto outputNames =
-        filter->initialize(static_cast<float>(rate), maxFrames, inputNames);
+    bool usesConvolution = false;
+#ifdef SKYAPO_HAVE_CONVOLUTION
+    usesConvolution = dynamic_cast<ConvolutionFilter *>(filter) != nullptr;
+    if (usesConvolution && maxFrameCount % 4 != 0)
+      throw std::runtime_error(parsed.source.string() + ":" +
+                               std::to_string(parsed.line) +
+                               ": upstream libHybridConv requires a block "
+                               "size divisible by four samples");
+    if (auto *graphic = dynamic_cast<GraphicEQFilter *>(filter)) {
+      if (graphic->getNodes().empty())
+        throw std::runtime_error(parsed.source.string() + ":" +
+                                 std::to_string(parsed.line) +
+                                 ": GraphicEQ requires a frequency/gain pair");
+      for (const auto &point : graphic->getNodes())
+        if (!std::isfinite(point.freq) || point.freq <= 0 ||
+            !std::isfinite(point.dbGain))
+          throw std::runtime_error(parsed.source.string() + ":" +
+                                   std::to_string(parsed.line) +
+                                   ": GraphicEQ frequencies must be positive "
+                                   "and values finite");
+    }
+#endif
+    std::vector<std::wstring> outputNames;
+    try {
+      outputNames =
+          filter->initialize(static_cast<float>(rate), maxFrameCount, inputNames);
+    } catch (const std::exception &e) {
+      throw std::runtime_error(parsed.source.string() + ":" +
+                               std::to_string(parsed.line) + ": " + e.what());
+    }
     if (outputNames.empty())
       throw std::runtime_error(parsed.source.string() + ":" +
                                std::to_string(parsed.line) +
@@ -94,6 +133,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
 
     FilterNode node;
     node.inPlace = filter->getInPlace();
+    node.fixedBlock = usesConvolution;
     for (const auto &name : inputNames) {
       auto it = std::find(allNames.begin(), allNames.end(), name);
       if (it == allNames.end())
@@ -124,8 +164,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
         filter->getSelectChannels() ? std::move(outputNames) : savedSelection;
   }
 
-  newBus.resize(allNames.size(), std::vector<float>(maxFrames));
-  newScratch.resize(allNames.size(), std::vector<float>(maxFrames));
+  newBus.resize(allNames.size(), std::vector<float>(maxFrameCount));
+  newScratch.resize(allNames.size(), std::vector<float>(maxFrameCount));
   newInputs.resize(allNames.size());
   newOutputs.resize(allNames.size());
   return result;
@@ -211,6 +251,21 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       made = channel.createFilter(widePath, command, params);
     else if (command == L"Copy")
       made = copy.createFilter(widePath, command, params);
+#ifdef SKYAPO_HAVE_CONVOLUTION
+    else if (command == L"GraphicEQ") {
+      GraphicEQFilterFactory graphic;
+      made = graphic.createFilter(widePath, command, params);
+    } else if (command == L"Convolution") {
+      ConvolutionFilterFactory convolution;
+      made = convolution.createFilter(widePath, command, params);
+    }
+#else
+    else if (command == L"GraphicEQ" || command == L"Convolution")
+      throw std::runtime_error(normalizedPath.string() + ":" +
+                               std::to_string(lineNo) + ": " +
+                               StringHelper::toString(command, 65001) +
+                               " requires FFTW3f development files");
+#endif
     else
       throw std::runtime_error(normalizedPath.string() + ":" +
                                std::to_string(lineNo) +
@@ -231,8 +286,11 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
 }
 
 void Engine::process(float *samples, unsigned frames) {
-  if (frames > maxFrames)
+  if (frames > maxFrameCount)
     throw std::runtime_error("frame block exceeds configured maximum");
+  if (fixedBlock && frames != maxFrameCount)
+    throw std::runtime_error(
+        "convolution filters require the negotiated fixed audio block size");
   for (unsigned c = 0; c < channelCount; ++c)
     for (unsigned f = 0; f < frames; ++f)
       bus[c][f] = samples[f * channelCount + c];

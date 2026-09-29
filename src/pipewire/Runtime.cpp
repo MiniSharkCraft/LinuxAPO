@@ -22,7 +22,7 @@
 #include <time.h>
 
 namespace {
-constexpr unsigned MaxFrames = 8192, MaxChannels = 8;
+constexpr unsigned MaxFrames = 65536, MaxChannels = 8;
 static_assert(std::atomic<double>::is_always_lock_free &&
                   std::atomic<uint64_t>::is_always_lock_free &&
                   std::atomic<Engine *>::is_always_lock_free &&
@@ -72,7 +72,8 @@ struct Runtime {
   std::atomic<Engine *> active{nullptr};
   std::atomic<unsigned> callbacksInFlight{0};
   std::atomic<bool> resetMetrics{false};
-  std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0};
+  std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0},
+      requestedQuantum{0};
   std::atomic<uint64_t> blocks{0}, samples{0}, totalNs{0}, maxNs{0},
       overruns{0};
   std::atomic<double> rawEnergy{0}, processedEnergy{0};
@@ -118,16 +119,21 @@ struct Runtime {
     error = e;
     pw_main_loop_quit(main);
   }
-  void buildEngine(unsigned hz) {
+  void buildEngine(unsigned hz, unsigned blockFrames) {
     if (hz < 8000 || hz > 384000)
       throw std::runtime_error("unsupported graph rate " + std::to_string(hz));
+    if (!blockFrames || blockFrames > MaxFrames)
+      throw std::runtime_error("unsupported graph quantum " +
+                               std::to_string(blockFrames));
     auto *current = active.load(std::memory_order_acquire);
-    if (current && current->sampleRate() == hz)
+    if (current && current->sampleRate() == hz &&
+        current->maxFrames() == blockFrames)
       return;
     std::vector<std::wstring> names;
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
-    auto engine = std::make_unique<Engine>(hz, channels, MaxFrames, names);
+    auto engine =
+        std::make_unique<Engine>(hz, channels, blockFrames, names);
     engine->loadConfig(config);
     installEngine(std::move(engine));
     auto *pointer = active.load(std::memory_order_acquire);
@@ -150,11 +156,16 @@ struct Runtime {
   }
   void reloadConfig() {
     auto *current = active.load(std::memory_order_acquire);
-    const unsigned hz = current ? current->sampleRate() : 48000;
+    const unsigned hz = current ? current->sampleRate() : requestedRate.load();
+    const unsigned blockFrames = current ? current->maxFrames()
+                                         : requestedQuantum.load();
     std::vector<std::wstring> names;
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
-    auto replacement = std::make_unique<Engine>(hz, channels, MaxFrames, names);
+    if (!hz || !blockFrames)
+      throw std::runtime_error("cannot reload before PipeWire format negotiation");
+    auto replacement =
+        std::make_unique<Engine>(hz, channels, blockFrames, names);
     replacement->loadConfig(config);
     const unsigned count = replacement->filterCount();
     installEngine(std::move(replacement));
@@ -198,7 +209,7 @@ struct Runtime {
   static void rateChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
     try {
-      r.buildEngine(r.requestedRate.load());
+      r.buildEngine(r.requestedRate.load(), r.requestedQuantum.load());
     } catch (const std::exception &e) {
       r.fail(e.what());
     }
@@ -218,7 +229,7 @@ struct Runtime {
     const unsigned hz = position->clock.rate.num ? position->clock.rate.denom /
                                                        position->clock.rate.num
                                                  : 0;
-    if (!frames || frames > 65536)
+    if (!frames)
       return;
     if (r.resetMetrics.exchange(false, std::memory_order_acq_rel)) {
       r.rawSum = 0;
@@ -241,11 +252,15 @@ struct Runtime {
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
     Engine *engine = r.active.load(std::memory_order_acquire);
-    if (!engine || engine->sampleRate() != hz) {
+    if (!engine || engine->sampleRate() != hz ||
+        engine->maxFrames() != frames) {
       for (unsigned c = 0; c < r.channels; ++c)
         if (out[c])
           std::fill_n(out[c], frames, 0.0f);
-      if (r.requestedRate.exchange(hz) != hz)
+      const bool rateChanged = r.requestedRate.exchange(hz) != hz;
+      const bool quantumChanged = r.requestedQuantum.exchange(frames) != frames;
+      if (!engine || engine->sampleRate() != hz ||
+          engine->maxFrames() != frames || rateChanged || quantumChanged)
         pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.rateEvent);
       return;
     }
@@ -491,7 +506,6 @@ struct Runtime {
         throw std::runtime_error("source port lacks channel position");
     channels = ports.size();
     work.resize(channels * MaxFrames);
-    buildEngine(48000);
     pw_init(nullptr, nullptr);
     initialized = true;
     main = pw_main_loop_new(nullptr);

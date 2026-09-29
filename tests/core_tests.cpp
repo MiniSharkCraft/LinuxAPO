@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
+#include <sndfile.h>
 
 namespace fs = std::filesystem;
 bool write(const fs::path &path, const std::string &contents) {
@@ -133,6 +134,71 @@ int main() {
   if (!dirName)
     return 1;
   fs::path dir(dirName);
+#ifdef SKYAPO_TEST_CONVOLUTION
+  SF_INFO irInfo{};
+  irInfo.samplerate = 48000;
+  irInfo.channels = 1;
+  irInfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+  auto irPath = dir / "impulse.wav";
+  SNDFILE *irFile = sf_open(irPath.c_str(), SFM_WRITE, &irInfo);
+  if (!irFile)
+    return 1;
+  const float impulseResponse[4] = {1, 0, 0, 0};
+  if (sf_writef_float(irFile, impulseResponse, 4) != 4) {
+    sf_close(irFile);
+    return 1;
+  }
+  sf_close(irFile);
+  auto convolutionConfig = dir / "convolution.txt";
+  if (!write(convolutionConfig, "Convolution: impulse.wav\n"))
+    return 1;
+  Engine convolution(48000, 2, 256);
+  convolution.loadConfig(convolutionConfig.string());
+  if (!convolution.requiresFixedBlock())
+    return 1;
+  float convBlock[512]{};
+  for (int f = 0; f < 256; ++f) {
+    convBlock[2 * f] = 0.1f * f;
+    convBlock[2 * f + 1] = -0.05f * f;
+  }
+  bool rejectedVariableBlock = false;
+  try {
+    convolution.process(convBlock, 255);
+  } catch (const std::exception &) {
+    rejectedVariableBlock = true;
+  }
+  if (!rejectedVariableBlock)
+    return 1;
+  convolution.process(convBlock, 256);
+  for (int i = 0; i < 512; ++i)
+    if (std::abs(convBlock[i] - ((i % 2) ? -0.05f : 0.1f) * (i / 2)) >
+        1e-4f) {
+      std::cerr << "upstream Convolution impulse response mismatch at " << i
+                << " got " << convBlock[i] << '\n';
+      return 1;
+    }
+  auto graphicConfig = dir / "graphic-eq.txt";
+  if (!write(graphicConfig, "GraphicEQ: 100 0 1000 0\n"))
+    return 1;
+  Engine graphic(48000, 2, 256);
+  graphic.loadConfig(graphicConfig.string());
+  float graphicBlock[512]{};
+  graphicBlock[0] = 1.0f;
+  graphicBlock[1] = -1.0f;
+  graphic.process(graphicBlock, 256);
+  float graphicEnergy = 0.0f;
+  for (float sample : graphicBlock) {
+    if (!std::isfinite(sample)) {
+      std::cerr << "upstream GraphicEQ produced a non-finite sample\n";
+      return 1;
+    }
+    graphicEnergy += sample * sample;
+  }
+  if (graphicEnergy < 0.1f) {
+    std::cerr << "upstream GraphicEQ produced no output\n";
+    return 1;
+  }
+#endif
   fs::create_directories(dir / "sub dir");
   const auto root = dir / "root.txt";
   if (!write(root, "Preamp: -6 dB\nInclude: \"sub dir/child file.txt\"\n") ||
