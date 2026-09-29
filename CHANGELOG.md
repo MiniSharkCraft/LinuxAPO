@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Moved directive dispatch and factory lifecycle calls onto the upstream `IFilterFactory` ordering; Linux-only Stage/Include handling remains around the factory chain.
 - Added `skyapo filters` and `skyapo diagnostics`, reporting the daemon's active directive/source lines and compiled upstream revision.
 - Added a PipeWire-ordered systemd user service, CMake install rules, and an Arch PKGBUILD that builds the pinned SourceForge submodule.
 - Built the Arch package from a fresh local-source clone; its submodule initialized at the pinned commit and packaged CTest passed 3/3.
@@ -25,6 +26,7 @@
 - Revalidated the unchanged realtime -6 dB path after channel-routing refactor: 192000 captured frames, correlation 1, ratio 0.501187, zero audited callback allocations/deallocations.
 - Repeated the real PipeWire recording with both normal and ASan/UBSan daemons after routing changes; both captured 192000 frames at the expected -6 dB.
 - Added the staged 0.2.0 through 1.0.0 roadmap and acceptance criteria.
+- Advertise PipeWire F32P formats at 44.1, 48 and 96 kHz; verify physical-to-virtual stereo recordings and −6 dB gain at every rate.
 
 ## 0.1.0 — realtime prototype baseline
 

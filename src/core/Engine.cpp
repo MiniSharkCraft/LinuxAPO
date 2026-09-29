@@ -61,14 +61,41 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
       for (unsigned c = 0; c < channels; ++c)
         channelNames.push_back(c < 8 ? defaults[c] : std::to_wstring(c + 1));
   }
+  factories.push_back(std::make_unique<ChannelFilterFactory>());
+  factories.push_back(std::make_unique<IIRFilterFactory>());
+  factories.push_back(std::make_unique<BiQuadFilterFactory>());
+  factories.push_back(std::make_unique<PreampFilterFactory>());
+  factories.push_back(std::make_unique<DelayFilterFactory>());
+  factories.push_back(std::make_unique<CopyFilterFactory>());
+#ifdef SKYAPO_HAVE_CONVOLUTION
+  factories.push_back(std::make_unique<ConvolutionFilterFactory>());
+  factories.push_back(std::make_unique<GraphicEQFilterFactory>());
+#endif
 }
 
 void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
   bool stageActive = true;
+  FilterEngine factoryContext(channelCount, channelCount, maxFrameCount);
+  const auto addReturnedFilters = [&](std::vector<IFilter *> produced,
+                                     const std::filesystem::path &source,
+                                     unsigned line,
+                                     const std::string &directive) {
+    for (auto *filter : produced)
+      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
+                           source, line, directive});
+  };
+  for (auto &factory : factories) {
+    factory->initialize(&factoryContext);
+    addReturnedFilters(factory->startOfConfiguration(), path, 0,
+                       "configuration initialization");
+  }
   parseConfigFile(std::filesystem::path(path), candidate, includeStack,
                   stageActive);
+  for (auto &factory : factories)
+    addReturnedFilters(factory->endOfConfiguration(), path, 0,
+                       "configuration finalization");
 
   auto newGraph = buildGraph(candidate);
   const bool newFixedBlock = std::any_of(
@@ -266,12 +293,13 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     ~PopPath() { stack.pop_back(); }
   } popPath{includeStack};
 
-  PreampFilterFactory preamp;
-  BiQuadFilterFactory biquad;
-  IIRFilterFactory iir;
-  DelayFilterFactory delay;
-  ChannelFilterFactory channel;
-  CopyFilterFactory copy;
+  const auto widePath = StringHelper::toWString(normalizedPath.string(), 65001);
+  for (auto &factory : factories) {
+    auto produced = factory->startOfFile(widePath);
+    for (auto *filter : produced)
+      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
+                           normalizedPath, 0, "file initialization"});
+  }
   std::string raw;
   unsigned lineNo = 0;
   while (std::getline(in, raw)) {
@@ -288,8 +316,6 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                std::to_string(lineNo) + ": expected command:");
     std::wstring command = StringHelper::trim(line.substr(0, colon));
     std::wstring params = StringHelper::trim(line.substr(colon + 1));
-    const auto widePath =
-        StringHelper::toWString(normalizedPath.string(), 65001);
 
     if (command == L"Stage") {
       std::wistringstream stages(StringHelper::toLowerCase(params));
@@ -331,52 +357,53 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       continue;
     }
 
+    const auto originalCommand = command;
     std::vector<IFilter *> made;
-    if (command == L"Preamp")
-      made = preamp.createFilter(widePath, command, params);
-    else if (command == L"Filter") {
-      made = biquad.createFilter(widePath, command, params);
-      if (made.empty())
-        made = iir.createFilter(widePath, command, params);
-    } else if (command == L"Delay")
-      made = delay.createFilter(widePath, command, params);
-    else if (command == L"Channel")
-      made = channel.createFilter(widePath, command, params);
-    else if (command == L"Copy")
-      made = copy.createFilter(widePath, command, params);
-#ifdef SKYAPO_HAVE_CONVOLUTION
-    else if (command == L"GraphicEQ") {
-      GraphicEQFilterFactory graphic;
-      made = graphic.createFilter(widePath, command, params);
-    } else if (command == L"Convolution") {
-      ConvolutionFilterFactory convolution;
-      made = convolution.createFilter(widePath, command, params);
+    for (auto &factory : factories) {
+      made = factory->createFilter(widePath, command, params);
+      if (!made.empty() || command.empty())
+        break;
     }
-#else
-    else if (command == L"GraphicEQ" || command == L"Convolution")
-      throw std::runtime_error(normalizedPath.string() + ":" +
-                               std::to_string(lineNo) + ": " +
-                               StringHelper::toString(command, 65001) +
-                               " requires FFTW3f development files");
+    if (command.empty())
+      continue;
+    if (made.empty()) {
+      const auto name = StringHelper::toString(originalCommand, 65001);
+      const bool known = originalCommand == L"Preamp" ||
+                         originalCommand == L"Delay" ||
+                         originalCommand == L"Channel" ||
+                         originalCommand == L"Copy" ||
+                         originalCommand.rfind(L"Filter", 0) == 0 ||
+                         originalCommand == L"GraphicEQ" ||
+                         originalCommand == L"Convolution";
+      if (!known)
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": unsupported command '" + name + "'");
+#ifndef SKYAPO_HAVE_CONVOLUTION
+      if (originalCommand == L"GraphicEQ" ||
+          originalCommand == L"Convolution")
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) + ": " + name +
+                                 " requires FFTW3f development files");
 #endif
-    else
       throw std::runtime_error(normalizedPath.string() + ":" +
-                               std::to_string(lineNo) +
-                               ": unsupported command '" +
-                               StringHelper::toString(command, 65001) + "'");
-    if (made.empty())
-      throw std::runtime_error(normalizedPath.string() + ":" +
-                               std::to_string(lineNo) + ": invalid " +
-                               StringHelper::toString(command, 65001) +
+                               std::to_string(lineNo) + ": invalid " + name +
                                " parameters");
+    }
     for (auto *filter : made)
       candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
                            normalizedPath, lineNo,
-                           StringHelper::toString(command, 65001)});
+                           StringHelper::toString(originalCommand, 65001)});
   }
   if (in.bad())
     throw std::runtime_error("error reading config: " +
                              normalizedPath.string());
+  for (auto &factory : factories) {
+    auto produced = factory->endOfFile(widePath);
+    for (auto *filter : produced)
+      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
+                           normalizedPath, lineNo, "file finalization"});
+  }
 }
 
 void Engine::process(float *samples, unsigned frames) {

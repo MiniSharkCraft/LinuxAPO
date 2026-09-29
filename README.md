@@ -48,17 +48,17 @@ Select **SkyAPO Virtual Mic** in your recording/application input picker. The ph
 
 State lives in `$XDG_CONFIG_HOME/skyapo` (fallback `~/.config/skyapo`); default config is `config.txt`, initialized to unity preamp only when absent. `skyapo start/stop/restart` launches or controls the per-user daemon; start waits for PipeWire format negotiation. `skyapo config show/reload` reads the active config or asks the daemon to validate and swap it. IPC uses a mode-0600 Unix socket at `$XDG_RUNTIME_DIR/skyapo.sock`; `skyapo status` reports actual metrics or explicitly reports an unreachable daemon. The detached CLI-launched daemon logs to the user config directory as `skyapod.log`. Only one daemon can run per runtime directory.
 
-Hardware test (records four seconds of your microphone to the supplied prefix, with explicit physical and virtual targets; requires stereo 48 kHz and `Preamp: -6 dB`):
+Hardware test (records four seconds of your microphone to the supplied prefix, with explicit physical and virtual targets; requires stereo and the matching SkyAPO config):
 
 ```sh
 build/skyapo-realtime-probe "$(build/skyapo device current)" build/proof
 ```
 
-This checks correlation and measured amplitude, not just graph visibility. An optional expected-gain argument validates other configs, for example `build/skyapo-realtime-probe "$(build/skyapo device current)" build/proof -3`. Recordings contain microphone audio; remove them when no longer needed. See [verified realtime results](docs/REALTIME.md).
+The default is −6 dB at 48 kHz. To test another graph rate, pass expected gain and rate, e.g. `build/skyapo-realtime-probe "$(build/skyapo device current)" build/proof-96k -6 96000`; the PipeWire graph must already be running at that rate. Supported graph rates 44.1, 48 and 96 kHz have been recorded and numerically checked. The probe checks correlation and measured amplitude, not just graph visibility. Recordings contain microphone audio; remove them when no longer needed. See [verified realtime results](docs/REALTIME.md).
 
 ## Status and limitations
 
-Realtime stereo 48 kHz capture, virtual-source consumption, -6 dB processing, reconnect, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware/rates/layouts need validation. Quantum is measured from the graph, not guessed.
+Realtime stereo capture at 44.1/48/96 kHz, virtual-source consumption, -6 dB processing, virtual-node recovery, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware and mono layouts need validation. Quantum is measured from the graph, not guessed.
 
 The adapter now uses the actual upstream `FilterConfiguration` read/process/write implementation and selected upstream filters, but **not the complete Windows `FilterEngine` or EAPO parser**. Nested `Include:`, capture `Stage:`, transactional hot config reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot currently expose extra channels created by Copy, so that config is rejected with a file/line diagnostic. Upstream GraphicEQ and Convolution/libHybridConv are built when FFTW3f is available; convolution uses the negotiated fixed PipeWire block size and relative impulse-response paths. Loudness correction, plugin hosting, and advanced CLI inspection are not implemented. Unsupported active-stage config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
 

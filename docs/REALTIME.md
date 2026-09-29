@@ -58,6 +58,18 @@ On 2026-09-30 the selected source was `alsa_input.pci-0000_00_1f.3.analog-stereo
 
 The actual upstream Convolution and GraphicEQ implementations now execute in offline core tests. A separate allocation audit executes 1000 fixed-size upstream Convolution blocks with zero audited callback allocations/deallocations. Convolution is fixed-block: Engine rejects variable callback blocks; the daemon delays graph construction until negotiated quantum and handles rate/quantum changes on the control loop. The current physical-device recording exercise used Preamp, not a convolution IR. Exact PipeWire hardware tests of convolution at alternate rates/quantums remain outstanding.
 
+### Graph-rate negotiation verification
+
+The virtual source advertises planar float32 at 44.1, 48 and 96 kHz (with the selected source's channel positions), instead of pinning `SPA_PARAM_Format` to 48 kHz. On the same physical stereo source, PipeWire was temporarily configured to each rate, and the independent two-stream probe recorded both raw and processed sources at the selected rate with no fallback. Results with `Preamp: -6 dB`:
+
+| Graph rate | Quantum | Frames per client | Correlation | RMS ratio | Callback alloc/free | Overruns |
+|---|---:|---:|---:|---:|---:|---:|
+| 44.1 kHz | 512 | 176400 | 1.0 | 0.501187 (−6 dB) | 0 / 0 | 0 |
+| 48 kHz | 1024 | 192000 | 1.0 | 0.501187 (−6 dB) | 0 / 0 | 0 |
+| 96 kHz | 2048 | 384000 | 1.0 | 0.501187 (−6 dB) | 0 / 0 | 0 |
+
+After testing, PipeWire settings were restored to `clock.allowed-rates=[48000]` and `clock.force-rate=0`; status returned to 48 kHz / quantum 1024. These are observed graph quantum values, not end-to-end latency measurements. This verifies **stereo** at the three rates; a physical mono source has not been available for equivalent PipeWire recording.
+
 ## Implementation file changes in this milestone
 
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.

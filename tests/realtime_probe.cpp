@@ -13,7 +13,7 @@
 #define PW_KEY_NODE_DONT_MOVE "node.dont-move"
 
 namespace {
-constexpr unsigned Rate = 48000, Channels = 2;
+constexpr unsigned Channels = 2;
 struct Probe;
 struct Capture {
   Probe *owner{};
@@ -27,6 +27,7 @@ struct Probe {
   pw_main_loop *loop{};
   spa_source *done{};
   spa_source *timer{};
+  unsigned rate = 48000;
   Capture raw, processed;
   bool failed = false;
 };
@@ -56,7 +57,7 @@ void format(void *data, uint32_t id, const spa_pod *param) {
   auto &c = *static_cast<Capture *>(data);
   spa_audio_info_raw info{};
   if (spa_format_audio_raw_parse(param, &info) < 0 ||
-      info.format != SPA_AUDIO_FORMAT_F32 || info.rate != Rate ||
+      info.format != SPA_AUDIO_FORMAT_F32 || info.rate != c.owner->rate ||
       info.channels != Channels) {
     c.owner->failed = true;
     pw_main_loop_quit(c.owner->loop);
@@ -93,7 +94,7 @@ void process(void *data) {
 }
 void create(Probe &p, Capture &c, const char *target, unsigned seconds) {
   c.owner = &p;
-  c.samples.resize(size_t(Rate) * seconds * Channels);
+  c.samples.resize(size_t(p.rate) * seconds * Channels);
   static const auto events = [] {
     pw_stream_events e{};
     e.version = PW_VERSION_STREAM_EVENTS;
@@ -119,7 +120,7 @@ void create(Probe &p, Capture &c, const char *target, unsigned seconds) {
   spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
   spa_audio_info_raw info{};
   info.format = SPA_AUDIO_FORMAT_F32;
-  info.rate = Rate;
+  info.rate = p.rate;
   info.channels = Channels;
   info.position[0] = SPA_AUDIO_CHANNEL_FL;
   info.position[1] = SPA_AUDIO_CHANNEL_FR;
@@ -135,7 +136,7 @@ void create(Probe &p, Capture &c, const char *target, unsigned seconds) {
 }
 void wav(const std::string &path, const Capture &c) {
   SF_INFO info{};
-  info.samplerate = Rate;
+  info.samplerate = c.owner->rate;
   info.channels = Channels;
   info.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
   auto *f = sf_open(path.c_str(), SFM_WRITE, &info);
@@ -150,18 +151,32 @@ void wav(const std::string &path, const Capture &c) {
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc != 3 && argc != 4) {
+  if (argc < 3 || argc > 5) {
     std::cerr << "usage: skyapo-realtime-probe <physical-node-name> "
-                 "<output-prefix> [expected-gain-db]\n";
+                 "<output-prefix> [expected-gain-db] [sample-rate]\n";
     return 2;
   }
-  const double expectedDb = argc == 4 ? std::strtod(argv[3], nullptr) : -6.0;
+  const double expectedDb = argc >= 4 ? std::strtod(argv[3], nullptr) : -6.0;
   if (!std::isfinite(expectedDb) || expectedDb < -120.0 || expectedDb > 24.0) {
     std::cerr << "expected gain must be a finite value from -120 to 24 dB\n";
     return 2;
   }
-  pw_init(nullptr, nullptr);
   Probe p;
+  if (argc == 4 || argc == 5) {
+    char *end = nullptr;
+    const auto parsed = std::strtoul(argv[argc - 1], &end, 10);
+    if (argc == 4) {
+      // Preserve the historical fourth argument as expected gain. A rate is
+      // specified as the fifth argument when a custom gain is also needed.
+      p.rate = 48000;
+    } else if (!end || *end || parsed < 8000 || parsed > 384000) {
+      std::cerr << "sample rate must be an integer from 8000 to 384000\n";
+      return 2;
+    } else {
+      p.rate = static_cast<unsigned>(parsed);
+    }
+  }
+  pw_init(nullptr, nullptr);
   p.loop = pw_main_loop_new(nullptr);
   auto *loop = pw_main_loop_get_loop(p.loop);
   p.done = pw_loop_add_event(loop, completion, &p);
@@ -182,7 +197,7 @@ int main(int argc, char **argv) {
     // regression and energy over the aligned recording, excluding startup.
     int bestLag = 0;
     double best = -2;
-    size_t start = Rate / 2, window = 4096;
+    size_t start = p.rate / 2, window = 4096;
     for (int lag = -4096; lag <= 4096; ++lag) {
       double xy = 0, xx = 0, yy = 0;
       for (size_t i = start; i < start + window; i += 4) {

@@ -28,7 +28,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 ## 0.3.x — upstream configuration engine
 
 - [x] Port `FilterConfiguration` channel-map execution to Linux and preserve upstream `read/process/write` processing.
-- [ ] Port `IFilterFactory` lifecycle hooks and use the upstream factory orchestration model.
+- [x] Port `IFilterFactory` initialization/configuration/file lifecycle hooks and upstream ordered command dispatch for the supported factories.
 - [ ] Replace Windows-only `FilterEngine` configuration discovery, synchronization and watcher dependencies with narrow Linux adapters.
 - [ ] Evaluate portable expression parser dependencies; document any unsupported expression functions.
 - Acceptance: SkyAPO uses upstream configuration/filter orchestration for the supported directives; parser compatibility fixtures from upstream have explicit pass/fail outcomes.
@@ -36,7 +36,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 ## 0.4.x — robust config lifecycle and PipeWire recovery
 
 - [x] Background-of-callback (PipeWire control-loop) parse/build, safe graph swap, and last-known-good hot reload.
-- [ ] Test PipeWire daemon restart and physical device unplug/replug; cover mono/stereo and 44.1/48/96 kHz.
+- [x] Negotiate F32P at 44.1/48/96 kHz and verify stereo capture-to-virtual-source recordings with the -6 dB numerical regression.
+- [ ] Test PipeWire daemon restart and physical device unplug/replug; verify mono capture and virtual source consumer churn.
 - [ ] Test virtual source consumer churn, daemon restart, overrun reporting and format/quantum changes.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 

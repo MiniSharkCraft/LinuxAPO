@@ -636,7 +636,6 @@ struct Runtime {
     spa_pod_builder b = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
     spa_audio_info_raw info{};
     info.format = SPA_AUDIO_FORMAT_F32P;
-    info.rate = 48000;
     info.channels = channels;
     const std::vector<std::pair<std::string, uint32_t>> positionsMap = {
         {"MONO", SPA_AUDIO_CHANNEL_MONO}, {"FL", SPA_AUDIO_CHANNEL_FL},
@@ -655,16 +654,36 @@ struct Runtime {
     }
     std::array<float, MaxChannels> unityVolumes;
     unityVolumes.fill(1.0f);
+    // Advertise the rates the DSP core can rebuild for, rather than pinning
+    // the PipeWire graph to the old prototype's 48 kHz default. Keep F32P and
+    // the selected node's channel positions fixed; the session manager chooses
+    // one of these rates and process() observes it through clock.rate.
+    spa_pod_frame formatFrame;
+    spa_pod_builder_push_object(&b, &formatFrame, SPA_TYPE_OBJECT_Format,
+                                SPA_PARAM_EnumFormat);
+    spa_pod_builder_add(&b, SPA_FORMAT_mediaType,
+                        SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+                        SPA_FORMAT_mediaSubtype,
+                        SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+                        SPA_FORMAT_AUDIO_format, SPA_POD_Id(info.format),
+                        SPA_FORMAT_AUDIO_rate,
+                        SPA_POD_CHOICE_ENUM_Int(3, 48000, 44100, 96000),
+                        SPA_FORMAT_AUDIO_channels, SPA_POD_Int(channels), 0);
+    if (!SPA_FLAG_IS_SET(info.flags, SPA_AUDIO_FLAG_UNPOSITIONED))
+      spa_pod_builder_add(&b, SPA_FORMAT_AUDIO_position,
+                          SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Id,
+                                        channels, info.position), 0);
+    const spa_pod *enumFormat =
+        static_cast<spa_pod *>(spa_pod_builder_pop(&b, &formatFrame));
     const spa_pod *params[] = {
-        spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info),
-        spa_format_audio_raw_build(&b, SPA_PARAM_Format, &info),
+        enumFormat,
         static_cast<spa_pod *>(spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
             SPA_POD_Float(1.0f), SPA_PROP_mute, SPA_POD_Bool(false),
             SPA_PROP_channelVolumes,
             SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
                           unityVolumes.data())))};
-    if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 3) < 0)
+    if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 2) < 0)
       throw std::runtime_error("filter connection failed");
     path = settings::socketPath();
     server = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);

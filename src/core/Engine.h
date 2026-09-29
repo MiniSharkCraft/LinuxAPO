@@ -1,5 +1,6 @@
 #pragma once
 #include "IFilter.h"
+#include "IFilterFactory.h"
 #include "helpers/MemoryHelper.h"
 #include <filesystem>
 #include <memory>
@@ -51,6 +52,7 @@ private:
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
   std::vector<std::string> descriptions;
+  std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
