@@ -111,6 +111,16 @@ if(SKYAPO_BUILD_UI)
       ${SKYAPO_EDITOR}/guis/BiQuadFilterGUI.ui
       ${SKYAPO_EDITOR}/guis/BiQuadFilterGUIFactory.cpp
       ${SKYAPO_EDITOR}/guis/BiQuadFilterGUIFactory.h
+      ${SKYAPO_EDITOR}/guis/DelayFilterGUI.cpp
+      ${SKYAPO_EDITOR}/guis/DelayFilterGUI.h
+      ${SKYAPO_EDITOR}/guis/DelayFilterGUI.ui
+      ${SKYAPO_EDITOR}/guis/DelayFilterGUIFactory.cpp
+      ${SKYAPO_EDITOR}/guis/DelayFilterGUIFactory.h
+      ${SKYAPO_EDITOR}/guis/StageFilterGUI.cpp
+      ${SKYAPO_EDITOR}/guis/StageFilterGUI.h
+      ${SKYAPO_EDITOR}/guis/StageFilterGUI.ui
+      ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.cpp
+      ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.h
     )
     set_target_properties(skyapo-eapo-editor PROPERTIES AUTOMOC ON AUTOUIC ON)
     set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS

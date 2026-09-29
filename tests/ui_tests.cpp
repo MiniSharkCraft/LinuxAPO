@@ -2,9 +2,15 @@
 
 #include "Editor/guis/BiQuadFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
+#include "Editor/guis/DelayFilterGUI.h"
+#include "Editor/guis/DelayFilterGUIFactory.h"
 #include "Editor/guis/PreampFilterGUI.h"
 #include "Editor/guis/PreampFilterGUIFactory.h"
+#include "Editor/guis/StageFilterGUI.h"
+#include "Editor/guis/StageFilterGUIFactory.h"
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <iostream>
 
@@ -84,6 +90,66 @@ int main(int argc, char **argv) {
   if (storedCommand != "Filter" || !storedParameters.contains("250") ||
       !storedParameters.contains("4")) {
     std::cerr << "upstream BiQuad editor failed to serialize its controls\n";
+    return 1;
+  }
+
+  DelayFilterGUIFactory delayFactory;
+  command = "Delay";
+  parameters = "4 ms";
+  auto *delay = delayFactory.createFilterGUI(command, parameters);
+  if (!delay) {
+    std::cerr << "upstream Delay editor did not recognize its config line\n";
+    return 1;
+  }
+  auto *delayValue = delay->findChild<QDoubleSpinBox *>("delaySpinBox");
+  auto *delayUnit = delay->findChild<QComboBox *>("unitComboBox");
+  if (!delayValue || !delayUnit) {
+    std::cerr << "upstream Delay controls are missing\n";
+    delete delay;
+    return 1;
+  }
+  delayValue->setValue(25.5);
+  delay->store(storedCommand, storedParameters);
+  if (storedCommand != "Delay" || !storedParameters.contains("25.5") ||
+      !storedParameters.contains("ms")) {
+    std::cerr << "upstream Delay editor failed to serialize milliseconds\n";
+    delete delay;
+    return 1;
+  }
+  delayUnit->setCurrentIndex(1);
+  delayValue->setValue(128.0);
+  delay->store(storedCommand, storedParameters);
+  delete delay;
+  if (storedCommand != "Delay" || !storedParameters.contains("128") ||
+      !storedParameters.contains("samples")) {
+    std::cerr << "upstream Delay editor failed to serialize sample units\n";
+    return 1;
+  }
+
+  StageFilterGUIFactory stageFactory;
+  command = "Stage";
+  parameters = "capture";
+  auto *stage = stageFactory.createFilterGUI(command, parameters);
+  if (!stage) {
+    std::cerr << "upstream Stage editor did not recognize its config line\n";
+    return 1;
+  }
+  auto *preMix = stage->findChild<QCheckBox *>("preMixCheckBox");
+  auto *postMix = stage->findChild<QCheckBox *>("postMixCheckBox");
+  auto *capture = stage->findChild<QCheckBox *>("captureCheckBox");
+  if (!preMix || !postMix || !capture || !capture->isChecked()) {
+    std::cerr << "upstream Stage controls did not load capture selection\n";
+    delete stage;
+    return 1;
+  }
+  preMix->setChecked(true);
+  postMix->setChecked(true);
+  stage->store(storedCommand, storedParameters);
+  delete stage;
+  if (storedCommand != "Stage" || !storedParameters.contains("pre-mix") ||
+      !storedParameters.contains("post-mix") ||
+      !storedParameters.contains("capture")) {
+    std::cerr << "upstream Stage editor failed to serialize selections\n";
     return 1;
   }
   std::cout << "upstream editor widget and config preservation tests passed\n";

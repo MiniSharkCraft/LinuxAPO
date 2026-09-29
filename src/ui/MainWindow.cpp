@@ -3,7 +3,9 @@
 #include "Editor/FilterTemplate.h"
 #include "Editor/IFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
+#include "Editor/guis/DelayFilterGUIFactory.h"
 #include "Editor/guis/PreampFilterGUIFactory.h"
+#include "Editor/guis/StageFilterGUIFactory.h"
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -104,6 +106,8 @@ MainWindow::MainWindow(QString path) {
     QMenu menu(addButton);
     PreampFilterGUIFactory preamp;
     BiQuadFilterGUIFactory biquad;
+    DelayFilterGUIFactory delay;
+    StageFilterGUIFactory stage;
     for (const auto &filter : preamp.createFilterTemplates()) {
       auto *action = menu.addAction(filter.getName());
       action->setData(filter.getLine());
@@ -111,6 +115,15 @@ MainWindow::MainWindow(QString path) {
     auto *section = menu.addSection(tr("Parametric filters"));
     Q_UNUSED(section);
     for (const auto &filter : biquad.createFilterTemplates()) {
+      auto *action = menu.addAction(filter.getName());
+      action->setData(filter.getLine());
+    }
+    menu.addSeparator();
+    for (const auto &filter : delay.createFilterTemplates()) {
+      auto *action = menu.addAction(filter.getName());
+      action->setData(filter.getLine());
+    }
+    for (const auto &filter : stage.createFilterTemplates()) {
       auto *action = menu.addAction(filter.getName());
       action->setData(filter.getLine());
     }
@@ -222,6 +235,8 @@ void MainWindow::rebuildRows() {
 
   static PreampFilterGUIFactory preampFactory;
   static BiQuadFilterGUIFactory biquadFactory;
+  static DelayFilterGUIFactory delayFactory;
+  static StageFilterGUIFactory stageFactory;
   for (qsizetype index = 0; index < document.lineCount(); ++index) {
     const QString raw = document.line(index).toQString();
     auto *frame = new QFrame(this);
@@ -242,6 +257,16 @@ void MainWindow::rebuildRows() {
         command = raw.left(colon).trimmed();
         parameters = raw.mid(colon + 1).trimmed();
         editor = biquadFactory.createFilterGUI(command, parameters);
+      }
+      if (!editor) {
+        command = raw.left(colon).trimmed();
+        parameters = raw.mid(colon + 1).trimmed();
+        editor = delayFactory.createFilterGUI(command, parameters);
+      }
+      if (!editor) {
+        command = raw.left(colon).trimmed();
+        parameters = raw.mid(colon + 1).trimmed();
+        editor = stageFactory.createFilterGUI(command, parameters);
       }
     }
 
