@@ -3,8 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <unistd.h>
 #include <sndfile.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 bool write(const fs::path &path, const std::string &contents) {
@@ -36,6 +36,22 @@ int main() {
                 << '\n';
       return 1;
     }
+
+#ifdef SKYAPO_TEST_LV2
+  if (!write(path, "Plugin: LV2 https://skyapo.example/plugins/test-gain\n"))
+    return 1;
+  Engine plugin(48000, 2, 128, {L"L", L"R"});
+  plugin.loadConfig(path);
+  float pluginBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float pluginExpected[8] = {.1f, -.2f, .3f,  -.4f,
+                                   .5f, -.5f, .25f, -.25f};
+  plugin.process(pluginBlock, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(pluginBlock[i] - pluginExpected[i]) > 1e-5f) {
+      std::cerr << "LV2 test plugin output mismatch at " << i << '\n';
+      return 1;
+    }
+#endif
 
   if (!write(path, "Filter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n"))
     return 1;
@@ -177,8 +193,7 @@ int main() {
     return 1;
   convolution.process(convBlock, 256);
   for (int i = 0; i < 512; ++i)
-    if (std::abs(convBlock[i] - ((i % 2) ? -0.05f : 0.1f) * (i / 2)) >
-        1e-4f) {
+    if (std::abs(convBlock[i] - ((i % 2) ? -0.05f : 0.1f) * (i / 2)) > 1e-4f) {
       std::cerr << "upstream Convolution impulse response mismatch at " << i
                 << " got " << convBlock[i] << '\n';
       return 1;

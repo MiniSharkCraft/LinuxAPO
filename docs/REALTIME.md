@@ -70,6 +70,10 @@ The virtual source advertises planar float32 at 44.1, 48 and 96 kHz (with the se
 
 After testing, PipeWire settings were restored to `clock.allowed-rates=[48000]` and `clock.force-rate=0`; status returned to 48 kHz / quantum 1024. These are observed graph quantum values, not end-to-end latency measurements. This verifies **stereo** at the three rates; a physical mono source has not been available for equivalent PipeWire recording.
 
+### LV2 plugin in live graph
+
+The test LV2 bundle was selected via `LV2_PATH` and loaded by `skyapod` using `tests/data/lv2_realtime.txt` (`Preamp: -6 dB` followed by the test plugin's default 0.5 gain). At 48 kHz stereo, a separate raw and virtual-source recording captured 192000 frames each, correlation 1 and measured ratio **0.250594** (−12.0206 dB, matching the combined DSP gain). Status showed two active filters, 0 callback allocations/deallocations, 0 overruns; the daemon was stopped and removed its virtual node afterward. This exercises one deliberately simple LV2 audio/control-port plugin, not a third-party plugin's safety or latency.
+
 ## Implementation file changes in this milestone
 
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.

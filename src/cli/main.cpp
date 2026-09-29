@@ -1,11 +1,14 @@
 #include "../platform/Settings.h"
 #include "Engine.h"
+#ifdef SKYAPO_HAVE_LV2
+#include "LV2PluginHost.h"
+#endif
 #ifdef SKYAPO_HAVE_PIPEWIRE
 #include "../pipewire/DeviceManager.h"
 #endif
-#include <iostream>
 #include <chrono>
 #include <fcntl.h>
+#include <iostream>
 #include <thread>
 #include <unistd.h>
 namespace {
@@ -26,7 +29,8 @@ void startDaemon() {
     return;
   }
   if (settings::device().empty())
-    throw std::runtime_error("select an input first: skyapo device set <device>");
+    throw std::runtime_error(
+        "select an input first: skyapo device set <device>");
   settings::config();
   const pid_t child = fork();
   if (child < 0)
@@ -94,7 +98,7 @@ int main(int argc, char **argv) {
     if (argc < 2)
       throw std::runtime_error("usage: skyapo status | start | stop | restart "
                                "| device list/set/current | config show/reload "
-                               "| config check <file>");
+                               "| config check <file> | plugin list/scan");
     std::string cmd = argv[1];
     if (cmd == "status") {
       std::cout << settings::queryStatus();
@@ -110,16 +114,30 @@ int main(int argc, char **argv) {
     if (cmd == "filters" && argc == 2) {
       const auto status = settings::queryStatus();
       if (status.find("Daemon: not reachable") != std::string::npos)
-        throw std::runtime_error("daemon is not reachable; active filters unavailable");
+        throw std::runtime_error(
+            "daemon is not reachable; active filters unavailable");
       const auto begin = status.find("Filter chain:");
       const auto end = status.find("\nConfig:", begin);
       if (begin == std::string::npos)
         throw std::runtime_error("daemon status does not contain filter data");
       std::cout << status.substr(begin, end == std::string::npos
-                                         ? std::string::npos
-                                         : end - begin)
+                                            ? std::string::npos
+                                            : end - begin)
                 << '\n';
       return 0;
+    }
+    if (cmd == "plugin" && argc == 3 &&
+        (std::string(argv[2]) == "list" || std::string(argv[2]) == "scan")) {
+#ifdef SKYAPO_HAVE_LV2
+      LV2PluginHost host;
+      const auto plugins = host.list();
+      std::cout << "LV2 plugins discovered: " << plugins.size() << '\n';
+      for (const auto &[uri, name] : plugins)
+        std::cout << uri << '\t' << name << '\n';
+      return 0;
+#else
+      throw std::runtime_error("LV2 support was not built (install Lilv)");
+#endif
     }
     if (cmd == "start" && argc == 2) {
       startDaemon();

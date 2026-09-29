@@ -79,6 +79,32 @@ int main() {
     }
     unlink(routePath);
   }
+#ifdef SKYAPO_TEST_LV2
+  {
+    char pluginPath[] = "/tmp/skyapo-lv2-test-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Plugin: LV2 https://skyapo.example/plugins/test-gain\n";
+    }
+    Engine plugin(48000, 2, 8192, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 8192);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      const unsigned frames = (iteration * 59) % 8192 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::sin(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+    }
+    unlink(pluginPath);
+  }
+#endif
 #ifdef SKYAPO_TEST_CONVOLUTION
   char irTemplate[] = "/tmp/skyapo-rt-ir-XXXXXX";
   int irFd = mkstemp(irTemplate);
@@ -104,8 +130,7 @@ int main() {
     std::ofstream f(configPath);
     f << "Convolution: " << irTemplate << '\n';
   }
-  Engine convolution(48000, 2, 256,
-                     {eapoChannel("FL"), eapoChannel("FR")});
+  Engine convolution(48000, 2, 256, {eapoChannel("FL"), eapoChannel("FR")});
   convolution.loadConfig(configPath);
   std::vector<float> convolutionBlock(256 * 2);
   for (unsigned iteration = 0; iteration < 1000; ++iteration) {

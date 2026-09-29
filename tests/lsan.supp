@@ -1,0 +1,4 @@
+# Lilv 0.28.0's world_load_plugin_classes leaves one 24-byte class allocation
+# unreachable when the process-lifetime LV2 catalog is loaded. Suppress only
+# this known third-party allocation; other SkyAPO/LV2 allocations remain checked.
+leak:lilv_world_load_plugin_classes

@@ -1,0 +1,2 @@
+Preamp: -6 dB
+Plugin: LV2 https://skyapo.example/plugins/test-gain

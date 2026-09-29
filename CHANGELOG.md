@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an initial native LV2 host and non-realtime plugin discovery CLI; audio/control-port plugin processing is tested offline and under callback allocation audit.
 - Moved directive dispatch and factory lifecycle calls onto the upstream `IFilterFactory` ordering; Linux-only Stage/Include handling remains around the factory chain.
 - Added `skyapo filters` and `skyapo diagnostics`, reporting the daemon's active directive/source lines and compiled upstream revision.
 - Added a PipeWire-ordered systemd user service, CMake install rules, and an Arch PKGBUILD that builds the pinned SourceForge submodule.

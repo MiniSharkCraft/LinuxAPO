@@ -11,6 +11,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
+pkg_check_modules(LILV QUIET IMPORTED_TARGET lilv-0)
+pkg_check_modules(LV2 QUIET IMPORTED_TARGET lv2)
 
 if(SKYAPO_SANITIZERS)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -41,9 +43,18 @@ endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp)
 target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
-target_include_directories(skyapo-core PUBLIC src/core ${EAPO_PORT} ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
+target_include_directories(skyapo-core
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin src/core ${EAPO_PORT}
+         ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
+if(LILV_FOUND)
+  target_sources(skyapo-core PRIVATE src/plugin/LV2PluginHost.cpp)
+  target_link_libraries(skyapo-core PUBLIC PkgConfig::LILV)
+  target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_LV2=1)
+else()
+  message(STATUS "Lilv not found: native LV2 hosting disabled")
+endif()
 if(FFTW3F_FOUND)
   target_sources(skyapo-core PRIVATE src/platform/linux/ConvolutionFilterLinux.cpp)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_CONVOLUTION=1)
@@ -90,10 +101,47 @@ if(FFTW3F_FOUND)
 endif()
 target_link_options(skyapo-realtime-safety-tests PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
 add_test(NAME skyapo-realtime-safety COMMAND skyapo-realtime-safety-tests)
+if(LILV_FOUND AND LV2_FOUND)
+  set(SKYAPO_TEST_LV2_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/skyapo-test.lv2")
+  add_library(skyapo-test-lv2 MODULE tests/plugins/test_gain.c)
+  target_link_libraries(skyapo-test-lv2 PRIVATE PkgConfig::LV2)
+  set_target_properties(skyapo-test-lv2 PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "skyapo_test_gain"
+    LIBRARY_OUTPUT_DIRECTORY "${SKYAPO_TEST_LV2_DIR}")
+  configure_file(tests/plugins/skyapo-test.lv2/manifest.ttl
+    "${SKYAPO_TEST_LV2_DIR}/manifest.ttl" COPYONLY)
+  configure_file(tests/plugins/skyapo-test.lv2/plugin.ttl
+    "${SKYAPO_TEST_LV2_DIR}/plugin.ttl" COPYONLY)
+  target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_LV2=1)
+  target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_LV2=1)
+  add_dependencies(skyapo-tests skyapo-test-lv2)
+  add_dependencies(skyapo-realtime-safety-tests skyapo-test-lv2)
+  set_tests_properties(skyapo-core skyapo-realtime-safety PROPERTIES
+    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+  if(SKYAPO_SANITIZERS)
+    set_property(TEST skyapo-core skyapo-realtime-safety APPEND PROPERTY
+      ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+  endif()
+else()
+  message(STATUS "LV2 development headers not found: LV2 host test fixture disabled")
+endif()
 
 add_executable(skyapo-render-tests tests/render_tests.cpp)
 target_link_libraries(skyapo-render-tests PRIVATE PkgConfig::SNDFILE)
 add_test(NAME skyapo-offline-render COMMAND skyapo-render-tests $<TARGET_FILE:skyapo-render> ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt)
+if(LILV_FOUND AND LV2_FOUND)
+  add_test(NAME skyapo-offline-lv2-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt -12.0206)
+  set_tests_properties(skyapo-offline-lv2-render PROPERTIES
+    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+  if(SKYAPO_SANITIZERS)
+    set_property(TEST skyapo-offline-lv2-render APPEND PROPERTY ENVIRONMENT
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+  endif()
+endif()
 
 # Real hardware test, explicitly invoked; never part of unattended CTest.
 add_executable(skyapo-realtime-probe tests/realtime_probe.cpp)

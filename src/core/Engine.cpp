@@ -16,6 +16,9 @@
 #include "IFilterFactory.h"
 #include "IIRFilterFactory.h"
 #include "PreampFilterFactory.h"
+#ifdef SKYAPO_HAVE_LV2
+#include "LV2PluginHost.h"
+#endif
 #include "helpers/ChannelHelper.h"
 #include "helpers/StringHelper.h"
 
@@ -67,6 +70,9 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   factories.push_back(std::make_unique<PreampFilterFactory>());
   factories.push_back(std::make_unique<DelayFilterFactory>());
   factories.push_back(std::make_unique<CopyFilterFactory>());
+#ifdef SKYAPO_HAVE_LV2
+  factories.push_back(makeLV2PluginFilterFactory());
+#endif
 #ifdef SKYAPO_HAVE_CONVOLUTION
   factories.push_back(std::make_unique<ConvolutionFilterFactory>());
   factories.push_back(std::make_unique<GraphicEQFilterFactory>());
@@ -78,14 +84,13 @@ void Engine::loadConfig(const std::string &path) {
   std::vector<std::filesystem::path> includeStack;
   bool stageActive = true;
   FilterEngine factoryContext(channelCount, channelCount, maxFrameCount);
-  const auto addReturnedFilters = [&](std::vector<IFilter *> produced,
-                                     const std::filesystem::path &source,
-                                     unsigned line,
-                                     const std::string &directive) {
-    for (auto *filter : produced)
-      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           source, line, directive});
-  };
+  const auto addReturnedFilters =
+      [&](std::vector<IFilter *> produced, const std::filesystem::path &source,
+          unsigned line, const std::string &directive) {
+        for (auto *filter : produced)
+          candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
+                               source, line, directive});
+      };
   for (auto &factory : factories) {
     factory->initialize(&factoryContext);
     addReturnedFilters(factory->startOfConfiguration(), path, 0,
@@ -98,14 +103,15 @@ void Engine::loadConfig(const std::string &path) {
                        "configuration finalization");
 
   auto newGraph = buildGraph(candidate);
-  const bool newFixedBlock = std::any_of(
-      newGraph.begin(), newGraph.end(),
-      [](const auto &node) { return node.fixedBlock; });
+  const bool newFixedBlock =
+      std::any_of(newGraph.begin(), newGraph.end(),
+                  [](const auto &node) { return node.fixedBlock; });
   std::vector<std::string> newDescriptions;
   newDescriptions.reserve(candidate.size());
   for (const auto &parsed : candidate)
-    newDescriptions.push_back(parsed.directive + " — " + parsed.source.string() +
-                              ":" + std::to_string(parsed.line));
+    newDescriptions.push_back(parsed.directive + " — " +
+                              parsed.source.string() + ":" +
+                              std::to_string(parsed.line));
 
   std::vector<FilterInfo *> infos;
   infos.reserve(newGraph.size());
@@ -119,7 +125,8 @@ void Engine::loadConfig(const std::string &path) {
   };
   try {
     for (const auto &node : newGraph) {
-      auto *info = static_cast<FilterInfo *>(MemoryHelper::alloc(sizeof(FilterInfo)));
+      auto *info =
+          static_cast<FilterInfo *>(MemoryHelper::alloc(sizeof(FilterInfo)));
       info->filter = node.filter;
       info->inPlace = node.inPlace;
       info->inChannelCount = node.inputs.size();
@@ -128,14 +135,15 @@ void Engine::loadConfig(const std::string &path) {
       info->outChannels = nullptr;
       try {
         if (info->inChannelCount) {
-          info->inChannels = static_cast<size_t *>(MemoryHelper::alloc(
-              info->inChannelCount * sizeof(size_t)));
+          info->inChannels = static_cast<size_t *>(
+              MemoryHelper::alloc(info->inChannelCount * sizeof(size_t)));
           std::copy(node.inputs.begin(), node.inputs.end(), info->inChannels);
         }
         if (info->outChannelCount) {
-          info->outChannels = static_cast<size_t *>(MemoryHelper::alloc(
-              info->outChannelCount * sizeof(size_t)));
-          std::copy(node.outputs.begin(), node.outputs.end(), info->outChannels);
+          info->outChannels = static_cast<size_t *>(
+              MemoryHelper::alloc(info->outChannelCount * sizeof(size_t)));
+          std::copy(node.outputs.begin(), node.outputs.end(),
+                    info->outChannels);
         }
       } catch (...) {
         MemoryHelper::free(info->inChannels);
@@ -154,8 +162,8 @@ void Engine::loadConfig(const std::string &path) {
   void *memory = MemoryHelper::alloc(sizeof(FilterConfiguration));
   FilterConfiguration *built = nullptr;
   try {
-    built = new (memory)
-        FilterConfiguration(&context, infos, channelNames.size());
+    built =
+        new (memory) FilterConfiguration(&context, infos, channelNames.size());
   } catch (...) {
     MemoryHelper::free(memory);
     freeInfos();
@@ -217,8 +225,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 #endif
     std::vector<std::wstring> outputNames;
     try {
-      outputNames =
-          filter->initialize(static_cast<float>(rate), maxFrameCount, inputNames);
+      outputNames = filter->initialize(static_cast<float>(rate), maxFrameCount,
+                                       inputNames);
     } catch (const std::exception &e) {
       throw std::runtime_error(parsed.source.string() + ":" +
                                std::to_string(parsed.line) + ": " + e.what());
@@ -333,9 +341,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                    StringHelper::toString(stage, 65001) + "'");
       }
       if (!foundAny)
-        throw std::runtime_error(normalizedPath.string() + ":" +
-                                 std::to_string(lineNo) +
-                                 ": Stage requires capture, pre-mix, or post-mix");
+        throw std::runtime_error(
+            normalizedPath.string() + ":" + std::to_string(lineNo) +
+            ": Stage requires capture, pre-mix, or post-mix");
       stageActive = foundCapture;
       continue;
     }
@@ -368,23 +376,27 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       continue;
     if (made.empty()) {
       const auto name = StringHelper::toString(originalCommand, 65001);
-      const bool known = originalCommand == L"Preamp" ||
-                         originalCommand == L"Delay" ||
-                         originalCommand == L"Channel" ||
-                         originalCommand == L"Copy" ||
-                         originalCommand.rfind(L"Filter", 0) == 0 ||
-                         originalCommand == L"GraphicEQ" ||
-                         originalCommand == L"Convolution";
+      const bool known =
+          originalCommand == L"Preamp" || originalCommand == L"Delay" ||
+          originalCommand == L"Channel" || originalCommand == L"Copy" ||
+          originalCommand.rfind(L"Filter", 0) == 0 ||
+          originalCommand == L"GraphicEQ" ||
+          originalCommand == L"Convolution" || originalCommand == L"Plugin";
       if (!known)
         throw std::runtime_error(normalizedPath.string() + ":" +
                                  std::to_string(lineNo) +
                                  ": unsupported command '" + name + "'");
 #ifndef SKYAPO_HAVE_CONVOLUTION
-      if (originalCommand == L"GraphicEQ" ||
-          originalCommand == L"Convolution")
+      if (originalCommand == L"GraphicEQ" || originalCommand == L"Convolution")
         throw std::runtime_error(normalizedPath.string() + ":" +
                                  std::to_string(lineNo) + ": " + name +
                                  " requires FFTW3f development files");
+#endif
+#ifndef SKYAPO_HAVE_LV2
+      if (originalCommand == L"Plugin")
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) + ": " + name +
+                                 " requires Lilv development files for LV2");
 #endif
       throw std::runtime_error(normalizedPath.string() + ":" +
                                std::to_string(lineNo) + ": invalid " + name +
