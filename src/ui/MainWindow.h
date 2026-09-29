@@ -3,6 +3,7 @@
 #include "ConfigFile.h"
 #include <QMainWindow>
 #include <QString>
+#include <functional>
 #include <vector>
 
 class QComboBox;
@@ -31,8 +32,8 @@ private:
   void refreshStatus();
   void refreshDevices();
   void selectDevice(int index);
-  int runCli(const QStringList &arguments, QByteArray *output,
-             QByteArray *error = nullptr) const;
+  using CliCompletion = std::function<void(int, QByteArray, QByteArray)>;
+  void runCli(const QStringList &arguments, CliCompletion completion);
   QString defaultConfigPath() const;
   void updateTitle();
 
@@ -43,4 +44,6 @@ private:
   QLabel *statusLabel{};
   QComboBox *deviceCombo{};
   QVBoxLayout *rowsLayout{};
+  bool statusRequestPending{};
+  bool deviceRequestPending{};
 };

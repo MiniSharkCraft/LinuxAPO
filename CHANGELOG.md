@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added a Qt 6 `skyapo-ui` editor that reuses upstream Preamp/BiQuad/Delay/Stage GUI widgets, preserves untouched config bytes, and drives daemon/device/config actions through the existing CLI.
+- Made editor CLI actions asynchronous and coalesced periodic status/device queries so stalled daemon/device requests do not freeze the Qt event loop.
 - Audited upstream Qt Editor reuse boundaries and documented which Windows device/APO integrations must become SkyAPO daemon clients.
 - Added LV2 input-control metadata inspection (`skyapo plugin info`) and validated config-time parameter overrides using `symbol=value` syntax.
 - Added an initial native LV2 host and non-realtime plugin discovery CLI; audio/control-port plugin processing is tested offline and under callback allocation audit.

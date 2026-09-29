@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <memory>
 
 namespace {
 QString cliProgram() {
@@ -136,28 +137,33 @@ MainWindow::MainWindow(QString path) {
   connect(deviceCombo, qOverload<int>(&QComboBox::activated), this,
           &MainWindow::selectDevice);
   connect(startButton, &QPushButton::clicked, this, [this] {
-    QByteArray out, error;
-    if (runCli({"start"}, &out, &error) != 0)
-      QMessageBox::warning(this, tr("SkyAPO"),
-                           QString::fromUtf8(error.isEmpty() ? out : error));
-    refreshStatus();
+    runCli({"start"}, [this](int result, QByteArray output, QByteArray error) {
+      if (result != 0)
+        QMessageBox::warning(
+            this, tr("SkyAPO"),
+            QString::fromUtf8(error.isEmpty() ? output : error));
+      refreshStatus();
+    });
   });
   connect(stopButton, &QPushButton::clicked, this, [this] {
-    QByteArray out, error;
-    if (runCli({"stop"}, &out, &error) != 0)
-      QMessageBox::warning(this, tr("SkyAPO"),
-                           QString::fromUtf8(error.isEmpty() ? out : error));
-    refreshStatus();
+    runCli({"stop"}, [this](int result, QByteArray output, QByteArray error) {
+      if (result != 0)
+        QMessageBox::warning(
+            this, tr("SkyAPO"),
+            QString::fromUtf8(error.isEmpty() ? output : error));
+      refreshStatus();
+    });
   });
 
   if (path.isEmpty()) {
     path = defaultConfigPath();
-    QByteArray output;
-    if (runCli({"config", "show"}, &output) != 0) {
+    if (!QFileInfo::exists(path)) {
       QDir().mkpath(QFileInfo(path).absolutePath());
-      QFile file(path);
-      if (file.open(QIODevice::WriteOnly))
+      QSaveFile file(path);
+      if (file.open(QIODevice::WriteOnly)) {
         file.write("Preamp: 0 dB\n");
+        file.commit();
+      }
     }
   }
   openConfig(path);
@@ -193,22 +199,39 @@ QString MainWindow::defaultConfigPath() const {
          "/skyapo/config.txt";
 }
 
-int MainWindow::runCli(const QStringList &arguments, QByteArray *output,
-                       QByteArray *error) const {
-  QProcess process;
-  process.start(cliProgram(), arguments);
-  if (!process.waitForStarted(3000) || !process.waitForFinished(10000)) {
-    if (error)
-      *error = process.errorString().toUtf8();
-    process.kill();
-    process.waitForFinished();
-    return -1;
-  }
-  if (output)
-    *output = process.readAllStandardOutput();
-  if (error)
-    *error = process.readAllStandardError();
-  return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
+void MainWindow::runCli(const QStringList &arguments,
+                        CliCompletion completion) {
+  auto *process = new QProcess(this);
+  process->setProcessChannelMode(QProcess::SeparateChannels);
+  struct CompletionState {
+    bool delivered{};
+    CliCompletion callback;
+  };
+  auto state = std::make_shared<CompletionState>();
+  state->callback = std::move(completion);
+  const auto finish = [process, state](int result, QByteArray output,
+                                       QByteArray error) {
+    if (state->delivered)
+      return;
+    state->delivered = true;
+    process->deleteLater();
+    if (state->callback)
+      state->callback(result, std::move(output), std::move(error));
+  };
+  connect(
+      process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+      [process, finish](int exitCode, QProcess::ExitStatus exitStatus) {
+        const int result = exitStatus == QProcess::NormalExit ? exitCode : -1;
+        finish(result, process->readAllStandardOutput(),
+               process->readAllStandardError());
+      });
+  connect(process, &QProcess::errorOccurred, this,
+          [process, finish](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart)
+              finish(-1, process->readAllStandardOutput(),
+                     process->errorString().toUtf8());
+          });
+  process->start(cliProgram(), arguments);
 }
 
 void MainWindow::openConfig(const QString &path) {
@@ -352,67 +375,80 @@ bool MainWindow::saveConfig() {
 void MainWindow::checkConfig() {
   if (!saveConfig())
     return;
-  QByteArray output, error;
-  const int result = runCli({"config", "check", configPath}, &output, &error);
-  QMessageBox::information(
-      this, result == 0 ? tr("Configuration valid") : tr("Configuration error"),
-      QString::fromUtf8(result == 0 ? output : error));
+  runCli({"config", "check", configPath}, [this](int result, QByteArray output,
+                                                 QByteArray error) {
+    QMessageBox::information(this,
+                             result == 0 ? tr("Configuration valid")
+                                         : tr("Configuration error"),
+                             QString::fromUtf8(result == 0 ? output : error));
+  });
 }
 
 void MainWindow::reloadConfig() {
   if (!saveConfig())
     return;
-  QByteArray output, error;
-  const int result = runCli({"config", "reload"}, &output, &error);
-  QMessageBox::information(
-      this, result == 0 ? tr("Reload requested") : tr("Reload failed"),
-      QString::fromUtf8(result == 0 ? output : error));
-  refreshStatus();
+  runCli({"config", "reload"},
+         [this](int result, QByteArray output, QByteArray error) {
+           QMessageBox::information(
+               this, result == 0 ? tr("Reload requested") : tr("Reload failed"),
+               QString::fromUtf8(result == 0 ? output : error));
+           refreshStatus();
+         });
 }
 
 void MainWindow::refreshStatus() {
-  QByteArray output, error;
-  const int result = runCli({"status"}, &output, &error);
-  statusLabel->setText(
-      result == 0
-          ? QString::fromUtf8(output).trimmed()
-          : tr("Daemon query failed: %1").arg(QString::fromUtf8(error)));
+  if (statusRequestPending)
+    return;
+  statusRequestPending = true;
+  runCli({"status"}, [this](int result, QByteArray output, QByteArray error) {
+    statusRequestPending = false;
+    statusLabel->setText(
+        result == 0
+            ? QString::fromUtf8(output).trimmed()
+            : tr("Daemon query failed: %1").arg(QString::fromUtf8(error)));
+  });
 }
 
 void MainWindow::refreshDevices() {
-  QByteArray output, error;
-  if (runCli({"device", "list"}, &output, &error) != 0) {
-    statusLabel->setText(
-        tr("Device query failed: %1").arg(QString::fromUtf8(error)));
+  if (deviceRequestPending)
     return;
-  }
-  QByteArray current;
-  runCli({"device", "current"}, &current);
-  const auto selected = QString::fromUtf8(current).trimmed();
-  const QSignalBlocker blocker(deviceCombo);
-  deviceCombo->clear();
-  const auto lines = QString::fromUtf8(output).split('\n', Qt::SkipEmptyParts);
-  for (qsizetype i = 1; i < lines.size(); ++i) {
-    const auto columns = lines[i].split('\t');
-    if (columns.size() < 3)
-      continue;
-    const QString nodeName = columns[1];
-    const QString description = columns[2];
-    deviceCombo->addItem(description + "  —  " + nodeName, nodeName);
-    if (nodeName == selected)
-      deviceCombo->setCurrentIndex(deviceCombo->count() - 1);
-  }
-  if (deviceCombo->count() == 0)
-    deviceCombo->addItem(tr("No PipeWire input devices"));
+  deviceRequestPending = true;
+  runCli({"device", "list"},
+         [this](int result, QByteArray output, QByteArray error) {
+           deviceRequestPending = false;
+           if (result != 0) {
+             statusLabel->setText(
+                 tr("Device query failed: %1").arg(QString::fromUtf8(error)));
+             return;
+           }
+           const QSignalBlocker blocker(deviceCombo);
+           deviceCombo->clear();
+           const auto lines =
+               QString::fromUtf8(output).split('\n', Qt::SkipEmptyParts);
+           for (qsizetype i = 1; i < lines.size(); ++i) {
+             const auto columns = lines[i].split('\t');
+             if (columns.size() < 4)
+               continue;
+             const QString nodeName = columns[1];
+             const QString description = columns[2];
+             deviceCombo->addItem(description + "  —  " + nodeName, nodeName);
+             if (columns[3] == "yes")
+               deviceCombo->setCurrentIndex(deviceCombo->count() - 1);
+           }
+           if (deviceCombo->count() == 0)
+             deviceCombo->addItem(tr("No PipeWire input devices"));
+         });
 }
 
 void MainWindow::selectDevice(int index) {
   const auto nodeName = deviceCombo->itemData(index).toString();
   if (nodeName.isEmpty())
     return;
-  QByteArray output, error;
-  if (runCli({"device", "set", nodeName}, &output, &error) != 0)
-    QMessageBox::warning(this, tr("Device selection failed"),
-                         QString::fromUtf8(error));
-  refreshStatus();
+  runCli({"device", "set", nodeName},
+         [this](int result, QByteArray, QByteArray error) {
+           if (result != 0)
+             QMessageBox::warning(this, tr("Device selection failed"),
+                                  QString::fromUtf8(error));
+           refreshStatus();
+         });
 }

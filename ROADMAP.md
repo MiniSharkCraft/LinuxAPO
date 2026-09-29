@@ -69,7 +69,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Inspect the original Qt Widgets/qmake Editor, reusable filter/analysis widgets and Windows-only device/APO/registry/VST UI integrations.
 - [ ] Audit GUI-specific resource/dependency licensing and establish a Qt 6 build for selected upstream components.
 - [x] Build the first Qt 6 daemon-client editor using actual upstream Preamp/BiQuad/Delay/Stage widgets and factories, with byte-preserving config editing and widget-serialization tests.
-- [ ] Port the upstream FilterTable/model and additional reusable editor/analysis components; move GUI-side CLI calls to asynchronous IPC.
+- [ ] Port the upstream FilterTable/model and additional reusable editor/analysis components.
+- [x] Run GUI-side CLI control requests asynchronously and coalesce periodic status/device queries.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
