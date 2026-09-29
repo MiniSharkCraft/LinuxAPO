@@ -6,7 +6,15 @@ SkyAPO now has a first native LV2 host through Lilv. It discovers bundles from L
 Plugin: LV2 https://example.org/plugins/my-stereo-effect
 ```
 
-The current host supports audio-only effects with the same number of audio input/output ports as the current selected channel set, plus control ports initialized to their LV2 defaults. It rejects missing plugins, unsupported required LV2 host features, event/CV/other non-audio ports, mismatched channel layouts, and latency-reporting plugins (SkyAPO does not yet implement plugin delay compensation). It does not yet expose parameter overrides, bypass, serialization/state, plugin UIs, or process isolation. `tests/plugins/skyapo-test.lv2` is an ABI-compatible test effect; CTest verifies its default gain numerically and executes 1000 variable blocks under the callback allocator audit. A real PipeWire capture/virtual-source test with this plugin plus `Preamp: -6 dB` measured correlation 1 and ratio 0.250594 (−12.0206 dB) over 192000 frames; daemon status showed zero callback allocations/deallocations and zero overruns. This proves the fixture plugin's chain path, not third-party crash or allocator behavior.
+Input control ports may be overridden by symbol in the same directive:
+
+```text
+Plugin: LV2 https://example.org/plugins/my-stereo-effect gain=0.75 mix=0.4
+```
+
+Use `skyapo plugin info <URI>` to inspect input-port symbols, defaults and declared ranges before configuring overrides. SkyAPO rejects unknown symbols, duplicate assignments, non-finite values and out-of-range values during graph construction, so a failed hot reload leaves the prior graph active. Overrides are initialization values; live automation, UI/control-socket changes and saved plugin state are not implemented yet.
+
+The current host supports audio-only effects with the same number of audio input/output ports as the current selected channel set, plus input control ports initialized to LV2 defaults or config overrides. It rejects missing plugins, unsupported required LV2 host features, event/CV/other non-audio ports, mismatched channel layouts, and latency-reporting plugins (SkyAPO does not yet implement plugin delay compensation). It does not yet expose live parameter changes, bypass, serialization/state, plugin UIs, or process isolation. `tests/plugins/skyapo-test.lv2` is an ABI-compatible test effect; CTest verifies default and overridden gain numerically and executes 1000 variable blocks under the callback allocator audit. A real PipeWire capture/virtual-source test with this plugin plus `Preamp: -6 dB` measured correlation 1 and ratio 0.250594 (−12.0206 dB) over 192000 frames; daemon status showed zero callback allocations/deallocations and zero overruns. This proves the fixture plugin's chain path, not third-party crash or allocator behavior.
 
 Native CLAP, Linux VST2/VST3 and yabridge wrapper loading remain unimplemented. SkyAPO does not embed Wine or modify yabridge. Do not redistribute proprietary Steinberg SDK files without permission. Plugin discovery, metadata parsing and instantiation run during configuration graph construction, outside the audio callback; only the plugin's `run()` is called in processing. The interfaces in `src/plugin/IPluginInstance.h` are the format-neutral boundary for future hosts.
 

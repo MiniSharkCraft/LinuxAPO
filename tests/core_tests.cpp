@@ -51,6 +51,39 @@ int main() {
       std::cerr << "LV2 test plugin output mismatch at " << i << '\n';
       return 1;
     }
+
+  if (!write(
+          path,
+          "Plugin: LV2 https://skyapo.example/plugins/test-gain gain=0.25\n"))
+    return 1;
+  Engine overridden(48000, 2, 128, {L"L", L"R"});
+  overridden.loadConfig(path);
+  float overriddenBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  overridden.process(overriddenBlock, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(overriddenBlock[i] - pluginBlock[i] * 0.5f) > 1e-5f) {
+      std::cerr << "LV2 control override output mismatch at " << i << '\n';
+      return 1;
+    }
+
+  for (const auto &invalid : {
+           "Plugin: LV2 https://skyapo.example/plugins/test-gain missing=0.5\n",
+           "Plugin: LV2 https://skyapo.example/plugins/test-gain gain=2\n",
+       }) {
+    if (!write(path, invalid))
+      return 1;
+    bool rejectedOverride = false;
+    try {
+      Engine invalidPlugin(48000, 2, 128, {L"L", L"R"});
+      invalidPlugin.loadConfig(path);
+    } catch (const std::exception &) {
+      rejectedOverride = true;
+    }
+    if (!rejectedOverride) {
+      std::cerr << "invalid LV2 parameter override was accepted\n";
+      return 1;
+    }
+  }
 #endif
 
   if (!write(path, "Filter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n"))

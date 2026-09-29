@@ -98,7 +98,8 @@ int main(int argc, char **argv) {
     if (argc < 2)
       throw std::runtime_error("usage: skyapo status | start | stop | restart "
                                "| device list/set/current | config show/reload "
-                               "| config check <file> | plugin list/scan");
+                               "| config check <file> | plugin list/scan "
+                               "| plugin info <URI>");
     std::string cmd = argv[1];
     if (cmd == "status") {
       std::cout << settings::queryStatus();
@@ -134,6 +135,22 @@ int main(int argc, char **argv) {
       std::cout << "LV2 plugins discovered: " << plugins.size() << '\n';
       for (const auto &[uri, name] : plugins)
         std::cout << uri << '\t' << name << '\n';
+      return 0;
+#else
+      throw std::runtime_error("LV2 support was not built (install Lilv)");
+#endif
+    }
+    if (cmd == "plugin" && argc == 4 && std::string(argv[2]) == "info") {
+#ifdef SKYAPO_HAVE_LV2
+      const auto info = LV2PluginHost().describe(argv[3]);
+      std::cout << info.name << "\nURI: " << info.uri << '\n';
+      if (info.inputParameters.empty())
+        std::cout << "Input control parameters: none\n";
+      for (const auto &parameter : info.inputParameters)
+        std::cout << parameter.symbol << "\t" << parameter.name << "\t"
+                  << "default=" << parameter.defaultValue << "\t"
+                  << "range=[" << parameter.minimum << ", " << parameter.maximum
+                  << "]\n";
       return 0;
 #else
       throw std::runtime_error("LV2 support was not built (install Lilv)");

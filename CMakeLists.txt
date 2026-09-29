@@ -135,10 +135,17 @@ if(LILV_FOUND AND LV2_FOUND)
   add_test(NAME skyapo-offline-lv2-render COMMAND skyapo-render-tests
     $<TARGET_FILE:skyapo-render>
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt -12.0206)
+  add_test(NAME skyapo-offline-lv2-parameter-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_override.txt -18.0412)
   set_tests_properties(skyapo-offline-lv2-render PROPERTIES
+    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+  set_tests_properties(skyapo-offline-lv2-parameter-render PROPERTIES
     ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
   if(SKYAPO_SANITIZERS)
     set_property(TEST skyapo-offline-lv2-render APPEND PROPERTY ENVIRONMENT
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+    set_property(TEST skyapo-offline-lv2-parameter-render APPEND PROPERTY ENVIRONMENT
       "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
   endif()
 endif()

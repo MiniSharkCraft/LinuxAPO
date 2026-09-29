@@ -53,14 +53,15 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add a format-neutral plugin-instance boundary and native LV2 audio/control-port host through Lilv; wire `Plugin: LV2 <URI>` into the upstream filter graph.
 - [x] Add LV2 discovery/list CLI and an ABI-compatible test plugin covering output, realtime block processing and allocation audit.
 - [x] Verify the test LV2 plugin on the live physical-to-virtual PipeWire chain with independent recording and combined -12.0206 dB measurement.
-- [ ] Parameter overrides/state/bypass, caching, isolation, latency compensation and real third-party plugin coverage.
+- [x] Inspect LV2 control-port symbols/defaults/ranges with `skyapo plugin info`; validate config-time parameter overrides and verify them numerically offline.
+- [ ] Live parameter changes, state/bypass, caching, isolation, latency compensation and real third-party plugin coverage.
 - Acceptance: plugin scan stays outside callback; a native test plugin processes in offline and realtime graphs without breaking recovery.
 
 ## 0.7.x — plugin formats and yabridge
 
 - [ ] Add remaining CLAP, VST2 and VST3 support as legally distributable host integrations permit.
 - [ ] Verify yabridge-produced wrappers using ordinary native format scanning; document user workflow.
-- [ ] Plugin parameters, state, bypass, latency and isolation behavior.
+- [ ] Plugin live parameters, state, bypass, latency and isolation behavior.
 - Acceptance: each format is individually built/tested/reported; no SDK license violations or fabricated support.
 
 ## 0.8.x — upstream editor evolution

@@ -16,7 +16,9 @@ public:
 
   std::unique_ptr<IPluginInstance>
   create(const std::string &uri, float sampleRate, unsigned maxFrames,
-         const std::vector<std::wstring> &channels) override;
+         const std::vector<std::wstring> &channels,
+         const std::vector<PluginParameterValue> &parameters = {}) override;
+  PluginDescription describe(const std::string &uri) const;
   std::vector<std::pair<std::string, std::string>> list() const;
 };
 
