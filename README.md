@@ -35,12 +35,14 @@ build/skyapo device current
 build/skyapod --config examples/preamp.txt
 # In another terminal:
 build/skyapo status
+build/skyapo config reload
+build/skyapo stop
 wpctl status
 ```
 
 Select **SkyAPO Virtual Mic** in your recording/application input picker. The physical source is linked using native PipeWire links to planar float DSP ports; actual upstream filters process samples before source output. No external processing processes are spawned. Device selection persists the stable `node.name`, not its runtime numeric ID. Changing selection causes a reconnect. The daemon retries transient disconnects and SIGINT/SIGTERM cleanly remove its node.
 
-State lives in `$XDG_CONFIG_HOME/skyapo` (fallback `~/.config/skyapo`); default config is `config.txt`, initialized to unity preamp only when absent. Status uses a private `$XDG_RUNTIME_DIR/skyapo.sock` and reports actual metrics, or explicitly reports an unreachable daemon. Stop with Ctrl-C. Only one daemon can run per runtime directory.
+State lives in `$XDG_CONFIG_HOME/skyapo` (fallback `~/.config/skyapo`); default config is `config.txt`, initialized to unity preamp only when absent. `skyapo start/stop/restart` launches or controls the per-user daemon; start waits for PipeWire format negotiation. `skyapo config show/reload` reads the active config or asks the daemon to validate and swap it. IPC uses a mode-0600 Unix socket at `$XDG_RUNTIME_DIR/skyapo.sock`; `skyapo status` reports actual metrics or explicitly reports an unreachable daemon. The detached CLI-launched daemon logs to the user config directory as `skyapod.log`. Only one daemon can run per runtime directory.
 
 Hardware test (records four seconds of your microphone to the supplied prefix, with explicit physical and virtual targets; requires stereo 48 kHz and `Preamp: -6 dB`):
 
@@ -54,7 +56,7 @@ This checks correlation and measured amplitude, not just graph visibility. An op
 
 Realtime stereo 48 kHz capture, virtual-source consumption, -6 dB processing, reconnect, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware/rates/layouts need validation. Quantum is measured from the graph, not guessed.
 
-The adapter now uses the actual upstream `FilterConfiguration` read/process/write implementation and selected upstream filters, but **not the complete Windows `FilterEngine` or EAPO parser**. Nested `Include:`, transactional hot config reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot currently expose extra channels created by Copy, so that config is rejected with a file/line diagnostic. Upstream GraphicEQ and Convolution/libHybridConv are built when FFTW3f is available; convolution uses the negotiated fixed PipeWire block size and relative impulse-response paths. Loudness correction, plugin hosting, service installation, and CLI start/stop/restart are not implemented. Unsupported config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
+The adapter now uses the actual upstream `FilterConfiguration` read/process/write implementation and selected upstream filters, but **not the complete Windows `FilterEngine` or EAPO parser**. Nested `Include:`, capture `Stage:`, transactional hot config reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot currently expose extra channels created by Copy, so that config is rejected with a file/line diagnostic. Upstream GraphicEQ and Convolution/libHybridConv are built when FFTW3f is available; convolution uses the negotiated fixed PipeWire block size and relative impulse-response paths. Loudness correction, plugin hosting, user service installation, and advanced CLI inspection are not implemented. Unsupported active-stage config commands fail explicitly. Source software volume is fixed at unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
 
 No heap allocation, parsing, files, enumeration, or logging occurs in the processing callback. Allocation counters cover executable C++ and linked/wrapped C calls, not shared PipeWire library internals. Status timing instrumentation is diagnostic, not a scheduling guarantee.
 

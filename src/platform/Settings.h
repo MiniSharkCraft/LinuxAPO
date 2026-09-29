@@ -115,6 +115,11 @@ inline std::string queryStatus() {
     close(fd);
     return "Daemon: not reachable\n";
   }
+  const char request[] = "STATUS\n";
+  if (send(fd, request, sizeof(request) - 1, MSG_NOSIGNAL) < 0) {
+    close(fd);
+    throw std::runtime_error("cannot request daemon status");
+  }
   timeval t{2, 0};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t));
   std::string out;
@@ -124,5 +129,38 @@ inline std::string queryStatus() {
     out.append(b, n);
   close(fd);
   return out;
+}
+inline std::string daemonRequest(const std::string &request) {
+  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0)
+    throw std::runtime_error("daemon control socket failed");
+  sockaddr_un a{};
+  a.sun_family = AF_UNIX;
+  auto p = socketPath();
+  if (p.size() >= sizeof(a.sun_path)) {
+    close(fd);
+    throw std::runtime_error("socket path too long");
+  }
+  std::copy(p.begin(), p.end(), a.sun_path);
+  if (connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) < 0) {
+    close(fd);
+    throw std::runtime_error("daemon is not reachable");
+  }
+  if (send(fd, request.data(), request.size(), MSG_NOSIGNAL) < 0) {
+    close(fd);
+    throw std::runtime_error("cannot send daemon command");
+  }
+  shutdown(fd, SHUT_WR);
+  timeval timeout{3, 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  std::string response;
+  char buffer[4096];
+  ssize_t n;
+  while ((n = read(fd, buffer, sizeof(buffer))) > 0)
+    response.append(buffer, static_cast<size_t>(n));
+  close(fd);
+  if (response.empty())
+    throw std::runtime_error("daemon returned an empty response");
+  return response;
 }
 } // namespace settings

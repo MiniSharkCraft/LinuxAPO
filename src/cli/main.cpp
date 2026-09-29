@@ -4,14 +4,113 @@
 #include "../pipewire/DeviceManager.h"
 #endif
 #include <iostream>
+#include <chrono>
+#include <fcntl.h>
+#include <thread>
+#include <unistd.h>
+namespace {
+bool daemonReachable() {
+  const auto status = settings::queryStatus();
+  return !status.empty() &&
+         status.find("Daemon: not reachable") == std::string::npos;
+}
+bool daemonReady() {
+  const auto status = settings::queryStatus();
+  return status.find("Daemon: streaming") != std::string::npos &&
+         status.find("Sample rate: unknown") == std::string::npos &&
+         status.find("Quantum: unknown") == std::string::npos;
+}
+void startDaemon() {
+  if (daemonReachable()) {
+    std::cout << "skyapod is already running\n";
+    return;
+  }
+  if (settings::device().empty())
+    throw std::runtime_error("select an input first: skyapo device set <device>");
+  settings::config();
+  const pid_t child = fork();
+  if (child < 0)
+    throw std::runtime_error("cannot fork skyapod");
+  if (child == 0) {
+    if (setsid() < 0)
+      _exit(126);
+    const auto log = settings::configDir() / "skyapod.log";
+    const int output = open(log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    const int nullInput = open("/dev/null", O_RDONLY);
+    if (output >= 0) {
+      dup2(output, STDOUT_FILENO);
+      dup2(output, STDERR_FILENO);
+      if (output > STDERR_FILENO)
+        close(output);
+    } else {
+      const int nullOutput = open("/dev/null", O_WRONLY);
+      if (nullOutput >= 0) {
+        dup2(nullOutput, STDOUT_FILENO);
+        dup2(nullOutput, STDERR_FILENO);
+        if (nullOutput > STDERR_FILENO)
+          close(nullOutput);
+      }
+    }
+    if (nullInput >= 0) {
+      dup2(nullInput, STDIN_FILENO);
+      if (nullInput > STDERR_FILENO)
+        close(nullInput);
+    }
+    std::error_code ec;
+    auto executable = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+      executable = executable.parent_path() / "skyapod";
+      execl(executable.c_str(), "skyapod", static_cast<char *>(nullptr));
+    }
+    execlp("skyapod", "skyapod", static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  for (unsigned attempt = 0; attempt < 50; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (daemonReady()) {
+      std::cout << "skyapod started\n";
+      return;
+    }
+  }
+  throw std::runtime_error("skyapod did not become reachable within 5 seconds; "
+                           "check the per-user skyapod.log");
+}
+void stopDaemon() {
+  if (!daemonReachable()) {
+    std::cout << "skyapod is not running\n";
+    return;
+  }
+  std::cout << settings::daemonRequest("STOP\n");
+  for (unsigned attempt = 0; attempt < 30; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!daemonReachable())
+      return;
+  }
+  throw std::runtime_error("skyapod did not stop within 3 seconds");
+}
+} // namespace
 int main(int argc, char **argv) {
   try {
     if (argc < 2)
-      throw std::runtime_error("usage: skyapo status | device list/set/current "
+      throw std::runtime_error("usage: skyapo status | start | stop | restart "
+                               "| device list/set/current | config show/reload "
                                "| config check <file>");
     std::string cmd = argv[1];
     if (cmd == "status") {
       std::cout << settings::queryStatus();
+      return 0;
+    }
+    if (cmd == "start" && argc == 2) {
+      startDaemon();
+      return 0;
+    }
+    if (cmd == "stop" && argc == 2) {
+      stopDaemon();
+      return 0;
+    }
+    if (cmd == "restart" && argc == 2) {
+      stopDaemon();
+      startDaemon();
       return 0;
     }
     if (cmd == "device" && argc >= 3) {
@@ -45,6 +144,17 @@ int main(int argc, char **argv) {
 #else
       throw std::runtime_error("PipeWire support unavailable at build time");
 #endif
+    }
+    if (cmd == "config" && argc == 3 && std::string(argv[2]) == "show") {
+      std::ifstream config(settings::config());
+      std::cout << config.rdbuf();
+      if (!config)
+        throw std::runtime_error("cannot read config");
+      return 0;
+    }
+    if (cmd == "config" && argc == 3 && std::string(argv[2]) == "reload") {
+      std::cout << settings::daemonRequest("RELOAD\n");
+      return 0;
     }
     if (cmd == "config" && argc == 4 && std::string(argv[2]) == "check") {
       Engine e(48000, 2, 8192);

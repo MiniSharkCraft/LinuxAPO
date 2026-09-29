@@ -70,7 +70,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.9.x — distribution and release hardening
 
-- [ ] Complete CLI controls/diagnostics and stable local IPC protocol.
+- [x] Implement CLI daemon start/stop/restart, config show/reload, and local Unix-socket control.
+- [ ] Version the IPC protocol and add structured diagnostics/filter inspection.
 - [ ] User systemd unit, Arch PKGBUILD, install layout, desktop/appstream assets where GUI is ready, man pages.
 - [ ] CI: configure/build/CTest/format/sanitizers/package checks without physical hardware.
 - [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.

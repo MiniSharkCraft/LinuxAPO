@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <poll.h>
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -476,9 +477,35 @@ struct Runtime {
           accept4(r.server, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
       if (client < 0)
         break;
-      auto text = r.status();
+      pollfd requestReady{client, POLLIN, 0};
+      const int ready = poll(&requestReady, 1, 1000);
+      char request[64]{};
+      const ssize_t count = ready > 0 ? recv(client, request, sizeof(request) - 1, 0) : 0;
+      const std::string command = count > 0 ? std::string(request, count) : "STATUS";
+      std::string text;
+      if (command.rfind("STATUS", 0) == 0) {
+        text = r.status();
+      } else if (command.rfind("RELOAD", 0) == 0) {
+        try {
+          r.reloadConfig();
+          text = "Config reload succeeded\n";
+        } catch (const std::exception &e) {
+          r.configError = e.what();
+          text = std::string("Config reload failed; keeping last valid graph: ") +
+                 e.what() + "\n";
+        }
+      } else if (command.rfind("STOP", 0) == 0) {
+        r.stopping = 1;
+        text = "Stopping skyapod\n";
+      } else {
+        text = "Unsupported daemon command\n";
+      }
       send(client, text.data(), text.size(), MSG_NOSIGNAL);
       close(client);
+      if (r.stopping) {
+        pw_main_loop_quit(r.main);
+        break;
+      }
     }
   }
   void init(const std::string &selected, const std::string &cfg) {
