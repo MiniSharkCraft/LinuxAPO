@@ -64,3 +64,23 @@ void ConfigFile::insert(qsizetype index, const QString &text) {
 }
 
 void ConfigFile::remove(qsizetype index) { lines.removeAt(index); }
+
+void ConfigFile::move(qsizetype from, qsizetype to) {
+  if (from < 0 || from >= lines.size() || to < 0 || to >= lines.size() ||
+      from == to)
+    return;
+  const bool terminated = !lines.isEmpty() && !lines.last().ending.isEmpty();
+  Line line = std::move(lines[from]);
+  lines.removeAt(from);
+  lines.insert(to, std::move(line));
+  for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
+    if (lines[i].ending.isEmpty())
+      lines[i].ending = preferredEnding;
+  }
+  if (!lines.isEmpty()) {
+    if (terminated && lines.last().ending.isEmpty())
+      lines.last().ending = preferredEnding;
+    else if (!terminated)
+      lines.last().ending.clear();
+  }
+}

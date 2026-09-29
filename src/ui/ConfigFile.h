@@ -23,6 +23,7 @@ public:
   void replace(qsizetype index, const QString &text);
   void insert(qsizetype index, const QString &text);
   void remove(qsizetype index);
+  void move(qsizetype from, qsizetype to);
 
 private:
   QVector<Line> lines;

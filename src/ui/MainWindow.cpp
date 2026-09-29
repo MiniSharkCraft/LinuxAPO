@@ -89,7 +89,27 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
           markModified();
         }
       },
-      [this] { rebuildRows(); }, [this] { syncRowsToDocument(); });
+      [this] { rebuildRows(); }, [this] { syncRowsToDocument(); },
+      [this](const std::vector<FilterTable::Item *> &items) {
+        for (auto *item : items)
+          if (item && item->index >= 0 && item->index < document.lineCount())
+            document.remove(item->index);
+        if (!items.empty()) {
+          markModified();
+          rebuildRows();
+        }
+      },
+      [this](FilterTable::Item *item, int offset) {
+        if (!item)
+          return;
+        const qsizetype target = item->index + offset;
+        if (target < 0 || target >= document.lineCount())
+          return;
+        document.move(item->index, target);
+        markModified();
+        rebuildRows();
+      });
+  rowTable->setFocusPolicy(Qt::StrongFocus);
   rowTable->createAddPopupMenu();
   scroll->setWidget(rowTable);
   outer->addWidget(scroll, 1);
@@ -279,7 +299,7 @@ void MainWindow::rebuildRows() {
     item->gui = editor;
     auto *row = new FilterTableRow(rowTable, static_cast<int>(index + 1),
                                    item.get(), editor);
-    rowTable->addRow(row);
+    rowTable->addRow(row, item.get());
     if (editor) {
       connect(
           editor, &IFilterGUI::updateModel, this, [this, editor, item, index] {

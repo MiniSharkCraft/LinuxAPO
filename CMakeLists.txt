@@ -108,6 +108,7 @@ if(SKYAPO_BUILD_UI)
       ${EAPO_PORT}/Editor/FilterTableRow.cpp
       ${EAPO_PORT}/Editor/FilterTableRow.h
       ${EAPO_PORT}/Editor/FilterTableRow.ui
+      ${EAPO_PORT}/Editor/FilterTable.h
       ${SKYAPO_EDITOR}/Editor.qrc
       ${SKYAPO_EDITOR}/widgets/CompactToolBar.cpp
       ${SKYAPO_EDITOR}/widgets/CompactToolBar.h

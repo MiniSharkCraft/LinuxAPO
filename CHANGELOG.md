@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added row focus/selection, Delete removal, and Alt+Up/Alt+Down config reordering to the Linux-hosted upstream filter rows.
 - Added a Qt 6 `skyapo-ui` editor that reuses upstream Preamp/BiQuad/Delay/Stage GUI widgets, preserves untouched config bytes, and drives daemon/device/config actions through the existing CLI.
 - Made editor CLI actions asynchronous and coalesced periodic status/device queries so stalled daemon/device requests do not freeze the Qt event loop.
 - Reused upstream `FilterTableRow` and its Qt resources through a narrow Linux compatibility shim that excludes Windows device/registry table behavior.

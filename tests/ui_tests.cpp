@@ -1,6 +1,7 @@
 #include "ConfigFile.h"
 #include "MainWindow.h"
 
+#include "Editor/FilterTable.h"
 #include "Editor/FilterTableRow.h"
 #include "Editor/FilterTemplate.h"
 #include "Editor/guis/BiQuadFilterGUI.h"
@@ -18,6 +19,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
+#include <QPushButton>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <iostream>
@@ -50,6 +52,14 @@ int main(int argc, char **argv) {
   if (file.lineCount() != 3 ||
       file.serialize().contains("keep this comment exactly")) {
     std::cerr << "line removal did not update the model\n";
+    return 1;
+  }
+  ConfigFile moved;
+  const QByteArray beforeMove = "one\r\ntwo\r\nthree\r\n";
+  moved.load(beforeMove);
+  moved.move(0, 2);
+  if (moved.serialize() != "two\r\nthree\r\none\r\n") {
+    std::cerr << "moving a config line did not preserve CRLF endings\n";
     return 1;
   }
 
@@ -173,7 +183,7 @@ int main(int argc, char **argv) {
   const QString configPath = temporary.filePath("config.txt");
   QFile config(configPath);
   if (!config.open(QIODevice::WriteOnly) ||
-      config.write("Preamp: 0 dB\n") < 0) {
+      config.write("Preamp: 0 dB\n; keep order\nPreamp: -6 dB\n") < 0) {
     std::cerr << "could not create temporary UI config\n";
     return 1;
   }
@@ -182,7 +192,7 @@ int main(int argc, char **argv) {
   QElapsedTimer construction;
   construction.start();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.findChildren<FilterTableRow *>().size() != 1) {
+  if (window.findChildren<FilterTableRow *>().size() != 3) {
     std::cerr << "upstream FilterTableRow was not used by the Linux editor\n";
     return 1;
   }
@@ -203,6 +213,45 @@ int main(int argc, char **argv) {
     std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
     return 1;
   }
+  auto *table = window.findChild<FilterTable *>();
+  if (!table || !table->itemAt(0) || !table->itemAt(0)->row) {
+    std::cerr << "Linux FilterTable adapter did not expose ordered rows\n";
+    return 1;
+  }
+  table->setSelection(table->itemAt(0));
+  if (table->getFocusedItem() != table->itemAt(0) ||
+      !table->getSelectedItems().contains(table->itemAt(0))) {
+    std::cerr << "row selection/focus model did not update\n";
+    return 1;
+  }
+  table->setSelection(table->itemAt(2), false, true);
+  if (table->getSelectedItems().size() != 3) {
+    std::cerr << "shift selection did not select an ordered row range\n";
+    return 1;
+  }
+  table->setSelection(table->itemAt(1), true, false);
+  if (table->getSelectedItems().size() != 2) {
+    std::cerr << "control selection did not toggle an individual row\n";
+    return 1;
+  }
+  QKeyEvent clearSelection(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+  QApplication::sendEvent(table->itemAt(0)->row, &clearSelection);
+  if (!table->getSelectedItems().isEmpty()) {
+    std::cerr << "Escape did not clear row selection\n";
+    return 1;
+  }
+  table->setSelection(table->itemAt(0));
+  QKeyEvent moveDown(QEvent::KeyPress, Qt::Key_Down, Qt::AltModifier);
+  QApplication::sendEvent(table->itemAt(0)->row, &moveDown);
+  for (auto *button : window.findChildren<QPushButton *>())
+    if (button->text() == "Save")
+      button->click();
+  QFile reordered(configPath);
+  if (!reordered.open(QIODevice::ReadOnly) ||
+      reordered.readAll() != "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\n") {
+    std::cerr << "Alt+Down did not reorder and save the selected config row\n";
+    return 1;
+  }
   unsigned heartbeat = 0;
   QTimer pulse;
   pulse.setInterval(10);
@@ -215,7 +264,8 @@ int main(int argc, char **argv) {
     std::cerr << "GUI event loop stalled while CLI fixture was running\n";
     return 1;
   }
-  std::cout << "upstream editor widgets, config preservation, and async UI "
+  std::cout << "upstream editor widgets, selection/reordering, config "
+               "preservation, and async UI "
                "tests passed\n";
   return 0;
 }
