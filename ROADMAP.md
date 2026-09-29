@@ -66,7 +66,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.8.x — upstream editor evolution
 
-- [ ] Audit original Equalizer APO Editor projects/toolkit and licensing in detail.
+- [x] Inspect the original Qt Widgets/qmake Editor, reusable filter/analysis widgets and Windows-only device/APO/registry/VST UI integrations.
+- [ ] Audit GUI-specific resource/dependency licensing and establish a Qt 6 build for selected upstream components.
 - [ ] Port reusable editor/models toward Qt where feasible; connect only through daemon IPC.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.

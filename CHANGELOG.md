@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Audited upstream Qt Editor reuse boundaries and documented which Windows device/APO integrations must become SkyAPO daemon clients.
 - Added LV2 input-control metadata inspection (`skyapo plugin info`) and validated config-time parameter overrides using `symbol=value` syntax.
 - Added an initial native LV2 host and non-realtime plugin discovery CLI; audio/control-port plugin processing is tested offline and under callback allocation audit.
 - Moved directive dispatch and factory lifecycle calls onto the upstream `IFilterFactory` ordering; Linux-only Stage/Include handling remains around the factory chain.
