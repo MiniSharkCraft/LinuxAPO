@@ -3,6 +3,11 @@
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
 file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
 set(EAPO_SOURCES)
+configure_file(${EAPO}/FilterConfiguration.cpp
+  ${EAPO_PORT}/FilterConfiguration.cpp COPYONLY)
+configure_file(${EAPO}/FilterConfiguration.h
+  ${EAPO_PORT}/FilterConfiguration.h COPYONLY)
+list(APPEND EAPO_SOURCES ${EAPO_PORT}/FilterConfiguration.cpp)
 set(EAPO_FILTERS PreampFilter PreampFilterFactory BiQuad BiQuadFilter
     BiQuadFilterFactory IIRFilter IIRFilterFactory DelayFilter DelayFilterFactory
     ChannelFilter ChannelFilterFactory CopyFilter CopyFilterFactory)

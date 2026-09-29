@@ -24,7 +24,7 @@ add_library(skyapo-eapo-dsp STATIC
   src/platform/linux/ChannelHelper.cpp
   src/platform/linux/MemoryHelper.cpp
 )
-target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO})
+target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO_PORT} ${EAPO})
 target_compile_definitions(skyapo-eapo-dsp PRIVATE __forceinline=inline)
 target_compile_options(skyapo-eapo-dsp PRIVATE -Wno-write-strings)
 if(FFTW3F_FOUND)
@@ -32,7 +32,8 @@ if(FFTW3F_FOUND)
 endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp)
-target_include_directories(skyapo-core PUBLIC src/core ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
+target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
+target_include_directories(skyapo-core PUBLIC src/core ${EAPO_PORT} ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
 if(FFTW3F_FOUND)

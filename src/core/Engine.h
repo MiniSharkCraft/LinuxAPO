@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+class FilterConfiguration;
+
 class Engine {
 public:
   Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
@@ -22,6 +24,9 @@ private:
   struct FilterDeleter {
     void operator()(IFilter *filter) const;
   };
+  struct ConfigurationDeleter {
+    void operator()(FilterConfiguration *configuration) const;
+  };
   struct ParsedFilter {
     std::unique_ptr<IFilter, FilterDeleter> filter;
     std::filesystem::path source;
@@ -29,7 +34,7 @@ private:
   };
   using FilterList = std::vector<ParsedFilter>;
   struct FilterNode {
-    std::unique_ptr<IFilter, FilterDeleter> filter;
+    IFilter *filter;
     std::vector<unsigned> inputs;
     std::vector<unsigned> outputs;
     bool inPlace;
@@ -37,16 +42,10 @@ private:
   };
   void parseConfigFile(const std::filesystem::path &path, FilterList &candidate,
                        std::vector<std::filesystem::path> &includeStack);
-  std::vector<FilterNode>
-  buildGraph(FilterList &candidate, std::vector<std::vector<float>> &newBus,
-             std::vector<std::vector<float>> &newScratch,
-             std::vector<float *> &newInputs, std::vector<float *> &newOutputs);
+  std::vector<FilterNode> buildGraph(FilterList &candidate);
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
-  std::vector<std::vector<float>> bus;
-  std::vector<std::vector<float>> scratch;
-  std::vector<float *> inputPtrs;
-  std::vector<float *> outputPtrs;
+  std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
 };

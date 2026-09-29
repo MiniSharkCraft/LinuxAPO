@@ -1,4 +1,6 @@
 #include "Engine.h"
+#include "FilterConfiguration.h"
+#include "FilterEngine.h"
 
 #include "BiQuadFilterFactory.h"
 #include "ChannelFilterFactory.h"
@@ -30,6 +32,14 @@ void Engine::FilterDeleter::operator()(IFilter *filter) const {
   MemoryHelper::free(filter);
 }
 
+void Engine::ConfigurationDeleter::operator()(
+    FilterConfiguration *configuration) const {
+  if (!configuration)
+    return;
+  configuration->~FilterConfiguration();
+  MemoryHelper::free(configuration);
+}
+
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
                std::vector<std::wstring> names)
     : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames) {
@@ -57,25 +67,76 @@ void Engine::loadConfig(const std::string &path) {
   std::vector<std::filesystem::path> includeStack;
   parseConfigFile(std::filesystem::path(path), candidate, includeStack);
 
-  std::vector<std::vector<float>> newBus, newScratch;
-  std::vector<float *> newInputs, newOutputs;
-  auto newGraph =
-      buildGraph(candidate, newBus, newScratch, newInputs, newOutputs);
+  auto newGraph = buildGraph(candidate);
   const bool newFixedBlock = std::any_of(
       newGraph.begin(), newGraph.end(),
       [](const auto &node) { return node.fixedBlock; });
+
+  std::vector<FilterInfo *> infos;
+  infos.reserve(newGraph.size());
+  auto freeInfos = [&infos] {
+    for (auto *info : infos) {
+      MemoryHelper::free(info->inChannels);
+      MemoryHelper::free(info->outChannels);
+      MemoryHelper::free(info);
+    }
+    infos.clear();
+  };
+  try {
+    for (const auto &node : newGraph) {
+      auto *info = static_cast<FilterInfo *>(MemoryHelper::alloc(sizeof(FilterInfo)));
+      info->filter = node.filter;
+      info->inPlace = node.inPlace;
+      info->inChannelCount = node.inputs.size();
+      info->outChannelCount = node.outputs.size();
+      info->inChannels = nullptr;
+      info->outChannels = nullptr;
+      try {
+        if (info->inChannelCount) {
+          info->inChannels = static_cast<size_t *>(MemoryHelper::alloc(
+              info->inChannelCount * sizeof(size_t)));
+          std::copy(node.inputs.begin(), node.inputs.end(), info->inChannels);
+        }
+        if (info->outChannelCount) {
+          info->outChannels = static_cast<size_t *>(MemoryHelper::alloc(
+              info->outChannelCount * sizeof(size_t)));
+          std::copy(node.outputs.begin(), node.outputs.end(), info->outChannels);
+        }
+      } catch (...) {
+        MemoryHelper::free(info->inChannels);
+        MemoryHelper::free(info->outChannels);
+        MemoryHelper::free(info);
+        throw;
+      }
+      infos.push_back(info);
+    }
+  } catch (...) {
+    freeInfos();
+    throw;
+  }
+
+  FilterEngine context(channelCount, channelCount, maxFrameCount);
+  void *memory = MemoryHelper::alloc(sizeof(FilterConfiguration));
+  FilterConfiguration *built = nullptr;
+  try {
+    built = new (memory)
+        FilterConfiguration(&context, infos, channelNames.size());
+  } catch (...) {
+    MemoryHelper::free(memory);
+    freeInfos();
+    throw;
+  }
+  std::unique_ptr<FilterConfiguration, ConfigurationDeleter> newConfiguration(
+      built);
+  for (auto &parsed : candidate)
+    parsed.filter.release();
+
   graph.swap(newGraph);
-  bus.swap(newBus);
-  scratch.swap(newScratch);
-  inputPtrs.swap(newInputs);
-  outputPtrs.swap(newOutputs);
+  configuration.swap(newConfiguration);
   fixedBlock = newFixedBlock;
 }
 
-std::vector<Engine::FilterNode> Engine::buildGraph(
-    FilterList &candidate, std::vector<std::vector<float>> &newBus,
-    std::vector<std::vector<float>> &newScratch,
-    std::vector<float *> &newInputs, std::vector<float *> &newOutputs) {
+std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
   std::vector<std::wstring> allNames = channelNames;
   std::vector<std::wstring> selectedNames = allNames;
   std::vector<FilterNode> result;
@@ -158,16 +219,12 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
         node.outputs.push_back(static_cast<unsigned>(it - allNames.begin()));
       }
     }
-    node.filter = std::move(parsed.filter);
+    node.filter = filter;
     result.push_back(std::move(node));
     selectedNames =
         filter->getSelectChannels() ? std::move(outputNames) : savedSelection;
   }
 
-  newBus.resize(allNames.size(), std::vector<float>(maxFrameCount));
-  newScratch.resize(allNames.size(), std::vector<float>(maxFrameCount));
-  newInputs.resize(allNames.size());
-  newOutputs.resize(allNames.size());
   return result;
 }
 
@@ -291,21 +348,7 @@ void Engine::process(float *samples, unsigned frames) {
   if (fixedBlock && frames != maxFrameCount)
     throw std::runtime_error(
         "convolution filters require the negotiated fixed audio block size");
-  for (unsigned c = 0; c < channelCount; ++c)
-    for (unsigned f = 0; f < frames; ++f)
-      bus[c][f] = samples[f * channelCount + c];
-  for (auto &node : graph) {
-    for (size_t i = 0; i < node.inputs.size(); ++i)
-      inputPtrs[i] = bus[node.inputs[i]].data();
-    for (size_t i = 0; i < node.outputs.size(); ++i)
-      outputPtrs[i] =
-          node.inPlace ? bus[node.outputs[i]].data() : scratch[i].data();
-    node.filter->process(outputPtrs.data(), inputPtrs.data(), frames);
-    if (!node.inPlace)
-      for (size_t i = 0; i < node.outputs.size(); ++i)
-        std::copy_n(scratch[i].data(), frames, bus[node.outputs[i]].data());
-  }
-  for (unsigned c = 0; c < channelCount; ++c)
-    for (unsigned f = 0; f < frames; ++f)
-      samples[f * channelCount + c] = bus[c][f];
+  configuration->read(samples, frames);
+  configuration->process(frames);
+  configuration->write(samples, frames);
 }

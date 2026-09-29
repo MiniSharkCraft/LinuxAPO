@@ -26,7 +26,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.3.x — upstream configuration engine
 
-- [ ] Port `FilterConfiguration` channel-map execution and `IFilterFactory` lifecycle to Linux.
+- [x] Port `FilterConfiguration` channel-map execution to Linux and preserve upstream `read/process/write` processing.
+- [ ] Port `IFilterFactory` lifecycle hooks and use the upstream factory orchestration model.
 - [ ] Replace Windows-only `FilterEngine` configuration discovery, synchronization and watcher dependencies with narrow Linux adapters.
 - [ ] Evaluate portable expression parser dependencies; document any unsupported expression functions.
 - Acceptance: SkyAPO uses upstream configuration/filter orchestration for the supported directives; parser compatibility fixtures from upstream have explicit pass/fail outcomes.
