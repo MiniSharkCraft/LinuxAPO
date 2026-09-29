@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
+option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
@@ -87,6 +88,65 @@ target_link_libraries(skyapod PRIVATE skyapo-pipewire)
 target_link_options(skyapod PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
 
 enable_testing()
+if(SKYAPO_BUILD_UI)
+  find_package(Qt6 QUIET COMPONENTS Widgets)
+  if(Qt6Widgets_FOUND)
+    set(SKYAPO_EDITOR ${EAPO}/Editor)
+    add_library(skyapo-eapo-editor STATIC
+      ${SKYAPO_EDITOR}/IFilterGUI.cpp
+      ${SKYAPO_EDITOR}/IFilterGUI.h
+      ${SKYAPO_EDITOR}/IFilterGUIFactory.cpp
+      ${SKYAPO_EDITOR}/IFilterGUIFactory.h
+      ${SKYAPO_EDITOR}/FilterTemplate.cpp
+      ${SKYAPO_EDITOR}/FilterTemplate.h
+      ${SKYAPO_EDITOR}/helpers/GUIHelper.cpp
+      ${SKYAPO_EDITOR}/helpers/GUIHelper.h
+      ${SKYAPO_EDITOR}/guis/PreampFilterGUI.cpp
+      ${SKYAPO_EDITOR}/guis/PreampFilterGUI.h
+      ${SKYAPO_EDITOR}/guis/PreampFilterGUI.ui
+      ${SKYAPO_EDITOR}/guis/PreampFilterGUIFactory.cpp
+      ${SKYAPO_EDITOR}/guis/PreampFilterGUIFactory.h
+      ${SKYAPO_EDITOR}/guis/BiQuadFilterGUI.cpp
+      ${SKYAPO_EDITOR}/guis/BiQuadFilterGUI.h
+      ${SKYAPO_EDITOR}/guis/BiQuadFilterGUI.ui
+      ${SKYAPO_EDITOR}/guis/BiQuadFilterGUIFactory.cpp
+      ${SKYAPO_EDITOR}/guis/BiQuadFilterGUIFactory.h
+    )
+    set_target_properties(skyapo-eapo-editor PROPERTIES AUTOMOC ON AUTOUIC ON)
+    set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS
+      "${SKYAPO_EDITOR}/guis")
+    target_include_directories(skyapo-eapo-editor BEFORE PUBLIC ${EAPO_PORT} ${EAPO})
+    # The upstream editor's legacy stable.h supplied these Qt declarations
+    # globally; provide only the declarations needed by the selected sources.
+    target_precompile_headers(skyapo-eapo-editor PRIVATE
+      <QString> <QStringList> <QMetaType>)
+    target_compile_definitions(skyapo-eapo-editor PRIVATE __forceinline=inline)
+    target_link_libraries(skyapo-eapo-editor PUBLIC skyapo-core Qt6::Widgets)
+
+    add_executable(skyapo-ui src/ui/main.cpp src/ui/MainWindow.cpp
+      src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/ConfigFile.h)
+    set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
+    target_include_directories(skyapo-ui PRIVATE ${SKYAPO_EDITOR})
+    target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
+    target_link_libraries(skyapo-ui PRIVATE skyapo-eapo-editor)
+
+    add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/ConfigFile.cpp)
+    target_include_directories(skyapo-ui-tests PRIVATE src/ui)
+    target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
+    target_compile_definitions(skyapo-ui-tests PRIVATE __forceinline=inline)
+    target_link_libraries(skyapo-ui-tests PRIVATE skyapo-eapo-editor)
+    add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests)
+    set_tests_properties(skyapo-ui-editor PROPERTIES
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    install(TARGETS skyapo-ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES packaging/skyapo.desktop
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+  else()
+    message(STATUS "Qt 6 Widgets not found: skyapo-ui target disabled")
+  endif()
+endif()
+
 add_executable(skyapo-tests tests/core_tests.cpp)
 target_link_libraries(skyapo-tests PRIVATE skyapo-core PkgConfig::SNDFILE)
 if(FFTW3F_FOUND)

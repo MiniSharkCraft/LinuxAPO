@@ -19,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ pkg-config libsndfile1-dev libpipewire-0.3-dev
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libsndfile1-dev libpipewire-0.3-dev qt6-base-dev
       - name: Configure
         run: cmake -S . -B build -G Ninja -DSKYAPO_SANITIZERS=${{ matrix.sanitizers }}
       - name: Build

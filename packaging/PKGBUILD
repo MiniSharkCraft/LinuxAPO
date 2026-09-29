@@ -1,11 +1,11 @@
 pkgname=skyapo
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
 arch=('x86_64')
 url='https://sourceforge.net/projects/equalizerapo/'
 license=('GPL-2.0-or-later')
-depends=('pipewire' 'libsndfile' 'fftw' 'lilv')
+depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base')
 makedepends=('cmake' 'gcc' 'pkgconf')
 source=("skyapo::git+file://${startdir}/..")
 sha256sums=('SKIP')

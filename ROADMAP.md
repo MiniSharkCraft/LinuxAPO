@@ -68,7 +68,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Inspect the original Qt Widgets/qmake Editor, reusable filter/analysis widgets and Windows-only device/APO/registry/VST UI integrations.
 - [ ] Audit GUI-specific resource/dependency licensing and establish a Qt 6 build for selected upstream components.
-- [ ] Port reusable editor/models toward Qt where feasible; connect only through daemon IPC.
+- [x] Build the first Qt 6 daemon-client editor using actual upstream Preamp/BiQuad widgets and factories, with byte-preserving config editing and tests.
+- [ ] Port the upstream FilterTable/model and additional reusable editor/analysis components; move GUI-side CLI calls to asynchronous IPC.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
@@ -78,7 +79,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add actual active filter source-line listing and build/upstream revision diagnostics.
 - [ ] Version the IPC protocol and add structured/machine-readable diagnostics.
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
-- [ ] Desktop/AppStream assets when GUI is ready; man pages.
+- [x] Desktop launcher for the Qt editor.
+- [ ] AppStream metadata, branded icon, MIME association and man pages.
 - [ ] CI: configure/build/CTest/format/sanitizers/package checks without physical hardware.
 - [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.

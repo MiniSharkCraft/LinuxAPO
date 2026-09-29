@@ -4,7 +4,7 @@ SkyAPO is an early Linux port effort for Equalizer APO. It compiles and invokes 
 
 ## Build
 
-Dependencies: CMake, C++17 compiler, pkg-config, libsndfile, PipeWire development headers/library, and a running user PipeWire/WirePlumber session. Lilv is optional for the base build and enables LV2 hosting. On Arch Linux: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber lilv`.
+Dependencies: CMake, C++17 compiler, pkg-config, libsndfile, PipeWire development headers/library, and a running user PipeWire/WirePlumber session. Lilv is optional for the base build and enables LV2 hosting; Qt 6 Widgets optionally builds the editor. On Arch Linux: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber lilv qt6-base`.
 
 Upstream is a pinned official SourceForge Git submodule. After cloning SkyAPO, run `git submodule update --init --recursive`. Its checkout remains unmodified: CMake generates a small build-directory compatibility copy of the compiled filters. See [porting notes](docs/PORTING.md). SkyAPO uses GPL-licensed Equalizer APO code; upstream copyright notices and `upstream/equalizerapo/License.txt` are preserved.
 
@@ -13,6 +13,8 @@ cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+When Qt 6 Widgets is installed, launch the upstream-based configuration editor with `build/skyapo-ui [config-file]`. It provides daemon/device controls and visual upstream Preamp/parametric-filter rows while preserving untouched config lines. See [UI status](docs/UI.md) for the current scope and remaining gaps.
 
 For AddressSanitizer and UBSan: configure with `-DSKYAPO_SANITIZERS=ON`.
 
@@ -60,7 +62,7 @@ The default is −6 dB at 48 kHz. To test another graph rate, pass expected gain
 
 Realtime stereo capture at 44.1/48/96 kHz, virtual-source consumption, -6 dB processing, virtual-node recovery, and callback allocation auditing have been verified on real hardware. DSP supports up to eight recognized speaker positions; graph-rate changes rebuild the DSP off-thread/main-loop while temporarily outputting silence. Other hardware and mono layouts need validation. Quantum is measured from the graph, not guessed.
 
-The adapter uses actual upstream `FilterConfiguration` read/process/write and selected filter implementations, but **not** the complete Windows `FilterEngine` or EAPO parser. Nested `Include:`, capture `Stage:`, transactional hot reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot expose extra channels created by Copy, so those configs fail with a source/line error. Upstream GraphicEQ and Convolution/libHybridConv build when FFTW3f is available; convolution uses the negotiated fixed block size. Native LV2 audio/control-port plugins can be listed with `skyapo plugin list` and used as `Plugin: LV2 <URI>`; see [plugin support and limitations](docs/PLUGINS.md). Loudness correction, CLAP/VST2/VST3 hosting, plugin parameters/state/bypass/UI and advanced conditional parsing remain unsupported. Unsupported active-stage commands fail explicitly. Source software volume is unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
+The adapter uses actual upstream `FilterConfiguration` read/process/write and selected filter implementations, but **not** the complete Windows `FilterEngine` or EAPO parser. Nested `Include:`, capture `Stage:`, transactional hot reload, `Channel:` selection and `Copy:` remapping are implemented. The fixed PipeWire source cannot expose extra channels created by Copy, so those configs fail with a source/line error. Upstream GraphicEQ and Convolution/libHybridConv build when FFTW3f is available; convolution uses the negotiated fixed block size. Native LV2 audio/control-port plugins can be listed with `skyapo plugin list`, inspected with `skyapo plugin info <URI>`, and configured with `Plugin: LV2 <URI>` plus control overrides; see [plugin support and limitations](docs/PLUGINS.md). Loudness correction, CLAP/VST2/VST3 hosting, live plugin parameters/state/bypass/UI and advanced conditional parsing remain unsupported. Unsupported active-stage commands fail explicitly. Source software volume is unity; use `Preamp:` for gain. Known latency beyond the graph quantum is not estimated.
 
 No heap allocation, parsing, files, enumeration, or logging occurs in the processing callback. Allocation counters cover executable C++ and linked/wrapped C calls, not shared PipeWire library internals. Status timing instrumentation is diagnostic, not a scheduling guarantee.
 

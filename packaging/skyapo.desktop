@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SkyAPO Configuration Editor
+Comment=Edit Equalizer APO-compatible audio processing configuration
+Exec=skyapo-ui
+Icon=audio-input-microphone
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Audio;Utility;
