@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added capture-stage selection and cleanly skipped Windows pre/post-mix stages; nested Includes inherit stage context without mutating their parent.
 - Replaced SkyAPO's local channel-bus execution loop with upstream `FilterConfiguration` read/process/write; added a narrow Linux metadata shim for its portable constructor.
 - Revalidated normal and ASan/UBSan PipeWire recording through the upstream `FilterConfiguration`: 192000 captured frames, correlation 1, measured -6 dB ratio 0.501187.
 - Added optional upstream GraphicEQ/Convolution and libHybridConv build support when FFTW3f is present.

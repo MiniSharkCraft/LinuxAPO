@@ -22,7 +22,7 @@ For AddressSanitizer and UBSan: configure with `-DSKYAPO_SANITIZERS=ON`.
 build/skyapo-render --input input.wav --output output.wav --config examples/basic.txt
 ```
 
-The WAV sample rate/channel count are preserved. Supported commands currently are `Preamp:`, Equalizer APO parametric and IIR `Filter:`, `Delay:`, `Channel:`, `Copy:`, and nested `Include:` with relative paths. Invalid and unsupported lines report the config path and line number. This uses upstream filter implementations and factories, but the complete Equalizer APO parser is not yet ported.
+The WAV sample rate/channel count are preserved. Supported commands currently are `Preamp:`, Equalizer APO parametric and IIR `Filter:`, `Delay:`, `Channel:`, `Copy:`, `Stage:`, `GraphicEQ:`, `Convolution:`, and nested `Include:` with relative paths. Invalid and unsupported active lines report the config path and line number. `Stage: capture` selects Linux capture processing; Windows-only `pre-mix`/`post-mix` sections are skipped. This uses upstream filter implementations and factories, but the complete Equalizer APO parser is not yet ported.
 
 Check a config with `build/skyapo config check examples/basic.txt`. `build/skyapo device list` enumerates PipeWire source nodes if PipeWire development files were present at configure time.
 

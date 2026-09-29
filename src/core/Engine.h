@@ -41,7 +41,8 @@ private:
     bool fixedBlock;
   };
   void parseConfigFile(const std::filesystem::path &path, FilterList &candidate,
-                       std::vector<std::filesystem::path> &includeStack);
+                       std::vector<std::filesystem::path> &includeStack,
+                       bool &stageActive);
   std::vector<FilterNode> buildGraph(FilterList &candidate);
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;

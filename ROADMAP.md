@@ -19,6 +19,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add inotify config hot reload with debouncing, control-thread graph creation, atomic pointer swap and deferred retirement after callback quiescence.
 - [ ] Expand parser to preserve comments/quoting, validate numeric ranges, and return structured diagnostics.
 - [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
+- [x] Map `Stage: capture` to the Linux processing path and skip Windows pre/post-mix sections with Include-local stage scope.
 - Acceptance: Include trees, Channel selection, Copy remapping and error paths have deterministic offline expected-sample tests; realtime allocation test still passes; -6 dB capture probe still passes.
 - [x] Core and allocation tests exercise actual upstream Channel/Copy implementations; new Copy output channels are rejected with file/line because the current virtual source layout is fixed.
 - Acceptance: hot reload also passes a live valid→valid and valid→invalid daemon check without changing the active audio chain on failure.

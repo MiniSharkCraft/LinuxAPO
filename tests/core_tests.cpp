@@ -258,10 +258,31 @@ int main() {
     return 1;
   }
 
+  const auto stageRoot = dir / "stage-root.txt";
+  if (!write(stageRoot,
+             "Stage: capture\nInclude: staged-child.txt\nPreamp: 6 dB\n") ||
+      !write(dir / "staged-child.txt",
+             "Stage: post-mix\nUnsupportedInThisStage: ignored\n"
+             "Preamp: -60 dB\nStage: capture\nPreamp: -6 dB\n"))
+    return 1;
+  Engine staged(48000, 2, 128);
+  staged.loadConfig(stageRoot.string());
+  if (staged.filterCount() != 2) {
+    std::cerr << "Stage filtering or Include-local stage scope mismatch\n";
+    return 1;
+  }
+  float stageSample[2] = {1, -1};
+  staged.process(stageSample, 1);
+  if (std::abs(stageSample[0] - 1.0f) > 1e-5f ||
+      std::abs(stageSample[1] + 1.0f) > 1e-5f) {
+    std::cerr << "Include changed its parent Stage state\n";
+    return 1;
+  }
+
   unlink(path.c_str());
   fs::remove_all(dir);
   std::cout
-      << "Upstream Preamp/BiQuad/IIR/Delay; nested Include, cycle, rollback, "
-         "line diagnostics and unsupported-command tests passed\n";
+      << "Upstream Preamp/BiQuad/IIR/Delay; nested Include, Stage, cycle, "
+         "rollback, line diagnostics and unsupported-command tests passed\n";
   return 0;
 }

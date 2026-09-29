@@ -23,6 +23,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 void Engine::FilterDeleter::operator()(IFilter *filter) const {
@@ -65,7 +66,9 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
 void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
-  parseConfigFile(std::filesystem::path(path), candidate, includeStack);
+  bool stageActive = true;
+  parseConfigFile(std::filesystem::path(path), candidate, includeStack,
+                  stageActive);
 
   auto newGraph = buildGraph(candidate);
   const bool newFixedBlock = std::any_of(
@@ -230,7 +233,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              FilterList &candidate,
-                             std::vector<std::filesystem::path> &includeStack) {
+                             std::vector<std::filesystem::path> &includeStack,
+                             bool &stageActive) {
   std::error_code ec;
   auto absolutePath = std::filesystem::absolute(configPath, ec);
   if (ec)
@@ -281,6 +285,31 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     const auto widePath =
         StringHelper::toWString(normalizedPath.string(), 65001);
 
+    if (command == L"Stage") {
+      std::wistringstream stages(StringHelper::toLowerCase(params));
+      std::wstring stage;
+      bool foundCapture = false;
+      bool foundAny = false;
+      while (stages >> stage) {
+        foundAny = true;
+        if (stage == L"capture")
+          foundCapture = true;
+        else if (stage != L"pre-mix" && stage != L"post-mix")
+          throw std::runtime_error(normalizedPath.string() + ":" +
+                                   std::to_string(lineNo) +
+                                   ": unsupported Stage value '" +
+                                   StringHelper::toString(stage, 65001) + "'");
+      }
+      if (!foundAny)
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": Stage requires capture, pre-mix, or post-mix");
+      stageActive = foundCapture;
+      continue;
+    }
+    if (!stageActive)
+      continue;
+
     if (command == L"Include") {
       if (params.size() >= 2 && params.front() == L'"' && params.back() == L'"')
         params = params.substr(1, params.size() - 2);
@@ -291,7 +320,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       std::filesystem::path included(StringHelper::toString(params, 65001));
       if (included.is_relative())
         included = normalizedPath.parent_path() / included;
-      parseConfigFile(included, candidate, includeStack);
+      bool includedStage = stageActive;
+      parseConfigFile(included, candidate, includeStack, includedStage);
       continue;
     }
 
