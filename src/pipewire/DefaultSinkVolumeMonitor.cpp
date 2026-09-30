@@ -2,6 +2,7 @@
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/keys.h>
+#include <pipewire/permission.h>
 #include <spa/param/props.h>
 #include <spa/pod/iter.h>
 #include <spa/utils/json.h>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <unordered_map>
 
@@ -96,10 +98,29 @@ struct DefaultSinkVolumeMonitor::Impl {
       return;
     node = object;
     nodeId = id;
-    pw_node_add_listener(object, &nodeHook, &nodeEvents, this);
+    const int listenerResult =
+        pw_node_add_listener(object, &nodeHook, &nodeEvents, this);
+    if (listenerResult < 0)
+      std::cerr << "skyapod: cannot listen to default sink node ("
+                << listenerResult << ")\n";
+  }
+
+  void queryNodeParams() {
+    if (!node)
+      return;
     uint32_t params[] = {SPA_PARAM_Props};
-    pw_node_subscribe_params(object, params, 1);
-    pw_node_enum_params(object, 0, SPA_PARAM_Props, 0, UINT32_MAX, nullptr);
+    const int subscribeResult = pw_node_subscribe_params(node, params, 1);
+    const int enumResult =
+        pw_node_enum_params(node, 0, SPA_PARAM_Props, 0, UINT32_MAX, nullptr);
+    if (subscribeResult < 0 || enumResult < 0)
+      std::cerr << "skyapod: cannot query default render endpoint Props ("
+                << "subscribe=" << subscribeResult
+                << ", enum=" << enumResult << ")\n";
+  }
+
+  static void onNodeInfo(void *data, const pw_node_info *) {
+    auto &self = *static_cast<Impl *>(data);
+    self.queryNodeParams();
   }
 
   static void onRegistryGlobal(void *data, uint32_t id, uint32_t permissions,
@@ -129,10 +150,14 @@ struct DefaultSinkVolumeMonitor::Impl {
       const char *media = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
       if (!name || !media || std::strcmp(media, "Audio/Sink") != 0)
         return;
+      if (!PW_PERM_IS_X(permissions)) {
+        std::cerr << "skyapod: cannot query default render endpoint '" << name
+                  << "': PipeWire did not grant X permission\n";
+        return;
+      }
       self.sinks[name] = {id, version};
       self.findNode();
     }
-    (void)permissions;
   }
 
   static void onRegistryRemove(void *data, uint32_t id) {
@@ -178,6 +203,10 @@ struct DefaultSinkVolumeMonitor::Impl {
     auto &self = *static_cast<Impl *>(data);
     if (!self.node || id != SPA_PARAM_Props || !param)
       return;
+    // Node enumeration may also yield unrelated device Props (for example
+    // ALSA card metadata). Do not let those overwrite a valid volume snapshot.
+    if (!spa_pod_find_prop(param, nullptr, SPA_PROP_channelVolumes))
+      return;
     auto next = self.current;
     if (!DefaultSinkVolumeMonitor::parseProps(param, next)) {
       next.available = false;
@@ -201,7 +230,7 @@ const pw_registry_events DefaultSinkVolumeMonitor::Impl::registryEvents = {
 const pw_metadata_events DefaultSinkVolumeMonitor::Impl::metadataEvents = {
     PW_VERSION_METADATA_EVENTS, &Impl::onMetadataProperty};
 const pw_node_events DefaultSinkVolumeMonitor::Impl::nodeEvents = {
-    PW_VERSION_NODE_EVENTS, nullptr, &Impl::onNodeParam};
+    PW_VERSION_NODE_EVENTS, &Impl::onNodeInfo, &Impl::onNodeParam};
 
 DefaultSinkVolumeMonitor::DefaultSinkVolumeMonitor(pw_core *core,
                                                    pw_registry *registry,

@@ -180,7 +180,11 @@ target_compile_definitions(skyapo PRIVATE
   SKYAPO_UPSTREAM_REVISION="${SKYAPO_UPSTREAM_REVISION}")
 target_link_libraries(skyapo PRIVATE skyapo-core)
 if(PIPEWIRE_FOUND)
-  add_library(skyapo-pipewire STATIC src/pipewire/DeviceManager.cpp src/pipewire/Runtime.cpp src/platform/RealtimeAudit.cpp)
+  add_library(skyapo-pipewire STATIC
+    src/pipewire/DeviceManager.cpp
+    src/pipewire/DefaultSinkVolumeMonitor.cpp
+    src/pipewire/Runtime.cpp
+    src/platform/RealtimeAudit.cpp)
   target_link_libraries(skyapo-pipewire PUBLIC skyapo-core PkgConfig::PIPEWIRE)
   target_link_libraries(skyapo PRIVATE skyapo-pipewire)
   target_sources(skyapo PRIVATE src/platform/RealtimeAudit.cpp)
@@ -223,6 +227,14 @@ if(Python3_Interpreter_FOUND)
 endif()
 add_executable(skyapo-ipc-protocol-tests tests/ipc_protocol_test.cpp)
 add_test(NAME skyapo-ipc-protocol COMMAND skyapo-ipc-protocol-tests)
+add_test(NAME skyapo-default-sink-volume
+  COMMAND skyapo-default-sink-volume-tests)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-install-license-notices
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_license_notices_test.py
+      ${CMAKE_COMMAND} ${CMAKE_CURRENT_BINARY_DIR})
+endif()
 if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
   if(Qt6Widgets_FOUND)
@@ -540,11 +552,17 @@ add_executable(skyapo-pipewire-test-source tests/pipewire_test_source.cpp)
 target_link_libraries(skyapo-pipewire-test-source PRIVATE PkgConfig::PIPEWIRE)
 add_executable(skyapo-pipewire-test-consumer tests/pipewire_test_consumer.cpp)
 target_link_libraries(skyapo-pipewire-test-consumer PRIVATE PkgConfig::PIPEWIRE)
+add_executable(skyapo-default-sink-volume-tests
+  tests/default_sink_volume_monitor_test.cpp
+  src/pipewire/DefaultSinkVolumeMonitor.cpp)
+target_link_libraries(skyapo-default-sink-volume-tests PRIVATE PkgConfig::PIPEWIRE)
 if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   if(NOT Python3_Interpreter_FOUND)
     message(FATAL_ERROR "PipeWire E2E tests require Python 3")
   endif()
   find_program(SKYAPO_PIPEWIRE_EXECUTABLE pipewire REQUIRED)
+  find_program(SKYAPO_PW_CLI_EXECUTABLE pw-cli REQUIRED)
+  find_program(SKYAPO_PW_DUMP_EXECUTABLE pw-dump REQUIRED)
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
     PATHS /usr/share/pipewire /usr/local/share/pipewire REQUIRED)
   foreach(channel_mode IN ITEMS stereo mono)
@@ -552,6 +570,8 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
         $<TARGET_FILE:skyapod>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
@@ -572,8 +592,20 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
 install(FILES docs/man/skyapo.1 docs/man/skyapod.1
   DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
-install(FILES README.md ROADMAP.md CHANGELOG.md
+install(FILES README.md ROADMAP.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md
   DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES upstream/equalizerapo/License.txt
   DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
   RENAME EqualizerAPO-License.txt)
+install(FILES upstream/clap/LICENSE
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+  RENAME CLAP-License.txt)
+install(FILES upstream/vst3/base/LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+  RENAME Steinberg-VST3-base-License.txt)
+install(FILES upstream/vst3/pluginterfaces/LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+  RENAME Steinberg-VST3-pluginterfaces-License.txt)
+install(FILES upstream/vst3/public.sdk/LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+  RENAME Steinberg-VST3-public-sdk-License.txt)

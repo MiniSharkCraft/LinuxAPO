@@ -46,6 +46,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Exercise a one-channel PipeWire source; verify `MONO` mapping, mono virtual mic, 48 kHz negotiation and −6 dB processing.
 - [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
 - [x] Attach, stop, and reattach a native PipeWire consumer; verify stereo and mono virtual-source samples numerically, including after private server restart.
+- [x] Destroy one physical-to-SkyAPO PipeWire Link while both nodes and ports remain; recreate the missing link without restarting the daemon, then independently record and verify the -6 dB chain in mono and stereo CTest graphs.
 - [x] Change graph quantum and sample rate while the daemon is live; verify DSP reinitialization and consumer output at 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048.
 - [x] Exercise `skyapo restart` against the live desktop PipeWire server with an isolated XDG config; the daemon returned to `streaming`, recreated 2/2 physical links at 48 kHz stereo/1024, and the process PID changed.
 - [x] Verify an independent deterministic consumer after daemon restart on a private graph: 144384 stereo frames, measured expected-output RMS ratio 1.000006, and clean recovery with 2/2 links.
@@ -57,7 +58,8 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 
 - [x] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical (FFTW3f optional; convolution has fixed negotiated block size).
 - [ ] Port Channel/Copy/Include conditional details and LoudnessCorrection only where Linux equivalents preserve behavior; document endpoint-volume semantics.
-- [x] Explicitly reject `LoudnessCorrection:` with source/line diagnostics until Linux can provide the Windows render endpoint master-volume signal; document why a fixed-gain approximation would change semantics.
+- [x] Explicitly reject `LoudnessCorrection:` with source/line diagnostics until Linux endpoint volume is wired into a semantically equivalent correction path; document why a fixed-gain approximation would change semantics.
+- [x] Monitor the default PipeWire render sink's effective per-channel `Props` volume and mute state, with live CLI status, metadata/Pod tests, and desktop cross-check against `wpctl`; unrelated ALSA device `Props` must not overwrite the valid volume snapshot.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
 - Acceptance: every claimed directive has golden reference tests and sanitizer coverage; known latency only is reported.
 
@@ -118,6 +120,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
 - [x] Desktop launcher for the Qt editor.
 - [x] AppStream metadata, branded icon and man pages. No MIME association is declared: current EAPO configs are ordinary `.txt` files, and claiming that broad MIME type would hijack unrelated text documents.
+- [x] Install the original Equalizer APO GPL text and pinned CLAP/VST3 MIT license texts with the package; staged CMake install test verifies each file and the third-party notice inventory.
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
 - [x] Add opt-in isolated PipeWire E2E CTest: launch private server + deterministic capture source + `skyapod` + independent virtual-mic consumer; verify runtime status and -6 dB output. Enabled in the normal hosted Linux CI job; hosted result still pending.
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.

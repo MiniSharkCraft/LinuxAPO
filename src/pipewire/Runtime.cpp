@@ -3,6 +3,7 @@
 #include "../platform/RealtimeAudit.h"
 #include "../platform/Settings.h"
 #include "DeviceManager.h"
+#include "DefaultSinkVolumeMonitor.h"
 #include "Engine.h"
 #include <algorithm>
 #include <array>
@@ -104,7 +105,7 @@ struct Runtime {
   pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
   spa_source *rateEvent{}, *statusEvent{}, *sigint{}, *sigterm{},
-      *selectionTimer{}, *configEvent{}, *reloadTimer{};
+      *selectionTimer{}, *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
   int configWatch = -1;
   int server = -1;
   bool ownsSocket = false;
@@ -119,10 +120,14 @@ struct Runtime {
   };
   std::array<LinkContext, MaxChannels> linkContexts{};
   std::array<spa_hook, MaxChannels> linkHooks{};
+  std::array<uint32_t, MaxChannels> linkGlobalIds{};
   std::array<bool, MaxChannels> linked{};
   std::vector<float> work;
   std::unique_ptr<Engine> activeEngine;
   std::vector<std::unique_ptr<Engine>> retiredEngines;
+  std::unique_ptr<skyapo::pipewire::DefaultSinkVolumeMonitor>
+      renderVolumeMonitor;
+  skyapo::pipewire::DefaultSinkVolumeSnapshot renderVolume;
   std::atomic<Engine *> active{nullptr};
   std::atomic<unsigned> callbacksInFlight{0};
   std::atomic<bool> resetMetrics{false};
@@ -137,9 +142,12 @@ struct Runtime {
   pw_filter_state state = PW_FILTER_STATE_UNCONNECTED;
   explicit Runtime(volatile sig_atomic_t &stop) : stopping(stop) {
     ownInputs.fill(SPA_ID_INVALID);
+    linkGlobalIds.fill(SPA_ID_INVALID);
   }
   ~Runtime() {
     cleaning = true;
+    // Release registry-bound proxies/listeners while their core is still live.
+    renderVolumeMonitor.reset();
     if (filter)
       pw_filter_destroy(filter);
     for (auto *link : links)
@@ -152,7 +160,7 @@ struct Runtime {
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
       for (auto *s : {rateEvent, statusEvent, sigint, sigterm, selectionTimer,
-                      configEvent, reloadTimer})
+                      configEvent, reloadTimer, linkRetryTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
@@ -418,9 +426,65 @@ struct Runtime {
   }
   static void linkInfo(void *data, const pw_link_info *info) {
     auto &c = *static_cast<LinkContext *>(data);
+    c.owner->linkGlobalIds[c.channel] = info->id;
     c.owner->linked[c.channel] = info->state == PW_LINK_STATE_ACTIVE;
     if (info->state == PW_LINK_STATE_ERROR)
       c.owner->fail(info->error ? info->error : "capture link failed");
+  }
+  void createCaptureLink(unsigned channel) {
+    if (channel >= channels || ownInputs[channel] == SPA_ID_INVALID ||
+        links[channel])
+      return;
+    linkGlobalIds[channel] = SPA_ID_INVALID;
+    auto *properties = pw_properties_new(nullptr, nullptr);
+    if (!properties) {
+      fail("cannot allocate capture-link properties");
+      return;
+    }
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", device.id);
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u",
+                       ports[channel].id);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u",
+                       pw_filter_get_node_id(filter));
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
+                       ownInputs[channel]);
+    links[channel] = reinterpret_cast<pw_proxy *>(pw_core_create_object(
+        core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
+        &properties->dict, 0));
+    pw_properties_free(properties);
+    if (!links[channel]) {
+      fail("cannot create capture link for " + ports[channel].channel);
+      return;
+    }
+    static const auto events = [] {
+      pw_link_events e{};
+      e.version = PW_VERSION_LINK_EVENTS;
+      e.info = linkInfo;
+      return e;
+    }();
+    linkContexts[channel] = {this, channel};
+    const int listenerResult = pw_link_add_listener(
+        reinterpret_cast<pw_link *>(links[channel]), &linkHooks[channel],
+        &events, &linkContexts[channel]);
+    if (listenerResult < 0) {
+      fail("cannot listen to capture link: " + std::to_string(listenerResult));
+      return;
+    }
+    std::cerr << "skyapod: linking physical port " << ports[channel].id
+              << " -> " << ownInputs[channel] << " ("
+              << ports[channel].channel << ")\n";
+  }
+  void scheduleLinkRetry() {
+    if (cleaning || stopping || !linkRetryTimer)
+      return;
+    timespec delay{0, 100000000};
+    pw_loop_update_timer(pw_main_loop_get_loop(main), linkRetryTimer, &delay,
+                         nullptr, false);
+  }
+  static void retryLinks(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    for (unsigned c = 0; c < r.channels; ++c)
+      r.createCaptureLink(c);
   }
   static void global(void *data, uint32_t id, uint32_t, const char *type,
                      uint32_t, const spa_dict *props) {
@@ -435,35 +499,24 @@ struct Runtime {
     for (unsigned c = 0; c < r.channels; ++c)
       if (channel == r.ports[c].channel && r.ownInputs[c] == SPA_ID_INVALID) {
         r.ownInputs[c] = id;
-        auto *p = pw_properties_new(nullptr, nullptr);
-        pw_properties_setf(p, PW_KEY_LINK_OUTPUT_NODE, "%u", r.device.id);
-        pw_properties_setf(p, PW_KEY_LINK_OUTPUT_PORT, "%u", r.ports[c].id);
-        pw_properties_setf(p, PW_KEY_LINK_INPUT_NODE, "%u",
-                           pw_filter_get_node_id(r.filter));
-        pw_properties_setf(p, PW_KEY_LINK_INPUT_PORT, "%u", id);
-        r.links[c] = reinterpret_cast<pw_proxy *>(pw_core_create_object(
-            r.core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
-            &p->dict, 0));
-        pw_properties_free(p);
-        if (!r.links[c])
-          r.fail("cannot create capture link");
-        else {
-          static const auto events = [] {
-            pw_link_events e{};
-            e.version = PW_VERSION_LINK_EVENTS;
-            e.info = linkInfo;
-            return e;
-          }();
-          r.linkContexts[c] = {&r, c};
-          pw_link_add_listener(reinterpret_cast<pw_link *>(r.links[c]),
-                               &r.linkHooks[c], &events, &r.linkContexts[c]);
-          std::cerr << "skyapod: linked physical port " << r.ports[c].id
-                    << " -> " << id << " (" << channel << ")\n";
-        }
+        r.createCaptureLink(c);
       }
   }
   static void removed(void *data, uint32_t id) {
     auto &r = *static_cast<Runtime *>(data);
+    for (unsigned c = 0; c < r.channels; ++c) {
+      if (id != r.linkGlobalIds[c])
+        continue;
+      spa_hook_remove(&r.linkHooks[c]);
+      if (r.links[c])
+        pw_proxy_destroy(r.links[c]);
+      r.links[c] = nullptr;
+      r.linkGlobalIds[c] = SPA_ID_INVALID;
+      r.linked[c] = false;
+      std::cerr << "skyapod: capture link removed for "
+                << r.ports[c].channel << "; scheduling recovery\n";
+      r.scheduleLinkRetry();
+    }
     if (id == r.device.id)
       r.fail("selected capture device disappeared");
     for (auto &p : r.ports)
@@ -474,6 +527,12 @@ struct Runtime {
     auto &r = *static_cast<Runtime *>(data);
     r.stopping = 1;
     pw_main_loop_quit(r.main);
+  }
+  static void renderVolumeChanged(
+      void *data,
+      const skyapo::pipewire::DefaultSinkVolumeSnapshot &snapshot) {
+    auto &r = *static_cast<Runtime *>(data);
+    r.renderVolume = snapshot;
   }
   std::string status() {
     std::ostringstream s;
@@ -498,6 +557,17 @@ struct Runtime {
       s << quantum.load();
     else
       s << "unknown";
+    s << "\nDefault render endpoint: ";
+    if (!renderVolume.available) {
+      s << (renderVolume.stableName.empty()
+                ? "unavailable (no default audio sink volume)"
+                : renderVolume.stableName + " (volume unavailable)");
+    } else {
+      s << renderVolume.stableName << " (effective ";
+      if (renderVolume.muted)
+        s << "muted, ";
+      s << renderVolume.effectiveDb << " dB)";
+    }
     s << "\nFilters: " << (e ? e->filterCount() : 0) << "\nFilter chain:";
     if (!e || e->filterDescriptions().empty())
       s << "\n  (none)";
@@ -632,6 +702,7 @@ struct Runtime {
     sigterm = pw_loop_add_signal(loop, SIGTERM, signal, this);
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
     reloadTimer = pw_loop_add_timer(loop, reloadReady, this);
+    linkRetryTimer = pw_loop_add_timer(loop, retryLinks, this);
     configWatch = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (configWatch < 0)
       throw std::runtime_error("cannot create config file watcher");
@@ -644,7 +715,7 @@ struct Runtime {
     configEvent =
         pw_loop_add_io(loop, configWatch, SPA_IO_IN, false, configReady, this);
     if (!rateEvent || !sigint || !sigterm || !selectionTimer || !reloadTimer ||
-        !configEvent)
+        !linkRetryTimer || !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);
@@ -701,6 +772,10 @@ struct Runtime {
       return e;
     }();
     pw_registry_add_listener(registry, &registryHook, &re, this);
+    renderVolumeMonitor =
+        std::make_unique<skyapo::pipewire::DefaultSinkVolumeMonitor>(
+            core, registry, renderVolumeChanged, this);
+    renderVolume = renderVolumeMonitor->snapshot();
     uint8_t bytes[2048];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
     spa_audio_info_raw info{};

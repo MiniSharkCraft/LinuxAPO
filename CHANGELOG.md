@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Detect removal of an individual physical-capture link by its PipeWire global ID and recreate it on the control loop without restarting the daemon; private mono/stereo E2E tests destroy a live link, wait for recovery, and verify recorded -6 dB output.
+- Install the preserved Equalizer APO GPL text plus the pinned CLAP and VST3 MIT texts and a third-party inventory; a staged-install CTest checks the packaged notices instead of relying on the source tree alone.
+- Keep the default render endpoint volume snapshot when PipeWire also enumerates unrelated ALSA device `Props`; desktop status now reports effective gain/mute from actual sink channel volumes instead of incorrectly showing unavailable.
 - Added an opt-in, isolated FST-header VST2-compatible host prototype and fixture tests; it is not wired into the app and does not imply third-party or production support. Pinned FST separately and documented its licensing/trademark review requirements. CI now builds/runs the prototype and sanitizers, pins checkout actions, and smoke-tests an installed Arch package.
 - Fixed Linux BiQuad state cleanup in the generated upstream header: unqualified `abs(double)` selected an integer overload and erased filter state at block boundaries. The build-time patch now uses `std::abs`; sample-by-sample Engine-vs-upstream tests across 1/17/128/256-frame blocks verify +6 dB center response and off-band response.
 - Added `skyapo diagnostics --json` with typed runtime/build fields and explicit `null` for unavailable values; its CLI fixture verifies JSON escaping and the unchanged text diagnostics command. CLAP/VST3 process errors now latch lock-free, silence later blocks without recalling the failed plugin, and surface the plugin identifier plus config source line through status/JSON diagnostics.

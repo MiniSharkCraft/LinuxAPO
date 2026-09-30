@@ -15,7 +15,7 @@ ctest --test-dir build --output-on-failure
 
 Launch the configuration editor with `build/skyapo-ui [config-file]`. CMake omits the target with a status message if Qt 6 Widgets is unavailable; use `-DSKYAPO_BUILD_UI=OFF` for a core-only build.
 
-Sanitizer build: `cmake -S . -B build-asan -DSKYAPO_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug`, followed by build and CTest. A known PipeWire module/context teardown leak is reproduced by the standalone minimal diagnostic. When Lilv is present, CTest uses the narrowly scoped `tests/lsan.supp` for Lilv 0.28.0's 24-byte plugin-class allocation; other leaks remain enabled/reported. Details are in `REALTIME.md`. CMake installs the executables, user service, documentation, and upstream license. The realtime recording probe is manual because CI machines do not have to expose audio hardware.
+Sanitizer build: `cmake -S . -B build-asan -DSKYAPO_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug`, followed by build and CTest. A known PipeWire module/context teardown leak is reproduced by the standalone minimal diagnostic. When Lilv is present, CTest uses the narrowly scoped `tests/lsan.supp` for Lilv 0.28.0's 24-byte plugin-class allocation; other leaks remain enabled/reported. Details are in `REALTIME.md`. CMake installs the executables, user service, documentation, Equalizer APO GPL license, CLAP/VST3 MIT license texts and third-party notice inventory; CTest verifies these files in a staged installation. The realtime recording probe is manual because CI machines do not have to expose audio hardware.
 # Arch Linux packaging
 
 The repository provides `packaging/PKGBUILD`, which builds from the local Git checkout and initializes the pinned official Equalizer APO submodule. From the repository root:

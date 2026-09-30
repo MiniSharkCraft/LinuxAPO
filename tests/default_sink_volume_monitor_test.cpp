@@ -77,5 +77,11 @@ int main() {
       SPA_POD_Bool(false), SPA_PROP_channelVolumes, SPA_POD_Float(1.0f)));
   CHECK(!Monitor::parseProps(pod, snapshot));
 
+  builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
+  pod = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+      &builder, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
+      SPA_POD_Float(1.0f)));
+  CHECK(!Monitor::parseProps(pod, snapshot));
+
   std::cout << "default sink metadata and Props parsing passed\n";
 }
