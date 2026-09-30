@@ -5,3 +5,45 @@ The default config is `$XDG_CONFIG_HOME/skyapo/config.txt`, falling back to `~/.
 Currently implemented using actual upstream filters/processing: `Preamp:`, parametric `Filter:` (`BiQuad`), IIR `Filter:`, `Delay:`, `Channel:`, `Copy:`, `GraphicEQ:`, and `Convolution:` (the latter two require FFTW3f; convolution IR loading is Linux-specific). When built with Lilv, `Plugin: LV2 <URI> [symbol=value ...]` inserts a native LV2 plugin with optional input control-port overrides; values must be finite and within the declared port range. `skyapo plugin info <URI>` reports the plugin name and control-port symbols/defaults/ranges. `Stage:` maps the Linux capture stage to `capture`; `pre-mix` and `post-mix` sections are skipped because those are Windows APO installation stages. A child `Include:` inherits the current stage but its stage changes do not leak back to its parent. Channel selection affects later selected-channel filters; Copy uses upstream assignments and is routed through the upstream `FilterConfiguration` channel map. `Include: path` is expanded by the Linux adapter at its location in the ordered chain; relative paths resolve from the including file, double-quoted paths are accepted (including spaces and `#` characters), nesting is limited to 100 files, and active recursion cycles are diagnosed. Unquoted trailing `#` comments are removed. Child-file parser errors report that child's path and line.
 
 Parsing a replacement is transactional: the daemon builds a new Engine outside the audio callback and swaps it only after successful initialization. On error the active Engine continues and `skyapo status` reports the last reload error. Copy expressions referencing unknown source channels are rejected. Copy output channels beyond the fixed input/virtual-mic layout are rejected with source/line diagnostics; same-layout remapping is supported. Unsupported directives in active stages are errors, never silently skipped; lines in a deliberately inactive Stage or skipped include branch are not parsed. `LoudnessCorrection` is explicitly rejected with a source/line diagnostic: upstream derives its low/high shelf filters and attenuation from the current Windows render endpoint's master volume via `IAudioEndpointVolume` (`VolumeController`), while SkyAPO currently has no equivalent endpoint-volume provider. It is not approximated with fixed gains because that would change the directive's behavior. `If:`/expression conditionals are also not yet supported. Numeric/string syntax is not a complete implementation of the upstream parser; check configs with `skyapo config check FILE` before use. The current config check initializes for stereo 48 kHz, so it does not validate every device layout.
+
+## Machine-readable validation
+
+Use `skyapo config check --json <file>` for scripts and editors that need structured validation output. This does not change the existing text command, `skyapo config check <file>`.
+
+A successful check exits with code `0` and prints one JSON object to stdout:
+
+```json
+{
+  "valid": true,
+  "file": "examples/preamp.txt",
+  "filter_count": 1,
+  "diagnostics": []
+}
+```
+
+An invalid configuration exits with code `1`. `diagnostics` contains the parser or initialization error, including the source location when available:
+
+```json
+{
+  "valid": false,
+  "file": "config.txt",
+  "filter_count": null,
+  "diagnostics": [
+    {
+      "file": "/home/user/.config/skyapo/includes/voice.txt",
+      "line": 4,
+      "directive": "Filter: ON PK Fc 30000 Hz Gain 6 dB Q 1",
+      "command": "Filter",
+      "reason": "Filter frequency must be above 0 Hz and below the Nyquist frequency (24000.000000 Hz)"
+    }
+  ]
+}
+```
+
+For an error in a nested `Include`, `diagnostics[].file` and `line` identify the included file and its line, not the parent `Include:` statement. `directive` is the trimmed source line and `command` is the text before its colon. Fields whose source information cannot be determined (for example, a missing file or a source line that cannot be read) are JSON `null`; SkyAPO does not infer a directive or line. The top-level `file` always echoes the path passed to the CLI. Both valid and invalid results are JSON on stdout; explanatory diagnostics are in the JSON `reason` field.
+
+The CLI fixture can be run after building `skyapo`:
+
+```sh
+python3 tests/config_check_json_test.py build/skyapo
+```
