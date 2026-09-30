@@ -44,8 +44,9 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Exercise a one-channel PipeWire source; verify `MONO` mapping, mono virtual mic, 48 kHz negotiation and −6 dB processing.
 - [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
 - [x] Attach, stop, and reattach a native PipeWire consumer; verify stereo and mono virtual-source samples numerically, including after private server restart.
+- [x] Change graph quantum and sample rate while the daemon is live; verify DSP reinitialization and consumer output at 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048.
 - [ ] Test physical device unplug/replug and automatic consumer selection on real desktop clients.
-- [ ] Test daemon restart, overrun reporting and format/quantum changes.
+- [ ] Test explicit daemon process restart and overrun reporting under sustained load.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 
 ## 0.5.x — remaining core DSP

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Verified live PipeWire rate/quantum renegotiation without restarting `skyapod`: 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048 each rebuilt DSP and delivered processed samples to the native consumer (132096–286720 frames; measured output ratios 0.999970–0.999987 of the expected −6 dB amplitude). Status reported zero overruns and callback allocations/deallocations. Convolution quantum changes remain untested.
 - Added a native PipeWire consumer fixture that links directly to `SkyAPO Virtual Mic` and measures received samples. Verified stereo consumer detach/reattach (144384 frames each; RMS ratios 0.999993 and 1.000003), mono capture (143360 frames; 0.999974), and mono consumption after private server restart (144384 frames; 0.999999).
 - Extended the private PipeWire test source with mono mode and verified `MONO` device enumeration/mapping, mono virtual-source processing at −6 dB, and recovery after removing/recreating the selected node with the same stable name. Real physical-device unplug/replug and automatic desktop client selection remain unverified.
 - Added the opt-in `skyapo-pipewire-test-source` fixture and verified daemon recovery across a private PipeWire-server restart: the stable test source and virtual mic returned, stereo links were restored, and status measured the expected −6 dB with zero overruns/callback allocations. Independent stereo and mono test-client consumption is now verified separately in the isolated graph.
