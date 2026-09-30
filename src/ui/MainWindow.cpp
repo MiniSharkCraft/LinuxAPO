@@ -8,6 +8,9 @@
 #include "Editor/guis/DelayFilterGUIFactory.h"
 #include "Editor/guis/PreampFilterGUIFactory.h"
 #include "Editor/guis/StageFilterGUIFactory.h"
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+#include "Editor/guis/GraphicEQFilterGUIFactory.h"
+#endif
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -277,6 +280,11 @@ void MainWindow::rebuildRows() {
   static BiQuadFilterGUIFactory biquadFactory;
   static DelayFilterGUIFactory delayFactory;
   static StageFilterGUIFactory stageFactory;
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  static GraphicEQFilterGUIFactory graphicEQFactory;
+  graphicEQFactory.initialize(rowTable);
+  graphicEQFactory.startOfFile(configPath);
+#endif
   for (qsizetype index = 0; index < document.lineCount(); ++index) {
     const QString raw = document.line(index).toQString();
     auto item = std::make_shared<FilterTable::Item>();
@@ -307,6 +315,13 @@ void MainWindow::rebuildRows() {
         parameters = raw.mid(colon + 1).trimmed();
         editor = stageFactory.createFilterGUI(command, parameters);
       }
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+      if (!editor) {
+        command = raw.left(colon).trimmed();
+        parameters = raw.mid(colon + 1).trimmed();
+        editor = graphicEQFactory.createFilterGUI(command, parameters);
+      }
+#endif
     }
 
     item->gui = editor;
@@ -344,6 +359,9 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
   BiQuadFilterGUIFactory biquad;
   DelayFilterGUIFactory delay;
   StageFilterGUIFactory stage;
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  GraphicEQFilterGUIFactory graphicEQ;
+#endif
   const auto append = [menu](const QList<FilterTemplate> &templates) {
     for (const auto &filter : templates) {
       auto *action = menu->addAction(filter.getName());
@@ -356,6 +374,10 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
   menu->addSeparator();
   append(delay.createFilterTemplates());
   append(stage.createFilterTemplates());
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  menu->addSeparator();
+  append(graphicEQ.createFilterTemplates());
+#endif
 }
 
 void MainWindow::syncRowsToDocument() {

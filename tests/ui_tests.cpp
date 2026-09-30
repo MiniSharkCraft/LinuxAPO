@@ -9,6 +9,9 @@
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
 #include "Editor/guis/DelayFilterGUI.h"
 #include "Editor/guis/DelayFilterGUIFactory.h"
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+#include "Editor/guis/GraphicEQFilterGUI.h"
+#endif
 #include "Editor/guis/PreampFilterGUI.h"
 #include "Editor/guis/PreampFilterGUIFactory.h"
 #include "Editor/guis/StageFilterGUI.h"
@@ -25,6 +28,9 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTimer>
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+#include <QTableWidget>
+#endif
 #include <iostream>
 
 int main(int argc, char **argv) {
@@ -337,8 +343,53 @@ int main(int argc, char **argv) {
     std::cerr << "device selector did not persist exactly one stable node name\n";
     return 1;
   }
+  const QString graphicConfigPath = temporary.filePath("graphic-eq.txt");
+  QFile graphicConfig(graphicConfigPath);
+  if (!graphicConfig.open(QIODevice::WriteOnly) ||
+      graphicConfig.write("GraphicEQ: 100 0; 1000 2; 5000 -3\n") < 0) {
+    std::cerr << "could not create GraphicEQ UI fixture\n";
+    return 1;
+  }
+  graphicConfig.close();
+  MainWindow graphicWindow(graphicConfigPath,
+                           QString::fromLocal8Bit(argv[1]));
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  auto *graphicEditor = graphicWindow.findChild<GraphicEQFilterGUI *>();
+  auto *graphicTable = graphicEditor
+                           ? graphicEditor->findChild<QTableWidget *>(
+                                 "tableWidget")
+                           : nullptr;
+  if (!graphicEditor || !graphicTable || graphicTable->rowCount() != 3) {
+    std::cerr << "MainWindow did not create upstream GraphicEQ visual row\n";
+    return 1;
+  }
+  graphicTable->item(1, 1)->setText("4.5");
+  for (auto *button : graphicWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save")
+      button->click();
+  QFile savedGraphicConfig(graphicConfigPath);
+  if (!savedGraphicConfig.open(QIODevice::ReadOnly) ||
+      savedGraphicConfig.readAll() !=
+          "GraphicEQ: 100 0; 1000 4.5; 5000 -3\n") {
+    std::cerr << "GraphicEQ visual edit did not serialize to config text\n";
+    return 1;
+  }
+#else
+  if (graphicWindow.findChild<QWidget *>("GraphicEQFilterGUI")) {
+    std::cerr << "GraphicEQ visual editor was enabled without FFTW3f\n";
+    return 1;
+  }
+  QFile rawGraphicConfig(graphicConfigPath);
+  if (!rawGraphicConfig.open(QIODevice::ReadOnly) ||
+      rawGraphicConfig.readAll() !=
+          "GraphicEQ: 100 0; 1000 2; 5000 -3\n") {
+    std::cerr << "unsupported GraphicEQ text was changed by the editor\n";
+    return 1;
+  }
+#endif
   std::cout << "upstream editor widgets, selection/reordering, config "
-               "preservation, async UI, and stable device selection "
+               "preservation, async UI, stable device selection, and "
+               "GraphicEQ serialization "
                "tests passed\n";
   return 0;
 }

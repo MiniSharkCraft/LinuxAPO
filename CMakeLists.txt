@@ -84,8 +84,11 @@ add_library(skyapo-eapo-dsp STATIC
 target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO_PORT} ${EAPO})
 target_compile_definitions(skyapo-eapo-dsp PRIVATE __forceinline=inline)
 target_compile_options(skyapo-eapo-dsp PRIVATE -Wno-write-strings)
+if(TARGET PkgConfig::SNDFILE)
+  target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::SNDFILE)
+endif()
 if(FFTW3F_FOUND)
-  target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::FFTW3F PkgConfig::SNDFILE)
+  target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::FFTW3F)
 endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp)
@@ -147,6 +150,7 @@ endif()
 if(FFTW3F_FOUND)
   target_sources(skyapo-core PRIVATE src/platform/linux/ConvolutionFilterLinux.cpp)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_CONVOLUTION=1)
+  target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_GRAPHIC_EQ=1)
 else()
   message(STATUS "FFTW3f not found: GraphicEQ/Convolution directives disabled")
 endif()
@@ -243,12 +247,45 @@ if(SKYAPO_BUILD_UI)
     set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS
       "${EAPO_PORT}/Editor;${SKYAPO_EDITOR};${SKYAPO_EDITOR}/guis;${SKYAPO_EDITOR}/widgets")
     target_include_directories(skyapo-eapo-editor BEFORE PUBLIC ${EAPO_PORT} ${EAPO})
+    if(FFTW3F_FOUND)
+      target_include_directories(skyapo-eapo-editor PRIVATE
+        ${SKYAPO_EDITOR}/guis ${SKYAPO_EDITOR}/widgets)
+    endif()
     # The upstream editor's legacy stable.h supplied these Qt declarations
     # globally; provide only the declarations needed by the selected sources.
     target_precompile_headers(skyapo-eapo-editor PRIVATE
-      <QString> <QStringList> <QMetaType> <QDateTime>)
+      <QString> <QStringList> <QMetaType> <QDateTime>
+      # The upstream GraphicEQ GUI expects DBL_MAX from the removed Windows
+      # stable.h umbrella header.
+      <cfloat>)
     target_compile_definitions(skyapo-eapo-editor PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-eapo-editor PUBLIC skyapo-core Qt6::Widgets)
+    if(FFTW3F_FOUND)
+      target_sources(skyapo-eapo-editor PRIVATE
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUI.cpp
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUI.h
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUI.ui
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIFactory.cpp
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIFactory.h
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIItem.cpp
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIItem.h
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIScene.cpp
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIScene.h
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIView.cpp
+        ${SKYAPO_EDITOR}/guis/GraphicEQFilterGUIView.h
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotHRuler.cpp
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotHRuler.h
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotItem.cpp
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotItem.h
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotScene.cpp
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotScene.h
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotView.cpp
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotView.h
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotVRuler.cpp
+        ${SKYAPO_EDITOR}/widgets/FrequencyPlotVRuler.h
+        ${SKYAPO_EDITOR}/widgets/ResizeCorner.cpp
+        ${SKYAPO_EDITOR}/widgets/ResizeCorner.h)
+    endif()
 
     add_executable(skyapo-ui src/ui/main.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/ConfigFile.h

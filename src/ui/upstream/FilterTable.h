@@ -44,6 +44,8 @@ public:
   }
 
   int getPreferredWidth() const { return width(); }
+  // The upstream ResizeCorner calls this legacy FilterTable sizing helper.
+  void setMinimumHeightHint(int height) { setMinimumHeight(height); }
   const QSet<Item *> &getSelectedItems() const { return selected; }
   Item *getFocusedItem() const { return focused; }
   Item *itemAt(int index) const {
