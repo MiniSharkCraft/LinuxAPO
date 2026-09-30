@@ -106,6 +106,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Implement CLI daemon start/stop/restart, config show/reload, and local Unix-socket control.
 - [x] Add actual active filter source-line listing and build/upstream revision diagnostics.
+- [x] Include the linked PipeWire library version in `skyapo diagnostics`; it is reported from the runtime library, not hardcoded.
 - [ ] Version the IPC protocol and add structured/machine-readable diagnostics.
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
 - [x] Desktop launcher for the Qt editor.

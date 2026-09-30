@@ -11,6 +11,7 @@
 #endif
 #ifdef SKYAPO_HAVE_PIPEWIRE
 #include "../pipewire/DeviceManager.h"
+#include <pipewire/version.h>
 #endif
 #include <algorithm>
 #include <chrono>
@@ -115,8 +116,13 @@ int main(int argc, char **argv) {
     if (cmd == "diagnostics" && argc == 2) {
       std::cout << "SkyAPO version: " << SKYAPO_VERSION
                 << "\nEqualizer APO upstream: " << SKYAPO_UPSTREAM_REVISION
-                << '\n'
-                << settings::queryStatus();
+                << '\n';
+#ifdef SKYAPO_HAVE_PIPEWIRE
+      std::cout << "PipeWire library: " << pw_get_library_version() << '\n';
+#else
+      std::cout << "PipeWire library: unavailable (not built)\n";
+#endif
+      std::cout << settings::queryStatus();
       return 0;
     }
     if (cmd == "filters" && argc == 2) {
