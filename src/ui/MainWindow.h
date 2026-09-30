@@ -52,4 +52,5 @@ private:
   std::vector<std::shared_ptr<FilterTable::Item>> rowItems;
   bool statusRequestPending{};
   bool deviceRequestPending{};
+  bool deviceSetPending{};
 };

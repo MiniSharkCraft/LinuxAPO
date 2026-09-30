@@ -225,6 +225,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   config.close();
+  const QString deviceLogPath = temporary.filePath("selected-device.log");
+  qputenv("SKYAPO_UI_TEST_DEVICE_LOG", deviceLogPath.toLocal8Bit());
 
   QElapsedTimer construction;
   construction.start();
@@ -304,13 +306,39 @@ int main(int argc, char **argv) {
     return 1;
   }
   auto *deviceCombo = window.findChild<QComboBox *>();
-  if (!deviceCombo || deviceCombo->count() != 1 ||
-      !deviceCombo->currentText().contains("2 ch, 48000 Hz")) {
-    std::cerr << "device selector did not display enumerated format details\n";
+  if (!deviceCombo || deviceCombo->count() != 2 ||
+      deviceCombo->currentData().toString() != "fixture.usb-mic" ||
+      !deviceCombo->currentText().contains("1 ch, 44100 Hz")) {
+    std::cerr << "device selector did not display enumerated format details: "
+              << (deviceCombo ? deviceCombo->count() : -1) << ", "
+              << (deviceCombo ? deviceCombo->currentData().toString().toStdString()
+                              : "missing")
+              << ", "
+              << (deviceCombo ? deviceCombo->currentText().toStdString()
+                              : "missing")
+              << '\n';
+    return 1;
+  }
+  deviceCombo->setCurrentIndex(0);
+  QMetaObject::invokeMethod(deviceCombo, "activated", Qt::DirectConnection,
+                            Q_ARG(int, 0));
+  if (deviceCombo->isEnabled()) {
+    std::cerr << "device selector remained interactive during device change\n";
+    return 1;
+  }
+  QMetaObject::invokeMethod(deviceCombo, "activated", Qt::DirectConnection,
+                            Q_ARG(int, 1));
+  QEventLoop selectionLoop;
+  QTimer::singleShot(300, &selectionLoop, &QEventLoop::quit);
+  selectionLoop.exec();
+  QFile deviceLog(deviceLogPath);
+  if (!deviceLog.open(QIODevice::ReadOnly) ||
+      deviceLog.readAll() != "fixture.capture\n") {
+    std::cerr << "device selector did not persist exactly one stable node name\n";
     return 1;
   }
   std::cout << "upstream editor widgets, selection/reordering, config "
-               "preservation, and async UI "
+               "preservation, async UI, and stable device selection "
                "tests passed\n";
   return 0;
 }

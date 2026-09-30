@@ -471,18 +471,27 @@ void MainWindow::refreshDevices() {
            }
            if (deviceCombo->count() == 0)
              deviceCombo->addItem(tr("No PipeWire input devices"));
+           deviceCombo->setEnabled(!deviceSetPending &&
+                                   deviceCombo->count() > 0 &&
+                                   !deviceCombo->itemData(0).toString().isEmpty());
          });
 }
 
 void MainWindow::selectDevice(int index) {
+  if (deviceSetPending || index < 0)
+    return;
   const auto nodeName = deviceCombo->itemData(index).toString();
   if (nodeName.isEmpty())
     return;
+  deviceSetPending = true;
+  deviceCombo->setEnabled(false);
   runCli({"device", "set", nodeName},
          [this](int result, QByteArray, QByteArray error) {
+           deviceSetPending = false;
            if (result != 0)
              QMessageBox::warning(this, tr("Device selection failed"),
                                   QString::fromUtf8(error));
+           refreshDevices();
            refreshStatus();
          });
 }
