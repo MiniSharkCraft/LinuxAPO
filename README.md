@@ -28,6 +28,8 @@ The WAV sample rate/channel count are preserved. Supported commands currently ar
 
 Check a config with `build/skyapo config check examples/basic.txt`. `build/skyapo device list` enumerates PipeWire source nodes and reports channel count plus sample rate when node metadata provides it; unavailable rates are shown as `unknown` rather than inferred.
 
+Moving an existing Windows EAPO installation? Follow the [migration guide](docs/MIGRATION.md) and verify the supported subset before using the config with the daemon.
+
 ## Realtime microphone
 
 ```sh
