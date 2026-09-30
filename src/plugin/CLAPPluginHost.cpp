@@ -1,4 +1,5 @@
 #include "CLAPPluginHost.h"
+#include "IPluginFailureState.h"
 
 #include "IFilter.h"
 #include "helpers/MemoryHelper.h"
@@ -385,7 +386,7 @@ private:
   std::vector<PluginParameterInfo> parameterInfo;
 };
 
-class CLAPPluginFilter final : public IFilter {
+class CLAPPluginFilter final : public IFilter, public IPluginFailureState {
 public:
   CLAPPluginFilter(CLAPPluginHost &host, std::string id,
                    std::vector<PluginParameterValue> overrides)
@@ -400,6 +401,9 @@ public:
   }
   void process(float **output, float **input, unsigned frames) override {
     instance->process(output, input, frames);
+  }
+  bool processingFailed() const noexcept override {
+    return instance && instance->processingFailed();
   }
 
 private:

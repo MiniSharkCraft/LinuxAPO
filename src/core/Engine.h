@@ -23,6 +23,7 @@ public:
   const std::vector<std::string> &filterDescriptions() const {
     return descriptions;
   }
+  std::vector<std::string> failedPluginDescriptions() const;
 
 private:
   struct FilterDeleter {

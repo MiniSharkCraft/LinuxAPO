@@ -474,6 +474,16 @@ struct Runtime {
          "shared-library C allocators excluded\n";
     if (!configError.empty())
       s << "Config reload error: " << configError << '\n';
+    s << "Plugin failures:";
+    const auto failures = e ? e->failedPluginDescriptions()
+                            : std::vector<std::string>{};
+    if (failures.empty()) {
+      s << " (none)\n";
+    } else {
+      for (const auto &failure : failures)
+        s << "\n  " << failure;
+      s << '\n';
+    }
     return s.str();
   }
   static void statusReady(void *data, int, uint32_t) {

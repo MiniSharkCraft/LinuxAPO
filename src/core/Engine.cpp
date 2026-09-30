@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "../plugin/IPluginFailureState.h"
 #include "FilterConfiguration.h"
 #include "FilterEngine.h"
 
@@ -506,4 +507,14 @@ void Engine::process(float *samples, unsigned frames) {
   configuration->read(samples, frames);
   configuration->process(frames);
   configuration->write(samples, frames);
+}
+
+std::vector<std::string> Engine::failedPluginDescriptions() const {
+  std::vector<std::string> failures;
+  for (size_t i = 0; i < graph.size(); ++i) {
+    const auto *state = dynamic_cast<const IPluginFailureState *>(graph[i].filter);
+    if (state && state->processingFailed() && i < descriptions.size())
+      failures.push_back(descriptions[i]);
+  }
+  return failures;
 }

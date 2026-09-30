@@ -34,6 +34,8 @@ STATUS = (
     'Input RMS: 0.7\n'
     'Output RMS: 0.35\n'
     'DSP amplitude ratio: 0.5\n'
+    'Plugin failures:\n'
+    '  Plugin: CLAP org.skyapo.test.error-once — /tmp/config.txt:3\n'
 )
 
 
@@ -112,6 +114,9 @@ def main():
         assert document["config_path"] == '/tmp/skyapo "quoted" \\ config.txt'
         assert document["process_average_us"] == 12.5
         assert document["dsp_amplitude_ratio"] == 0.5
+        assert document["plugin_failures"] == [
+            "Plugin: CLAP org.skyapo.test.error-once — /tmp/config.txt:3"
+        ]
 
         text_output = query_with_fixture(executable, runtime, config, False)
         assert text_output.startswith("SkyAPO version: ")
@@ -135,6 +140,7 @@ def main():
         assert absent["virtual_microphone"] is None
         assert absent["sample_rate_hz"] is None
         assert absent["filter_chain"] is None
+        assert absent["plugin_failures"] is None
     print("diagnostics JSON escaping, fields, and unknown/null checks passed")
 
 

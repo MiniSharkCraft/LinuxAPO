@@ -26,6 +26,7 @@
 #include <sstream>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 namespace {
 std::string jsonString(const std::string &value) {
   std::ostringstream out;
@@ -147,6 +148,33 @@ std::optional<unsigned long long> statusUnsigned(const std::string &status,
   return value ? unsignedValue(*value) : std::nullopt;
 }
 
+std::optional<std::vector<std::string>> statusListAfter(
+    const std::string &status, const std::string &label) {
+  const std::string marker = "\n" + label + ":";
+  const auto markerPosition = status.find(marker);
+  if (markerPosition == std::string::npos)
+    return std::nullopt;
+  size_t begin = markerPosition + marker.size();
+  if (status.compare(begin, 8, " (none)\n") == 0)
+    return std::vector<std::string>{};
+  if (begin < status.size() && status[begin] == '\n')
+    ++begin;
+  std::vector<std::string> values;
+  while (begin < status.size()) {
+    const auto end = status.find('\n', begin);
+    const auto line = status.substr(begin, end == std::string::npos
+                                               ? std::string::npos
+                                               : end - begin);
+    const auto first = line.find_first_not_of(" \t");
+    if (first != std::string::npos)
+      values.push_back(line.substr(first));
+    if (end == std::string::npos)
+      break;
+    begin = end + 1;
+  }
+  return values;
+}
+
 void writeJsonNumber(std::ostream &out, const std::optional<double> &value) {
   if (value)
     out << std::setprecision(17) << *value;
@@ -183,6 +211,7 @@ void writeDiagnosticsJson(const std::string &status) {
   const auto inputRms = statusNumber(status, "Input RMS");
   const auto outputRms = statusNumber(status, "Output RMS");
   const auto amplitudeRatio = statusNumber(status, "DSP amplitude ratio");
+  const auto pluginFailures = statusListAfter(status, "Plugin failures");
   const auto config = statusValue(status, "Config");
   const auto state = daemon ? *daemon : "unresponsive";
 
@@ -338,6 +367,18 @@ void writeDiagnosticsJson(const std::string &status) {
   writeJsonNumber(out, outputRms);
   out << ",\n  \"dsp_amplitude_ratio\": ";
   writeJsonNumber(out, amplitudeRatio);
+  out << ",\n  \"plugin_failures\": ";
+  if (pluginFailures) {
+    out << '[';
+    for (size_t i = 0; i < pluginFailures->size(); ++i) {
+      if (i)
+        out << ", ";
+      out << jsonString((*pluginFailures)[i]);
+    }
+    out << ']';
+  } else {
+    out << "null";
+  }
   out << "\n}\n";
   std::cout << out.str();
 }
