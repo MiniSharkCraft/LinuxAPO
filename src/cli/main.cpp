@@ -22,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <locale>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -142,6 +143,9 @@ std::optional<double> statusNumber(const std::string &status,
   return value ? decimalValue(*value) : std::nullopt;
 }
 
+void writeJsonUnsigned(std::ostream &out,
+                       const std::optional<unsigned long long> &value);
+
 std::optional<unsigned long long> statusUnsigned(const std::string &status,
                                                  const std::string &label) {
   const auto value = statusValue(status, label);
@@ -173,6 +177,105 @@ std::optional<std::vector<std::string>> statusListAfter(
     begin = end + 1;
   }
   return values;
+}
+
+std::string trimText(const std::string &value) {
+  const auto begin = value.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos)
+    return {};
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(begin, end - begin + 1);
+}
+
+struct ConfigDiagnostic {
+  std::string file;
+  std::optional<unsigned long long> line;
+  std::optional<std::string> directive;
+  std::optional<std::string> command;
+  std::string reason;
+};
+
+ConfigDiagnostic parseConfigDiagnostic(const std::string &message,
+                                       const std::string &requestedFile) {
+  ConfigDiagnostic diagnostic{requestedFile, std::nullopt, std::nullopt,
+                              std::nullopt, message};
+  const std::string openError = "cannot open config: ";
+  if (message.rfind(openError, 0) == 0) {
+    diagnostic.file = message.substr(openError.size());
+    diagnostic.reason = "cannot open config file";
+    return diagnostic;
+  }
+  size_t marker = std::string::npos;
+  size_t lineBegin = 0;
+  size_t lineEnd = 0;
+  for (size_t i = 0; i < message.size(); ++i) {
+    if (message[i] != ':')
+      continue;
+    size_t digit = i + 1;
+    while (digit < message.size() && message[digit] >= '0' &&
+           message[digit] <= '9')
+      ++digit;
+    if (digit == i + 1 || digit >= message.size() || message[digit] != ':' ||
+        (digit + 1 < message.size() && message[digit + 1] != ' '))
+      continue;
+    marker = i;
+    lineBegin = i + 1;
+    lineEnd = digit;
+  }
+  if (marker == std::string::npos)
+    return diagnostic;
+
+  diagnostic.file = message.substr(0, marker);
+  diagnostic.line = unsignedValue(message.substr(lineBegin, lineEnd - lineBegin));
+  size_t reasonBegin = lineEnd + 1;
+  while (reasonBegin < message.size() && message[reasonBegin] == ' ')
+    ++reasonBegin;
+  diagnostic.reason = message.substr(reasonBegin);
+
+  if (diagnostic.line && *diagnostic.line <= std::numeric_limits<unsigned>::max()) {
+    std::ifstream input(diagnostic.file);
+    std::string line;
+    for (unsigned long long current = 1; current <= *diagnostic.line; ++current)
+      if (!std::getline(input, line))
+        break;
+    line = trimText(line);
+    const auto colon = line.find(':');
+    if (!line.empty())
+      diagnostic.directive = line;
+    if (colon != std::string::npos)
+      diagnostic.command = trimText(line.substr(0, colon));
+  }
+  return diagnostic;
+}
+
+void writeConfigCheckJson(const std::string &file, Engine *engine,
+                          const std::optional<ConfigDiagnostic> &diagnostic) {
+  std::cout << "{\n  \"valid\": " << (engine ? "true" : "false")
+            << ",\n  \"file\": " << jsonString(file)
+            << ",\n  \"filter_count\": ";
+  if (engine)
+    std::cout << engine->filterCount();
+  else
+    std::cout << "null";
+  std::cout << ",\n  \"diagnostics\": [";
+  if (diagnostic) {
+    std::cout << "\n    {\n      \"file\": "
+              << jsonString(diagnostic->file) << ",\n      \"line\": ";
+    writeJsonUnsigned(std::cout, diagnostic->line);
+    std::cout << ",\n      \"directive\": ";
+    if (diagnostic->directive)
+      std::cout << jsonString(*diagnostic->directive);
+    else
+      std::cout << "null";
+    std::cout << ",\n      \"command\": ";
+    if (diagnostic->command)
+      std::cout << jsonString(*diagnostic->command);
+    else
+      std::cout << "null";
+    std::cout << ",\n      \"reason\": " << jsonString(diagnostic->reason)
+              << "\n    }\n  ";
+  }
+  std::cout << "]\n}\n";
 }
 
 void writeJsonNumber(std::ostream &out, const std::optional<double> &value) {
@@ -469,7 +572,7 @@ int main(int argc, char **argv) {
     if (argc < 2)
       throw std::runtime_error("usage: skyapo status | diagnostics [--json] | start | stop | restart "
                                "| device list/set/current | config show/reload "
-                               "| config check <file> | plugin list/scan "
+                               "| config check [--json] <file> | plugin list/scan "
                                "| plugin info <URI>");
     std::string cmd = argv[1];
     if (cmd == "status") {
@@ -678,6 +781,22 @@ int main(int argc, char **argv) {
     }
     if (cmd == "config" && argc == 3 && std::string(argv[2]) == "reload") {
       std::cout << settings::daemonRequest("RELOAD\n");
+      return 0;
+    }
+    if (cmd == "config" && argc == 5 &&
+        std::string(argv[2]) == "check" &&
+        std::string(argv[3]) == "--json") {
+      const std::string file = argv[4];
+      std::unique_ptr<Engine> engine;
+      try {
+        engine = std::make_unique<Engine>(48000, 2, 8192);
+        engine->loadConfig(file);
+      } catch (const std::exception &error) {
+        writeConfigCheckJson(
+            file, nullptr, parseConfigDiagnostic(error.what(), file));
+        return 1;
+      }
+      writeConfigCheckJson(file, engine.get(), std::nullopt);
       return 0;
     }
     if (cmd == "config" && argc == 4 && std::string(argv[2]) == "check") {
