@@ -54,6 +54,48 @@ int main() {
       }
     }
   }
+  const std::string transitionPath = std::string(path) + ".transition";
+  {
+    std::ofstream config(transitionPath);
+    config << "Preamp: -6 dB\n";
+  }
+  {
+    std::ofstream config(path);
+    config << "Preamp: 0 dB\n";
+  }
+  Engine transitionFrom(48000, 2, 512, {eapoChannel("FL"), eapoChannel("FR")});
+  Engine transitionTo(48000, 2, 512, {eapoChannel("FL"), eapoChannel("FR")});
+  transitionFrom.loadConfig(path);
+  transitionTo.loadConfig(transitionPath);
+  realtime::allocations = 0;
+  realtime::deallocations = 0;
+  std::vector<float> transitionAudio(512 * 2, 0.1f);
+  unsigned transitionCounter = 0;
+  for (unsigned frames : {127u, 256u, 97u}) {
+    {
+      realtime::Scope scope;
+      transitionCounter = transitionFrom.processTransitionTo(
+          transitionTo, transitionAudio.data(), frames, transitionCounter, 480);
+    }
+  }
+  if (transitionCounter != 480 || realtime::allocations.load() != 0 ||
+      realtime::deallocations.load() != 0) {
+    std::cerr << "upstream FilterConfiguration transition allocated/freed "
+                 "in realtime scope\n";
+    return 1;
+  }
+  {
+    realtime::Scope scope;
+    transitionCounter = transitionFrom.processTransitionTo(
+        transitionTo, transitionAudio.data(), 32, transitionCounter, 480);
+  }
+  if (transitionCounter != 512 || realtime::allocations.load() != 0 ||
+      realtime::deallocations.load() != 0) {
+    std::cerr << "upstream FilterConfiguration transition block crossing was "
+                 "not allocation-free\n";
+    return 1;
+  }
+  unlink(transitionPath.c_str());
   {
     char routePath[] = "/tmp/skyapo-route-test-XXXXXX";
     int routeFd = mkstemp(routePath);

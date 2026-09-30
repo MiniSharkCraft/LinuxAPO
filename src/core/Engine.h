@@ -40,6 +40,12 @@ public:
          bool enablePluginFilters = true);
   void loadConfig(const std::string &path);
   void process(float *interleaved, unsigned frames);
+  // Run both upstream configurations on the same unmodified input and apply
+  // Equalizer APO's native cosine graph transition. The valid path allocates
+  // no memory; callers must prevalidate matching formats and buffer bounds.
+  unsigned processTransitionTo(Engine &next, float *interleaved,
+                               unsigned frames, unsigned transitionCounter,
+                               unsigned transitionLength);
   unsigned filterCount() const { return graph.size(); }
   unsigned sampleRate() const { return rate; }
   unsigned channels() const { return channelCount; }

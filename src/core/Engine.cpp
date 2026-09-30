@@ -820,6 +820,37 @@ void Engine::process(float *samples, unsigned frames) {
   configuration->write(samples, frames);
 }
 
+unsigned Engine::processTransitionTo(Engine &next, float *samples,
+                                     unsigned frames,
+                                     unsigned transitionCounter,
+                                     unsigned transitionLength) {
+  if (this == &next)
+    throw std::invalid_argument("cannot transition an Engine to itself");
+  if (rate != next.rate || channelCount != next.channelCount ||
+      maxFrameCount != next.maxFrameCount || channelNames != next.channelNames)
+    throw std::invalid_argument("Engine transition formats do not match");
+  if (!transitionLength || transitionCounter > transitionLength)
+    throw std::invalid_argument("invalid Engine transition position");
+  if (frames > maxFrameCount || frames > next.maxFrameCount)
+    throw std::runtime_error("frame block exceeds transition capacity");
+  if ((fixedBlock && frames != maxFrameCount) ||
+      (next.fixedBlock && frames != next.maxFrameCount))
+    throw std::runtime_error(
+        "convolution filters require the negotiated fixed audio block size");
+
+  // `FilterConfiguration::read` copies the complete input into its own
+  // preallocated planes. Read both graphs before writing the mixed output so
+  // an in-place interleaved buffer remains the same source for each graph.
+  configuration->read(samples, frames);
+  configuration->process(frames);
+  next.configuration->read(samples, frames);
+  next.configuration->process(frames);
+  transitionCounter = configuration->doTransition(
+      next.configuration.get(), frames, transitionCounter, transitionLength);
+  configuration->write(samples, frames);
+  return transitionCounter;
+}
+
 std::vector<std::string> Engine::failedPluginDescriptions() const {
   std::vector<std::string> failures;
   for (size_t i = 0; i < graph.size(); ++i) {

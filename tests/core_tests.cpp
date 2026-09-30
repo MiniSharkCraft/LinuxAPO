@@ -76,6 +76,49 @@ int main() {
       return 1;
     }
 
+  const std::string nextPath = path + ".transition";
+  if (!write(path, "Preamp: 0 dB\n") || !write(nextPath, "Preamp: -6 dB\n"))
+    return 1;
+  Engine beforeTransition(48000, 2, 512, {L"L", L"R"});
+  Engine afterTransition(48000, 2, 512, {L"L", L"R"});
+  beforeTransition.loadConfig(path);
+  afterTransition.loadConfig(nextPath);
+  unsigned transitionCounter = 0;
+  float transitionSamples[1024];
+  std::fill(std::begin(transitionSamples), std::end(transitionSamples), 1.0f);
+  std::vector<float> transitionOutput(480 * 2);
+  unsigned transitionOffset = 0;
+  for (const unsigned frames : {127u, 256u, 97u}) {
+    std::fill_n(transitionSamples, frames * 2, 1.0f);
+    transitionCounter = beforeTransition.processTransitionTo(
+        afterTransition, transitionSamples, frames, transitionCounter, 480);
+    std::copy_n(transitionSamples, frames * 2,
+                transitionOutput.data() + transitionOffset * 2);
+    transitionOffset += frames;
+  }
+  const float transitionGain = std::pow(10.0f, -6.0f / 20.0f);
+  const float expectedMidpoint = 0.5f * (1.0f + transitionGain);
+  if (transitionCounter != 480 ||
+      std::abs(transitionOutput[0] - 1.0f) > 1e-6f ||
+      std::abs(transitionOutput[2 * 240] - expectedMidpoint) > 1e-5f ||
+      std::abs(transitionOutput[2 * 479] - transitionGain) > 1e-4f) {
+    std::cerr << "upstream EAPO cosine graph transition mismatch: counter="
+              << transitionCounter << " first=" << transitionOutput[0]
+              << " midpoint=" << transitionOutput[2 * 240]
+              << " last=" << transitionOutput[2 * 479] << '\n';
+    return 1;
+  }
+  std::fill(std::begin(transitionSamples), std::end(transitionSamples), 1.0f);
+  transitionCounter = beforeTransition.processTransitionTo(
+      afterTransition, transitionSamples, 32, transitionCounter, 480);
+  if (transitionCounter != 512 ||
+      std::abs(transitionSamples[0] - transitionGain) > 1e-5f ||
+      std::abs(transitionSamples[63] - transitionGain) > 1e-5f) {
+    std::cerr << "upstream EAPO transition failed to hold the new graph after "
+                 "crossing its block boundary\n";
+    return 1;
+  }
+
   for (const auto &invalid : {
            std::string("Preamp: 10000 dB\n"),
            std::string("Filter: ON PK Fc 30000 Hz Gain 6 dB Q 1\n"),
@@ -1414,6 +1457,7 @@ int main() {
 #endif
 
   unlink(path.c_str());
+  unlink(nextPath.c_str());
   fs::remove_all(dir);
   std::cout
       << "Upstream Preamp/BiQuad/IIR/Delay; nested Include, Stage, cycle, "
