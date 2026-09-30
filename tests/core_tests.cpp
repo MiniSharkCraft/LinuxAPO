@@ -480,6 +480,76 @@ int main() {
     return 1;
   }
 
+#ifdef SKYAPO_TEST_MUPARSER
+  const auto conditional = dir / "conditional.txt";
+  if (!write(conditional,
+             "If: sampleRate < 0\n"
+             "If: invalid (\n"
+             "UnsupportedInsideFalseBranch: skipped\n"
+             "Include: missing-only-in-false-branch.txt\n"
+             "EndIf:\n"
+             "ElseIf: inputChannelCount == 2 && sampleRate == 48000\n"
+             "If: 1\n"
+             "Preamp: -6 dB\n"
+             "Else:\n"
+             "UnsupportedInsideNestedElse: skipped\n"
+             "EndIf:\n"
+             "Else:\n"
+             "UnsupportedInsideElse: skipped\n"
+             "EndIf:\n"))
+    return 1;
+  Engine conditionalEngine(48000, 2, 128);
+  conditionalEngine.loadConfig(conditional.string());
+  float conditionalSamples[2] = {1.0f, -1.0f};
+  conditionalEngine.process(conditionalSamples, 1);
+  const float expectedConditionalGain = std::pow(10.0f, -6.0f / 20.0f);
+  if (conditionalEngine.filterCount() != 1 ||
+      std::abs(conditionalSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(conditionalSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "nested If/ElseIf config selected the wrong branch\n";
+    return 1;
+  }
+
+  if (!write(conditional,
+             "If: sampleRate >>> 1\nPreamp: -6 dB\nEndIf:\n"))
+    return 1;
+  bool conditionErrorHasLocation = false;
+  try {
+    conditionalEngine.loadConfig(conditional.string());
+  } catch (const std::exception &ex) {
+    const auto message = std::string(ex.what());
+    conditionErrorHasLocation =
+        message.find(conditional.string() + ":1:") != std::string::npos &&
+        message.find("invalid If expression") != std::string::npos;
+  }
+  if (!conditionErrorHasLocation) {
+    std::cerr << "invalid conditional expression lacked a source location\n";
+    return 1;
+  }
+  float conditionalRetained[2] = {1.0f, -1.0f};
+  conditionalEngine.process(conditionalRetained, 1);
+  if (std::abs(conditionalRetained[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(conditionalRetained[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "invalid conditional config replaced the active graph\n";
+    return 1;
+  }
+
+  if (!write(conditional, "ElseIf: 1\n"))
+    return 1;
+  bool malformedConditionalRejected = false;
+  try {
+    conditionalEngine.loadConfig(conditional.string());
+  } catch (const std::exception &ex) {
+    malformedConditionalRejected =
+        std::string(ex.what()).find(conditional.string() + ":1:") !=
+        std::string::npos;
+  }
+  if (!malformedConditionalRejected) {
+    std::cerr << "unmatched ElseIf directive was not diagnosed\n";
+    return 1;
+  }
+#endif
+
   unlink(path.c_str());
   fs::remove_all(dir);
   std::cout

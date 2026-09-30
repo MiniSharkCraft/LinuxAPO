@@ -38,6 +38,9 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#ifdef SKYAPO_HAVE_MUPARSER
+#include <muParser.h>
+#endif
 
 namespace {
 void stripInlineComment(std::string &line) {
@@ -384,6 +387,46 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   }
   std::string raw;
   unsigned lineNo = 0;
+  struct ConditionalFrame {
+    bool parentActive;
+    bool branchTaken;
+    bool active;
+    bool sawElse;
+    unsigned openingLine;
+  };
+  std::vector<ConditionalFrame> conditions;
+  const auto evaluateCondition = [&](const std::wstring &expression,
+                                     unsigned conditionLine) -> bool {
+#ifdef SKYAPO_HAVE_MUPARSER
+    try {
+      mu::Parser parser;
+      parser.DefineConst("sampleRate", static_cast<double>(rate));
+      parser.DefineConst("inputChannelCount",
+                         static_cast<double>(channelCount));
+      parser.DefineConst("outputChannelCount",
+                         static_cast<double>(channelCount));
+      parser.SetExpr(StringHelper::toString(expression, 65001));
+      const double value = parser.Eval();
+      if (!std::isfinite(value))
+        throw std::runtime_error("expression result is not finite");
+      return value != 0.0;
+    } catch (const mu::Parser::exception_type &e) {
+      throw std::runtime_error(normalizedPath.string() + ":" +
+                               std::to_string(conditionLine) +
+                               ": invalid If expression: " + e.GetMsg());
+    } catch (const std::exception &e) {
+      throw std::runtime_error(normalizedPath.string() + ":" +
+                               std::to_string(conditionLine) +
+                               ": invalid If expression: " + e.what());
+    }
+#else
+    (void)expression;
+    throw std::runtime_error(normalizedPath.string() + ":" +
+                             std::to_string(conditionLine) +
+                             ": If/ElseIf requires muParser support; install "
+                             "muParser development files and rebuild SkyAPO");
+#endif
+  };
   while (std::getline(in, raw)) {
     ++lineNo;
     stripInlineComment(raw);
@@ -396,6 +439,66 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                std::to_string(lineNo) + ": expected command:");
     std::wstring command = StringHelper::trim(line.substr(0, colon));
     std::wstring params = StringHelper::trim(line.substr(colon + 1));
+
+    const bool parentActive =
+        conditions.empty() || conditions.back().active;
+    if (command == L"If") {
+      const bool condition = parentActive && evaluateCondition(params, lineNo);
+      conditions.push_back(
+          {parentActive, condition, parentActive && condition, false, lineNo});
+      continue;
+    }
+    if (command == L"ElseIf") {
+      if (conditions.empty())
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": ElseIf without matching If");
+      auto &frame = conditions.back();
+      if (frame.sawElse)
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": ElseIf cannot follow Else");
+      const bool condition = frame.parentActive && !frame.branchTaken &&
+                             evaluateCondition(params, lineNo);
+      frame.active = condition;
+      frame.branchTaken = frame.branchTaken || condition;
+      continue;
+    }
+    if (command == L"Else") {
+      if (!params.empty())
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": Else does not accept parameters");
+      if (conditions.empty())
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": Else without matching If");
+      auto &frame = conditions.back();
+      if (frame.sawElse)
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": duplicate Else in If block");
+      frame.sawElse = true;
+      frame.active = frame.parentActive && !frame.branchTaken;
+      frame.branchTaken = true;
+      continue;
+    }
+    if (command == L"EndIf") {
+      if (!params.empty())
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": EndIf does not accept parameters");
+      if (conditions.empty())
+        throw std::runtime_error(normalizedPath.string() + ":" +
+                                 std::to_string(lineNo) +
+                                 ": EndIf without matching If");
+      conditions.pop_back();
+      continue;
+    }
+    const bool conditionActive =
+        conditions.empty() || conditions.back().active;
+    if (!conditionActive)
+      continue;
 
     if (command == L"Stage") {
       std::wistringstream stages(StringHelper::toLowerCase(params));
@@ -487,6 +590,10 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                            normalizedPath, lineNo,
                            StringHelper::toString(originalCommand, 65001)});
   }
+  if (!conditions.empty())
+    throw std::runtime_error(normalizedPath.string() + ":" +
+                             std::to_string(conditions.back().openingLine) +
+                             ": If was not closed by EndIf");
   if (in.bad())
     throw std::runtime_error("error reading config: " +
                              normalizedPath.string());

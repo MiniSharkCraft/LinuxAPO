@@ -1,0 +1,8 @@
+# Numeric conditionals are evaluated from the active Engine's negotiated format.
+If: sampleRate >= 44100 && inputChannelCount >= 2
+Preamp: -6 dB
+ElseIf: sampleRate > 0
+Preamp: -3 dB
+Else:
+Preamp: 0 dB
+EndIf:
