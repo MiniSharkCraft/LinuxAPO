@@ -194,7 +194,13 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_basics_test.py
       $<TARGET_FILE:skyapo>)
+  add_test(NAME skyapo-ipc-cli
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/ipc_cli_test.py
+      $<TARGET_FILE:skyapo>)
 endif()
+add_executable(skyapo-ipc-protocol-tests tests/ipc_protocol_test.cpp)
+add_test(NAME skyapo-ipc-protocol COMMAND skyapo-ipc-protocol-tests)
 if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
   if(Qt6Widgets_FOUND)
