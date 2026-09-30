@@ -1067,6 +1067,72 @@ int main() {
     return 1;
   }
 
+  struct BiQuadGolden {
+    const char *parameters;
+    BiQuad::Type type;
+    double gain;
+    double frequency;
+    double bandwidthOrQ;
+    bool isBandwidth;
+  };
+  const BiQuadGolden biquadGoldens[] = {
+      {"PK Fc 1000 Hz Gain 6 dB BW Oct 1.0", BiQuad::PEAKING, 6, 1000, 1.0,
+       true},
+      {"LP Fc 1200 Hz Q 0.70710678", BiQuad::LOW_PASS, 0, 1200, 0.70710678,
+       false},
+      {"HP Fc 200 Hz BW Oct 1.5", BiQuad::HIGH_PASS, 0, 200, 1.5, true},
+      {"BP Fc 4000 Hz Q 0.8", BiQuad::BAND_PASS, 0, 4000, 0.8, false},
+      {"LSC Fc 250 Hz Gain 6 dB Q 0.9", BiQuad::LOW_SHELF, 6, 250, 0.9, false},
+      {"HSC Fc 6000 Hz Gain -4 dB Q 0.9", BiQuad::HIGH_SHELF, -4, 6000, 0.9,
+       false},
+      {"NO Fc 1500 Hz Q 30", BiQuad::NOTCH, 0, 1500, 30, false},
+      {"AP Fc 800 Hz Q 0.70710678", BiQuad::ALL_PASS, 0, 800, 0.70710678,
+       false},
+  };
+  for (const auto &golden : biquadGoldens) {
+    if (!write(path, std::string("Filter: ON ") + golden.parameters + "\n"))
+      return 1;
+    Engine variant(48000, 2, 256);
+    variant.loadConfig(path);
+    BiQuad referenceLeft(golden.type, golden.gain, golden.frequency, 48000,
+                         golden.bandwidthOrQ, golden.isBandwidth);
+    BiQuad referenceRight(golden.type, golden.gain, golden.frequency, 48000,
+                          golden.bandwidthOrQ, golden.isBandwidth);
+    constexpr unsigned frameCount = 257;
+    std::vector<float> samples(frameCount * 2);
+    std::vector<float> expected(frameCount * 2);
+    for (unsigned frame = 0; frame < frameCount; ++frame) {
+      samples[frame * 2] = static_cast<float>(0.3 * std::sin(frame * 0.37) +
+                                              0.1 * std::cos(frame * 0.11));
+      samples[frame * 2 + 1] = static_cast<float>(
+          0.2 * std::cos(frame * 0.23) - 0.15 * std::sin(frame * 0.07));
+      expected[frame * 2] =
+          static_cast<float>(referenceLeft.process(samples[frame * 2]));
+      expected[frame * 2 + 1] =
+          static_cast<float>(referenceRight.process(samples[frame * 2 + 1]));
+    }
+    constexpr unsigned blocks[] = {1, 17, 128, 111};
+    unsigned frame = 0;
+    for (const auto block : blocks) {
+      if (frame >= frameCount)
+        break;
+      const auto count = std::min(block, frameCount - frame);
+      variant.process(samples.data() + frame * 2, count);
+      frame += count;
+    }
+    for (; frame < frameCount;) {
+      const auto count = std::min(13u, frameCount - frame);
+      variant.process(samples.data() + frame * 2, count);
+      frame += count;
+    }
+    for (size_t sample = 0; sample < samples.size(); ++sample)
+      if (std::abs(samples[sample] - expected[sample]) > 2e-6f) {
+        std::cerr << "upstream BiQuad variant differs from its reference for: "
+                  << golden.parameters << " at sample " << sample << '\n';
+        return 1;
+      }
+  }
+
   if (!write(path, "NotACommand: 1\n"))
     return 1;
   bool rejected = false;
