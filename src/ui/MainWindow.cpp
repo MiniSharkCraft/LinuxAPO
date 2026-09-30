@@ -184,6 +184,15 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   timer->start(2000);
 }
 
+MainWindow::~MainWindow() {
+  const auto processes = findChildren<QProcess *>();
+  for (auto *process : processes) {
+    QObject::disconnect(process, nullptr, this, nullptr);
+    if (process->state() != QProcess::NotRunning)
+      process->kill();
+  }
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
   if (!modified) {
     event->accept();

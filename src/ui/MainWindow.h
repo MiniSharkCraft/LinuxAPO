@@ -19,6 +19,7 @@ class MainWindow final : public QMainWindow {
   Q_OBJECT
 public:
   explicit MainWindow(QString path = {}, QString cliExecutable = {});
+  ~MainWindow() override;
 
 protected:
   void closeEvent(QCloseEvent *event) override;
