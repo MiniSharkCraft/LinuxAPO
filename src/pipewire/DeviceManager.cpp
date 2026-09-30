@@ -25,7 +25,8 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
   if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
       prop(props, PW_KEY_MEDIA_CLASS) == "Audio/Source") {
     AudioDevice device{id, prop(props, PW_KEY_NODE_NAME),
-                       prop(props, PW_KEY_NODE_DESCRIPTION)};
+                       prop(props, PW_KEY_NODE_DESCRIPTION), 0, 0, {}};
+    device.identity = skyapo::pipewire::deviceIdentityFromProps(props);
     const auto channels = prop(props, PW_KEY_AUDIO_CHANNELS);
     const auto sampleRate = prop(props, PW_KEY_AUDIO_RATE);
     try {

@@ -1,4 +1,5 @@
 #pragma once
+#include "DeviceIdentity.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -6,6 +7,7 @@ struct AudioDevice {
   uint32_t id;
   std::string name, description;
   unsigned channels{}, sampleRate{};
+  skyapo::pipewire::DeviceIdentityMetadata identity;
 };
 struct AudioPort {
   uint32_t id, node;

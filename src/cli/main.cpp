@@ -774,8 +774,9 @@ int main(int argc, char **argv) {
 #ifdef SKYAPO_HAVE_PIPEWIRE
       auto ds = enumerateDevices();
       if (action == "list") {
-        std::cout
-            << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n";
+        std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\t"
+                     "SAMPLE RATE\tSTABLE PROPERTY\tDEVICE BUS ID\t"
+                     "ALSA CARD\tALSA PATH\n";
         for (auto &d : ds.sources)
           if (d.name != "skyapo.virtual_mic")
             std::cout << d.id << '\t' << d.name << '\t' << d.description << '\t'
@@ -784,7 +785,9 @@ int main(int argc, char **argv) {
                       << '\t'
                       << (d.sampleRate ? std::to_string(d.sampleRate)
                                        : "unknown")
-                      << '\n';
+                      << '\t' << d.identity.stableProperty() << '\t'
+                      << d.identity.busId << '\t' << d.identity.alsaCard
+                      << '\t' << d.identity.alsaPath << '\n';
         return 0;
       }
       if (action == "set" && argc == 4) {
