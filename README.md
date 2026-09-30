@@ -1,6 +1,6 @@
 # SkyAPO
 
-SkyAPO is an early Linux port effort for Equalizer APO. It compiles and invokes selected real upstream Equalizer APO DSP filters; the project does not substitute another audio effects engine. The upstream GPL license and history are kept in `upstream/equalizerapo`; [third-party notices](THIRD_PARTY_NOTICES.md) inventory the pinned CLAP/VST3 interfaces and package license files. Additional engineering notes are under `docs/` in the source checkout.
+SkyAPO is an early Linux port effort for Equalizer APO. It compiles and invokes selected real upstream Equalizer APO DSP filters; the project does not substitute another audio effects engine. The upstream GPL license and history are kept in `upstream/equalizerapo`; `docs/THIRD_PARTY_NOTICES.md` (installed as `THIRD_PARTY_NOTICES.md`) inventories the pinned CLAP/VST3 interfaces and package license files. Additional engineering notes are under `docs/` in the source checkout.
 
 ## Build
 

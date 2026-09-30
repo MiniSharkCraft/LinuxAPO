@@ -47,6 +47,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
 - [x] Attach, stop, and reattach a native PipeWire consumer; verify stereo and mono virtual-source samples numerically, including after private server restart.
 - [x] Destroy one physical-to-SkyAPO PipeWire Link while both nodes and ports remain; recreate the missing link without restarting the daemon, then independently record and verify the -6 dB chain in mono and stereo CTest graphs.
+- [x] Parse PipeWire registry port `node.id` strictly with `std::from_chars`; malformed, partial, and overflowing metadata is ignored rather than throwing through the C callback. Unit-tested empty/junk/whitespace/overflow and valid boundary values.
 - [x] Change graph quantum and sample rate while the daemon is live; verify DSP reinitialization and consumer output at 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048.
 - [x] Exercise `skyapo restart` against the live desktop PipeWire server with an isolated XDG config; the daemon returned to `streaming`, recreated 2/2 physical links at 48 kHz stereo/1024, and the process PID changed.
 - [x] Verify an independent deterministic consumer after daemon restart on a private graph: 144384 stereo frames, measured expected-output RMS ratio 1.000006, and clean recovery with 2/2 links.
@@ -129,6 +130,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add an incremental `clang-format` CI check for changed SkyAPO-owned C++ files, excluding upstream and generated code; verify hosted workflow runs after publishing/connecting the repository.
 - [x] Document Windows Equalizer APO → Linux SkyAPO config migration and compatibility gaps.
 - [x] Audit Arch package license placement with `namcap`; install all license texts under `/usr/share/licenses/skyapo/` and verify an isolated package archive.
+- [x] Run a clean staged Release build/install smoke; installed CLI/config-check/render, service, desktop metadata, man pages and license notices were inspected. Correct stale LoudnessCorrection docs and avoid linking source-only docs from the installed README.
 - [ ] Fresh-install test, licensing/dependency audit, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.
 
