@@ -1,5 +1,6 @@
 #include "DeviceManager.h"
 #include "NodeIdParser.h"
+#include "helpers/StringHelper.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -104,4 +105,19 @@ Devices enumerateDevices() {
             return port.node == device.id && port.direction == "out";
           });
   return s.devices;
+}
+
+std::wstring deviceMatchText(const AudioDevice &device) {
+  std::string text = "node.name=" + device.name;
+  if (!device.description.empty())
+    text += " device.description=" + device.description;
+  if (!device.identity.serial.empty())
+    text += " device.serial=" + device.identity.serial;
+  if (!device.identity.busId.empty())
+    text += " device.bus-id=" + device.identity.busId;
+  if (!device.identity.alsaCard.empty())
+    text += " api.alsa.card=" + device.identity.alsaCard;
+  if (!device.identity.alsaPath.empty())
+    text += " api.alsa.path=" + device.identity.alsaPath;
+  return StringHelper::toWString(text, 65001);
 }

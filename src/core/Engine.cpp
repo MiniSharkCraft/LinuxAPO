@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "DevicePatternMatcher.h"
 #include "../plugin/IPluginFailureState.h"
 #include "../plugin/IPluginBypassControl.h"
 #include "../plugin/IPluginParameterControl.h"
@@ -175,9 +176,10 @@ void Engine::ConfigurationDeleter::operator()(
 
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
                std::vector<std::wstring> names, bool allowPendingEndpointVolume,
-               bool enablePluginFilters)
+               bool enablePluginFilters, std::wstring deviceMatchText)
     : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames),
-      allowPendingEndpointVolume(allowPendingEndpointVolume) {
+      allowPendingEndpointVolume(allowPendingEndpointVolume),
+      deviceMatchText(std::move(deviceMatchText)) {
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
@@ -578,6 +580,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     unsigned openingLine;
   };
   std::vector<ConditionalFrame> conditions;
+  bool deviceMatches = true;
   const auto evaluateCondition = [&](const std::wstring &expression,
                                      unsigned conditionLine) -> bool {
 #ifdef SKYAPO_HAVE_MUPARSERX
@@ -646,7 +649,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
 
     const bool parentActive = conditions.empty() || conditions.back().active;
     if (command == L"If") {
-      const bool condition = parentActive && evaluateCondition(params, lineNo);
+      const bool condition =
+          parentActive && deviceMatches && evaluateCondition(params, lineNo);
       conditions.push_back(
           {parentActive, condition, parentActive && condition, false, lineNo});
       continue;
@@ -662,7 +666,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                  std::to_string(lineNo) +
                                  ": ElseIf cannot follow Else");
       const bool condition = frame.parentActive && !frame.branchTaken &&
-                             evaluateCondition(params, lineNo);
+                             deviceMatches && evaluateCondition(params, lineNo);
       frame.active = condition;
       frame.branchTaken = frame.branchTaken || condition;
       continue;
@@ -700,6 +704,14 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     }
     const bool conditionActive = conditions.empty() || conditions.back().active;
     if (!conditionActive)
+      continue;
+
+    if (command == L"Device") {
+      deviceMatches =
+          skyapo::core::devicePatternMatches(deviceMatchText, params);
+      continue;
+    }
+    if (!deviceMatches)
       continue;
 
 #ifdef SKYAPO_HAVE_MUPARSERX

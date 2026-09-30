@@ -1,5 +1,6 @@
 #include "../platform/Settings.h"
 #include "Engine.h"
+#include "helpers/StringHelper.h"
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
@@ -115,6 +116,15 @@ std::optional<std::string> statusValue(const std::string &status,
     begin = end + 1;
   }
   return std::nullopt;
+}
+
+std::wstring configDeviceMatchText() {
+  const auto selected = settings::device();
+  if (selected.empty())
+    return {};
+  // Keep config validation independent of a live PipeWire registry connection.
+  // Runtime matching uses the complete discovered identity metadata.
+  return L"node.name=" + StringHelper::toWString(selected, 65001);
 }
 
 std::optional<unsigned long long> unsignedValue(const std::string &value) {
@@ -872,7 +882,9 @@ int main(int argc, char **argv) {
       const std::string file = argv[4];
       std::unique_ptr<Engine> engine;
       try {
-        engine = std::make_unique<Engine>(48000, 2, 8192);
+        engine = std::make_unique<Engine>(48000, 2, 8192,
+                                          std::vector<std::wstring>{}, false,
+                                          true, configDeviceMatchText());
         engine->loadConfig(file);
       } catch (const std::exception &error) {
         auto diagnostic = parseConfigDiagnostic(error.what(), file);
@@ -886,7 +898,7 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (cmd == "config" && argc == 4 && std::string(argv[2]) == "check") {
-      Engine e(48000, 2, 8192);
+      Engine e(48000, 2, 8192, {}, false, true, configDeviceMatchText());
       e.loadConfig(argv[3]);
       std::cout << "Valid config: " << e.filterCount() << " filters\n";
       return 0;

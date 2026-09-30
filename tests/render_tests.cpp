@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <sndfile.h>
 #include <string>
@@ -7,11 +8,21 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-  if (argc != 3 && argc != 4)
+  if (argc < 3 || argc > 5)
     return 2;
-  const double expectedDb = argc == 4 ? std::strtod(argv[3], nullptr) : -6.0;
+  const double expectedDb = argc >= 4 ? std::strtod(argv[3], nullptr) : -6.0;
   const auto stem = "/tmp/skyapo-render-test-" + std::to_string(getpid());
   const auto input = stem + "-in.wav", output = stem + "-out.wav";
+  std::string config = argv[2];
+  const std::string device = argc == 5 ? argv[4] : "";
+  const auto wrappedConfig = stem + "-config.txt";
+  if (!device.empty()) {
+    std::ofstream wrapped(wrappedConfig);
+    wrapped << "Device: " << device << "\nInclude: " << config << '\n';
+    if (!wrapped)
+      return 1;
+    config = wrappedConfig;
+  }
   SF_INFO info{};
   info.samplerate = 44100;
   info.channels = 2;
@@ -29,9 +40,10 @@ int main(int argc, char **argv) {
     return 1;
   }
   sf_close(file);
-  const std::string command = "\"" + std::string(argv[1]) + "\" --input \"" +
-                              input + "\" --output \"" + output +
-                              "\" --config \"" + argv[2] + "\"";
+  const std::string command =
+      "\"" + std::string(argv[1]) + "\" --input \"" + input + "\" --output \"" +
+      output + "\" --config \"" + config + "\"" +
+      (device.empty() ? "" : " --device \"" + device + "\"");
   if (std::system(command.c_str()) != 0)
     return 1;
   SF_INFO outInfo{};
@@ -43,6 +55,8 @@ int main(int argc, char **argv) {
   sf_close(file);
   unlink(input.c_str());
   unlink(output.c_str());
+  if (!device.empty())
+    unlink(wrappedConfig.c_str());
   if (frames != 1000 || outInfo.samplerate != 44100 || outInfo.channels != 2) {
     std::cerr << "render format/frame count mismatch\n";
     return 1;

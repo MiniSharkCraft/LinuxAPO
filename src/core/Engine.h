@@ -43,7 +43,7 @@ public:
   Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
          std::vector<std::wstring> channelNames = {},
          bool allowPendingEndpointVolume = false,
-         bool enablePluginFilters = true);
+         bool enablePluginFilters = true, std::wstring deviceMatchText = {});
   void loadConfig(const std::string &path);
   void process(float *interleaved, unsigned frames);
   // Run both upstream configurations on the same unmodified input and apply
@@ -104,6 +104,7 @@ private:
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
   bool allowPendingEndpointVolume = false;
+  std::wstring deviceMatchText;
   std::vector<std::string> descriptions;
   std::vector<std::filesystem::path> loadedConfigFiles;
   std::vector<std::unique_ptr<IFilterFactory>> factories;

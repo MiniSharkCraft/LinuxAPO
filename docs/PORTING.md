@@ -69,6 +69,21 @@ The tiny generated copy is necessary because quoted includes resolve beside the 
 
 The same build-only adaptation now covers upstream `LoudnessCorrectionFilter`: its COM `VolumeController` is replaced with the PipeWire-backed `LoudnessVolumeProvider`; Win32 thread/event calls map to `std::thread` and atomic events in `EapoSyncCompat.h`. The filter's realtime callback only polls atomics and uses `try_lock` to copy worker-generated coefficients; if the control worker holds the lock, the event remains pending for the next callback. The worker may block on the mutex, but the audio thread never does. `_attFactor` is atomic because the upstream worker updates it while the audio thread multiplies samples. Worker creation is checked and handles are initialized, zero-difference `preAmp` is initialized (the upstream branch otherwise leaves it indeterminate), and the worker always refreshes on the first available Linux volume sample. `ParameterArchive.h` is copied and adapted for UTF-8/POSIX; its Windows `CP_ACP`/`CopyMemory` calls and an upstream byte-count bug (`sizeof(std::wstring)` rather than `sizeof(wchar_t)`) cannot be used on Linux. Strict configure-time checks fail if expected upstream patch sites disappear. The selected filter sources, factory and GPL notices remain in the submodule; these changes are generated under `build/eapo-port` only.
 
+The Linux config loader also ports the actual matching behavior of
+`filters/DeviceFilterFactory::matchDevice` without instantiating the Windows
+factory: semicolon-separated OR groups, whitespace-separated AND terms,
+case-insensitive substring matching, `all`, and the upstream GUID handling.
+Its Linux match string is built from stable `node.name`, description, and
+available serial/bus/ALSA identity properties; PipeWire's transient numeric
+node ID is never included. The daemon passes this context into each fresh
+Engine on initial load, format rebuild, and config reload. Config validation
+uses only the selected stable node name so it remains independent of a live
+PipeWire registry connection; offline render accepts an explicit `--device`
+stable name. Description/serial-only matches may therefore differ in config-
+check filter counts from daemon runtime.
+The matcher keeps its upstream GPL attribution and is covered by direct DSP
+tests plus a private PipeWire E2E that verifies the processed virtual-mic audio.
+
 ## Revision update procedure
 
 Bootstrap with `git submodule update --init --recursive`. To update, fetch in `upstream/equalizerapo`, inspect and check out a reviewed exact revision, update these revision notes, rerun normal/sanitizer/hardware tests, then stage the new submodule gitlink in SkyAPO. Do not blindly pull an unreviewed revision or modify the official checkout. Root Git tracks a mode-160000 gitlink, not the upstream `.git` contents.

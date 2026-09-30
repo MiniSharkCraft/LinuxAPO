@@ -185,6 +185,7 @@ if(FFTW3F_FOUND)
 endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp
+  src/core/DevicePatternMatcher.cpp
   src/platform/linux/ConfigSource.cpp
   ${SKYAPO_UPSTREAM_PROCESS_SOURCE} ${EAPO_EXPRESSION_SOURCES})
 target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
@@ -708,6 +709,9 @@ endif()
 add_executable(skyapo-render-tests tests/render_tests.cpp)
 target_link_libraries(skyapo-render-tests PRIVATE PkgConfig::SNDFILE)
 add_test(NAME skyapo-offline-render COMMAND skyapo-render-tests $<TARGET_FILE:skyapo-render> ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt)
+add_test(NAME skyapo-offline-device-render
+  COMMAND skyapo-render-tests $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt -6 test.pipewire.input)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   add_test(NAME skyapo-offline-clap-render COMMAND skyapo-render-tests
     $<TARGET_FILE:skyapo-render>
@@ -863,6 +867,21 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
       include-reload)
   set_tests_properties(skyapo-pipewire-e2e-include-reload
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
+  add_test(NAME skyapo-pipewire-e2e-device-filter
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      device-filter)
+  set_tests_properties(skyapo-pipewire-e2e-device-filter
     PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
   add_test(NAME skyapo-pipewire-e2e-renegotiate
     COMMAND ${Python3_EXECUTABLE}

@@ -18,3 +18,4 @@ struct Devices {
   std::vector<AudioPort> ports;
 };
 Devices enumerateDevices();
+std::wstring deviceMatchText(const AudioDevice &device);

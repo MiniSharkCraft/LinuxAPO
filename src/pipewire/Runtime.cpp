@@ -292,7 +292,8 @@ struct Runtime {
       names.push_back(eapoChannel(p.channel));
     const auto createEngine = [&] {
       auto candidate =
-          std::make_unique<Engine>(hz, channels, blockFrames, names, true);
+          std::make_unique<Engine>(hz, channels, blockFrames, names, true, true,
+                                   deviceMatchText(device));
       candidate->loadConfig(config);
       return candidate;
     };
@@ -428,7 +429,8 @@ struct Runtime {
       throw std::runtime_error("cannot reload before PipeWire format negotiation");
     const auto createEngine = [&] {
       auto candidate =
-          std::make_unique<Engine>(hz, channels, blockFrames, names, true);
+          std::make_unique<Engine>(hz, channels, blockFrames, names, true, true,
+                                   deviceMatchText(device));
       candidate->loadConfig(config);
       return candidate;
     };

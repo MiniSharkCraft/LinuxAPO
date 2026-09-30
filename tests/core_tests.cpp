@@ -1412,6 +1412,69 @@ int main() {
     return 1;
   }
 
+  const std::wstring testDevice =
+      L"node.name=alsa_input.usb.device device.description=USB Microphone "
+      L"device.serial=SN-42 device.bus-id=usb-1 api.alsa.card=2 "
+      L"{12345678-ABCD-1234-ABCD-1234567890AB}";
+  const auto deviceConfig = dir / "device-filter.txt";
+  if (!write(deviceConfig, "Device: Built-in Missing; USB Microphone SN-42\n"
+                           "Preamp: -6 dB\nInclude: device-child.txt\n"
+                           "Preamp: -3 dB\n") ||
+      !write(dir / "device-child.txt",
+             "Device: Built-in Audio\nPreamp: 48 dB\n"
+             "Device: usb {12345678-abcd-1234-abcd-1234567890ab}\n"
+             "Preamp: 3 dB\n"))
+    return 1;
+  Engine deviceFiltered(48000, 2, 128, {}, false, true, testDevice);
+  deviceFiltered.loadConfig(deviceConfig.string());
+  float deviceSamples[2] = {1.0f, -1.0f};
+  deviceFiltered.process(deviceSamples, 1);
+  const float expectedDeviceGain = std::pow(10.0f, -6.0f / 20.0f);
+  if (deviceFiltered.filterCount() != 3 ||
+      std::abs(deviceSamples[0] - expectedDeviceGain) > 1e-5f ||
+      std::abs(deviceSamples[1] + expectedDeviceGain) > 1e-5f) {
+    std::cerr << "EAPO Device matching OR/AND/GUID or Include scope failed\n";
+    return 1;
+  }
+  if (!write(deviceConfig, "Device: all\nPreamp: -6 dB\n"))
+    return 1;
+  Engine wildcardDevice(48000, 2, 128);
+  wildcardDevice.loadConfig(deviceConfig.string());
+  float wildcardSamples[2] = {1.0f, -1.0f};
+  wildcardDevice.process(wildcardSamples, 1);
+  if (std::abs(wildcardSamples[0] - expectedDeviceGain) > 1e-5f ||
+      std::abs(wildcardSamples[1] + expectedDeviceGain) > 1e-5f) {
+    std::cerr << "EAPO Device: all did not match without device context\n";
+    return 1;
+  }
+  if (!write(deviceConfig, "Device: a different microphone\nPreamp: -6 dB\n"))
+    return 1;
+  Engine nonmatchingDevice(48000, 2, 128, {}, false, true, testDevice);
+  nonmatchingDevice.loadConfig(deviceConfig.string());
+  float nonmatchingSamples[2] = {1.0f, -1.0f};
+  nonmatchingDevice.process(nonmatchingSamples, 1);
+  if (nonmatchingDevice.filterCount() != 0 || nonmatchingSamples[0] != 1.0f ||
+      nonmatchingSamples[1] != -1.0f) {
+    std::cerr << "nonmatching EAPO Device did not filter the remaining chain\n";
+    return 1;
+  }
+  if (!write(deviceConfig, "Device: definitely-not-this-device\n"
+                           "If: sampleRate >>> 1\nPreamp: -6 dB\nEndIf:\n"
+                           "Device: all\nPreamp: -3 dB\n"))
+    return 1;
+  Engine deviceSuppressesInvalidIf(48000, 2, 128, {}, false, true, testDevice);
+  deviceSuppressesInvalidIf.loadConfig(deviceConfig.string());
+  float suppressedIfSamples[2] = {1.0f, -1.0f};
+  deviceSuppressesInvalidIf.process(suppressedIfSamples, 1);
+  const float expectedDeviceReenabledGain = std::pow(10.0f, -3.0f / 20.0f);
+  if (deviceSuppressesInvalidIf.filterCount() != 1 ||
+      std::abs(suppressedIfSamples[0] - expectedDeviceReenabledGain) > 1e-5f ||
+      std::abs(suppressedIfSamples[1] + expectedDeviceReenabledGain) > 1e-5f) {
+    std::cerr
+        << "mismatched Device section evaluated an inactive If expression\n";
+    return 1;
+  }
+
 #ifdef SKYAPO_TEST_MUPARSER
 #ifdef SKYAPO_TEST_MUPARSERX
 #define SKYAPO_TEST_CONDITIONAL_ELSEIF                                         \

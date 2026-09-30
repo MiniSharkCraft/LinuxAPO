@@ -140,7 +140,7 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "renegotiate", "transition-format"
+        "renegotiate", "transition-format", "device-filter"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
@@ -148,7 +148,8 @@ def main():
             "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
-            "vst2-live-param|plugin-bypass|renegotiate|transition-format")
+            "vst2-live-param|plugin-bypass|renegotiate|transition-format|"
+            "device-filter")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
@@ -166,6 +167,7 @@ def main():
     plugin_bypass = mode == "plugin-bypass"
     renegotiate = mode == "renegotiate"
     transition_format = mode == "transition-format"
+    device_filter = mode == "device-filter"
     plugin_chain = plugin_live or plugin_bypass or latency_plugin
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
@@ -211,6 +213,12 @@ def main():
         if transition_format:
             transition_config.write_text("Preamp: -6 dB\n")
             dsp_config = transition_config
+        if device_filter:
+            device_config = root / "device-filter.txt"
+            device_config.write_text(
+                f"Device: unmatched microphone; {device_name}\n"
+                "Preamp: -6 dB\n")
+            dsp_config = device_config
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
