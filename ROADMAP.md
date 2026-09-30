@@ -63,9 +63,15 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Add first native CLAP audio-effect host against official pinned CLAP headers; add ID discovery via CLAP_PATH/standard paths and numeric offline/realtime-audit fixtures.
 - [x] Add CLAP parameter metadata/CLI inspection and static config-time parameter events/overrides with range validation; test numerical offline processing, invalid config rejection, allocation audit and live PipeWire capture.
+- [x] Pin official Steinberg VST3 SDK components and build the Linux module/hosting subset without adding the full SDK/tutorial/UI tree.
+- [x] Add VST3 bundle/class discovery, CLI info, and an initial single-bus mono/stereo audio-effect adapter; manually render a real installed LSP Filter Stereo bundle offline and confirm changed samples.
+- [x] Honor `VST3_PATH` alongside Steinberg standard module paths and cache discovered module metadata per process.
+- [x] Discover and offline-process the local yabridge ATKExpander VST3 wrapper via the native VST3 host (192000 mono frames at 48 kHz; samples changed).
+- [ ] Add a redistributable VST3 test fixture, automated numerical coverage and callback-allocation audit; verify realtime plugin operation.
+- [ ] Add VST3 parameter metadata/config overrides, state/bypass, latency, auxiliary buses and plugin failure isolation.
+- [ ] Add VST2 support through a legally distributable host/interface strategy; test yabridge VST2/VST3 wrappers.
 - [ ] Add CLAP live parameter/control changes, state/latency support, production-plugin validation and safer failure isolation.
-- [ ] Add VST2 and VST3 support as legally distributable host integrations permit.
-- [ ] Verify yabridge-produced wrappers using ordinary native format scanning; document user workflow.
+- [ ] Verify yabridge-produced wrappers in the realtime graph and test yabridge VST2 wrappers; document user workflow.
 - [ ] Plugin live parameters, state, bypass, latency and isolation behavior.
 - Acceptance: each format is individually built/tested/reported; no SDK license violations or fabricated support.
 
@@ -99,7 +105,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [ ] Stable daemon, major EAPO directives, hot reload with rollback.
 - [ ] PipeWire capture/virtual mic, recovery, mono/stereo at 44.1/48/96 kHz.
 - [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include and Convolution validated; GraphicEQ compiles with its actual upstream implementation.
-- [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. Current native LV2 and first CLAP hosts are prototypes, not full 1.0 acceptance.
+- [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. LV2/CLAP and initial single-bus VST3 hosts are prototypes, not full 1.0 acceptance; VST2 and realtime yabridge compatibility remain unverified.
 - [ ] Ported/evolved original editor; full CLI and diagnostics.
 - [ ] Packaging, user service, desktop integration, licensing and clean-install docs.
 - [ ] Full regression, sanitizer, hardware, GUI, plugin, packaging and fresh-install test report.

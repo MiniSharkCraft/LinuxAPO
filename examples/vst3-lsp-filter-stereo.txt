@@ -1,0 +1,3 @@
+# The UID is specific to the LSP Filter Stereo VST3 bundle. Discover UIDs with:
+#   skyapo plugin list
+Plugin: VST3 64737020666C747320202020666C7473

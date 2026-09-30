@@ -15,6 +15,50 @@ pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
 pkg_check_modules(LILV QUIET IMPORTED_TARGET lilv-0)
 pkg_check_modules(LV2 QUIET IMPORTED_TARGET lv2)
 
+set(SKYAPO_VST3_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/upstream/vst3)
+if(EXISTS "${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp" AND
+   EXISTS "${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp")
+  find_package(Threads REQUIRED)
+  add_library(skyapo-vst3-base STATIC
+    ${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fbuffer.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fdebug.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fdynlib.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fobject.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fstreamer.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/fstring.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/timer.cpp
+    ${SKYAPO_VST3_ROOT}/base/source/updatehandler.cpp
+    ${SKYAPO_VST3_ROOT}/base/thread/source/fcondition.cpp
+    ${SKYAPO_VST3_ROOT}/base/thread/source/flock.cpp)
+  add_library(skyapo-vst3-interfaces STATIC
+    ${SKYAPO_VST3_ROOT}/pluginterfaces/base/conststringtable.cpp
+    ${SKYAPO_VST3_ROOT}/pluginterfaces/base/coreiids.cpp
+    ${SKYAPO_VST3_ROOT}/pluginterfaces/base/funknown.cpp
+    ${SKYAPO_VST3_ROOT}/pluginterfaces/base/ustring.cpp)
+  add_library(skyapo-vst3-hosting STATIC
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/common/commonstringconvert.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/common/threadchecker_linux.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstinitiids.cpp)
+  foreach(target skyapo-vst3-base skyapo-vst3-interfaces skyapo-vst3-hosting)
+    target_include_directories(${target} PUBLIC ${SKYAPO_VST3_ROOT})
+    target_compile_features(${target} PUBLIC cxx_std_17)
+    target_compile_definitions(${target} PRIVATE DEVELOPMENT=1)
+  endforeach()
+  target_link_libraries(skyapo-vst3-hosting PUBLIC skyapo-vst3-base
+    skyapo-vst3-interfaces ${CMAKE_DL_LIBS} Threads::Threads)
+  set(SKYAPO_HAVE_VST3 TRUE)
+else()
+  message(STATUS "Steinberg VST3 SDK submodules missing: native VST3 hosting disabled")
+endif()
+
 if(SKYAPO_SANITIZERS)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
@@ -58,6 +102,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_CLAP=1)
 else()
   message(STATUS "CLAP headers not present: initialize upstream/clap to enable CLAP")
+endif()
+if(SKYAPO_HAVE_VST3)
+  target_sources(skyapo-core PRIVATE src/plugin/VST3PluginHost.cpp)
+  target_include_directories(skyapo-core PRIVATE ${SKYAPO_VST3_ROOT})
+  target_link_libraries(skyapo-core PUBLIC skyapo-vst3-hosting)
+  target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_VST3=1)
 endif()
 if(LILV_FOUND)
   target_sources(skyapo-core PRIVATE src/plugin/LV2PluginHost.cpp)

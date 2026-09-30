@@ -4,3 +4,12 @@
 [submodule "upstream/clap"]
 	path = upstream/clap
 	url = https://github.com/free-audio/clap.git
+[submodule "upstream/vst3/base"]
+	path = upstream/vst3/base
+	url = https://github.com/steinbergmedia/vst3_base.git
+[submodule "upstream/vst3/pluginterfaces"]
+	path = upstream/vst3/pluginterfaces
+	url = https://github.com/steinbergmedia/vst3_pluginterfaces.git
+[submodule "upstream/vst3/public.sdk"]
+	path = upstream/vst3/public.sdk
+	url = https://github.com/steinbergmedia/vst3_public_sdk.git

@@ -22,6 +22,9 @@
 #ifdef SKYAPO_HAVE_CLAP
 #include "CLAPPluginHost.h"
 #endif
+#ifdef SKYAPO_HAVE_VST3
+#include "VST3PluginHost.h"
+#endif
 #include "helpers/ChannelHelper.h"
 #include "helpers/StringHelper.h"
 
@@ -95,6 +98,9 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   factories.push_back(std::make_unique<CopyFilterFactory>());
 #ifdef SKYAPO_HAVE_CLAP
   factories.push_back(makeCLAPPluginFilterFactory());
+#endif
+#ifdef SKYAPO_HAVE_VST3
+  factories.push_back(makeVST3PluginFilterFactory());
 #endif
 #ifdef SKYAPO_HAVE_LV2
   factories.push_back(makeLV2PluginFilterFactory());

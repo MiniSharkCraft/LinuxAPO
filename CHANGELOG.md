@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added pinned official Steinberg VST3 SDK components, a Linux hosting subset, cached bundle discovery through standard paths and `VST3_PATH`, and CLI inspection.
+- Added initial mono/stereo, single-audio-bus VST3 processing; manually rendered the installed LSP Filter Stereo plugin offline (192000 frames at 48 kHz; output samples changed). No portable VST3 CTest fixture or realtime allocation audit yet.
+- Verified offline processing of a local yabridge ATKExpander VST3 wrapper in mono (192000 frames at 48 kHz; samples changed). Its stereo use was correctly rejected because the plugin exposes a mono bus.
+- Documented VST3 limits: parameters, auxiliary buses, state, latency compensation, UI and isolation remain unsupported; yabridge realtime and VST2 remain unverified.
 - Added a pinned official CLAP SDK submodule and initial native CLAP effect host with CLAP_PATH/standard-path discovery, config IDs, offline render and 1000-block realtime-allocation tests.
 - Added a native CLAP stereo half-gain test plugin; CTest confirms the expected −6.0206 dB output and no recurring host-side callback allocation. Live events/state/latency and production plugin safety remain unsupported.
 - Added CLAP parameter metadata inspection and config-time overrides by stable numeric ID or unique name; validated range/unknown-value rejection and numerical offline gain. Fixed overrides are delivered using preallocated process events.

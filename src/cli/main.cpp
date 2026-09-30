@@ -6,6 +6,9 @@
 #ifdef SKYAPO_HAVE_CLAP
 #include "CLAPPluginHost.h"
 #endif
+#ifdef SKYAPO_HAVE_VST3
+#include "VST3PluginHost.h"
+#endif
 #ifdef SKYAPO_HAVE_PIPEWIRE
 #include "../pipewire/DeviceManager.h"
 #endif
@@ -142,6 +145,14 @@ int main(int argc, char **argv) {
       for (const auto &[id, name] : clapPlugins)
         std::cout << "CLAP\t" << id << '\t' << name << '\n';
 #endif
+#ifdef SKYAPO_HAVE_VST3
+      foundAnyHost = true;
+      VST3PluginHost vst3Host;
+      const auto vst3Plugins = vst3Host.list();
+      std::cout << "VST3 plugins discovered: " << vst3Plugins.size() << '\n';
+      for (const auto &[id, name] : vst3Plugins)
+        std::cout << "VST3\t" << id << '\t' << name << '\n';
+#endif
 #ifdef SKYAPO_HAVE_LV2
       foundAnyHost = true;
       LV2PluginHost host;
@@ -175,6 +186,23 @@ int main(int argc, char **argv) {
                       << "default=" << parameter.defaultValue << "\t"
                       << "range=[" << parameter.minimum << ", "
                       << parameter.maximum << "]\n";
+          return 0;
+        }
+      }
+#endif
+#ifdef SKYAPO_HAVE_VST3
+      {
+        const std::string requested = argv[3];
+        VST3PluginHost host;
+        const auto plugins = host.list();
+        const auto found = std::find_if(
+            plugins.begin(), plugins.end(), [&](const auto &plugin) {
+              return plugin.first == requested;
+            });
+        if (found != plugins.end()) {
+          const auto info = host.describe(requested);
+          std::cout << info.name << "\nFormat: VST3\nClass UID: " << info.uri
+                    << "\nInput parameters: unsupported by catalog command\n";
           return 0;
         }
       }

@@ -1,0 +1,3 @@
+# This class UID is specific to the locally installed yabridge VST3 wrapper.
+# It is an integration example, not a portable bundled plugin dependency.
+Plugin: VST3 F2AEE70D00DE4F4E4D6174426E336C33
