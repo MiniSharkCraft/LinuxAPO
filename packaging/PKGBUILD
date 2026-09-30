@@ -1,6 +1,6 @@
 pkgname=skyapo
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
 arch=('x86_64')
 url='https://sourceforge.net/projects/equalizerapo/'
