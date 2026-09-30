@@ -871,7 +871,9 @@ public:
     channelCount = static_cast<unsigned>(channels.size());
     instance = host.createForConfig(pluginId, sampleRate, maxFrames, channels,
                                     parameterOverrides, source, line);
-    return instance->initialize(sampleRate, maxFrames, channels);
+    auto outputChannels = instance->initialize(sampleRate, maxFrames, channels);
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return outputChannels;
   }
   void process(float **output, float **input, unsigned frames) override {
     if (copyInputWhenBypassed(output, input, frames, channelCount))

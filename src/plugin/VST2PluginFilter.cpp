@@ -39,7 +39,9 @@ public:
     channelCount = static_cast<unsigned>(channels.size());
     instance = host.create(modulePath, sampleRate, maxFrames, channels,
                            parameterOverrides);
-    return instance->initialize(sampleRate, maxFrames, channels);
+    auto outputChannels = instance->initialize(sampleRate, maxFrames, channels);
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return outputChannels;
   }
   void process(float **output, float **input, unsigned frames) override {
     if (copyInputWhenBypassed(output, input, frames, channelCount))

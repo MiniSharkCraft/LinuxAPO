@@ -704,7 +704,10 @@ public:
                    : host.createForConfig(pluginUri, sampleRate, maxFrameCount,
                                           channelNames, parameterOverrides,
                                           source, line);
-    return instance->initialize(sampleRate, maxFrameCount, channelNames);
+    auto outputChannels =
+        instance->initialize(sampleRate, maxFrameCount, channelNames);
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return outputChannels;
   }
 
   void process(float **output, float **input, unsigned frames) override {

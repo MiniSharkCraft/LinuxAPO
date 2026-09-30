@@ -197,6 +197,31 @@ int main() {
     }
     unlink(pluginPath);
   }
+  {
+    char pluginPath[] = "/tmp/skyapo-clap-latency-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Plugin: CLAP org.skyapo.test.latency\n";
+    }
+    Engine plugin(48000, 2, 128, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 128);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      plugin.setPluginBypass("org.skyapo.test.latency", iteration % 2 == 0);
+      const unsigned frames = (iteration * 47) % 128 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::sin(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+    }
+    unlink(pluginPath);
+  }
 #endif
 #ifdef SKYAPO_TEST_VST3
   {
@@ -222,6 +247,32 @@ int main() {
       const unsigned frames = (iteration * 67) % 8192 + 1;
       for (unsigned i = 0; i < frames * 2; ++i)
         audio[i] = .1f * std::sin(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+    }
+    unlink(pluginPath);
+  }
+  {
+    char pluginPath[] = "/tmp/skyapo-vst3-latency-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Plugin: VST3 534B5941504F00010000000000000003\n";
+    }
+    Engine plugin(48000, 2, 128, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 128);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      plugin.setPluginBypass("534B5941504F00010000000000000003",
+                             iteration % 2 == 0);
+      const unsigned frames = (iteration * 53) % 128 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::cos(float(i + iteration));
       {
         realtime::Scope scope;
         plugin.process(audio.data(), frames);

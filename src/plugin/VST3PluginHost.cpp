@@ -828,7 +828,9 @@ public:
                                  parameterOverrides)
                    : host.createForConfig(pluginUid, rate, maxFrames, channels,
                                           parameterOverrides, source, line);
-    return instance->initialize(rate, maxFrames, channels);
+    auto outputChannels = instance->initialize(rate, maxFrames, channels);
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return outputChannels;
   }
   void process(float **output, float **input, unsigned frames) override {
     if (copyInputWhenBypassed(output, input, frames, channelCount))

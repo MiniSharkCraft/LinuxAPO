@@ -563,6 +563,29 @@ int main() {
     std::cerr << "VST3 latency fixture sample offset mismatch\n";
     return 1;
   }
+  Engine vst3LatencyBypass(48000, 2, 128, {L"L", L"R"});
+  vst3LatencyBypass.loadConfig(path);
+  vst3LatencyBypass.setPluginBypass("534B5941504F00010000000000000003", true);
+  float vst3BypassImpulse[64]{};
+  vst3BypassImpulse[0] = 0.25f;
+  vst3LatencyBypass.process(vst3BypassImpulse, 32);
+  float vst3BypassContinuation[64]{};
+  vst3LatencyBypass.process(vst3BypassContinuation, 32);
+  if (std::any_of(std::begin(vst3BypassImpulse), std::end(vst3BypassImpulse),
+                  [](float sample) { return std::abs(sample) > 1e-6f; }) ||
+      std::any_of(std::begin(vst3BypassContinuation),
+                  std::end(vst3BypassContinuation),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "VST3 dry bypass did not preserve the reported latency\n";
+    return 1;
+  }
+  float vst3BypassDelayed[2]{};
+  vst3LatencyBypass.process(vst3BypassDelayed, 1);
+  if (std::abs(vst3BypassDelayed[0] - 0.25f) > 1e-6f ||
+      std::abs(vst3BypassDelayed[1]) > 1e-6f) {
+    std::cerr << "VST3 dry bypass did not align an impulse across blocks\n";
+    return 1;
+  }
   if (!write(path, "Plugin: VST3 " + vst3Uid + " 7=0.25\n"))
     return 1;
   Engine vst3Override(48000, 2, 128, {L"L", L"R"});
@@ -634,6 +657,29 @@ int main() {
   if (std::abs(clapDelayedOutput[0] - 0.125f) > 1e-6f ||
       std::abs(clapDelayedOutput[1]) > 1e-6f) {
     std::cerr << "CLAP latency fixture sample offset mismatch\n";
+    return 1;
+  }
+  Engine clapLatencyBypass(48000, 2, 128, {L"L", L"R"});
+  clapLatencyBypass.loadConfig(path);
+  clapLatencyBypass.setPluginBypass("org.skyapo.test.latency", true);
+  float clapBypassImpulse[64]{};
+  clapBypassImpulse[0] = 0.25f;
+  clapLatencyBypass.process(clapBypassImpulse, 32);
+  float clapBypassContinuation[64]{};
+  clapLatencyBypass.process(clapBypassContinuation, 32);
+  if (std::any_of(std::begin(clapBypassImpulse), std::end(clapBypassImpulse),
+                  [](float sample) { return std::abs(sample) > 1e-6f; }) ||
+      std::any_of(std::begin(clapBypassContinuation),
+                  std::end(clapBypassContinuation),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "CLAP dry bypass did not preserve the reported latency\n";
+    return 1;
+  }
+  float clapBypassDelayed[2]{};
+  clapLatencyBypass.process(clapBypassDelayed, 1);
+  if (std::abs(clapBypassDelayed[0] - 0.25f) > 1e-6f ||
+      std::abs(clapBypassDelayed[1]) > 1e-6f) {
+    std::cerr << "CLAP dry bypass did not align an impulse across blocks\n";
     return 1;
   }
   if (!write(path, "Plugin: CLAP org.skyapo.test.latency\n"
