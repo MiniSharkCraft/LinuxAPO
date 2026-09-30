@@ -6,6 +6,7 @@
 #include <spa/pod/pod.h>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 
 struct pw_metadata;
@@ -25,8 +26,8 @@ struct DefaultSinkVolumeSnapshot {
   bool available = false;
   bool muted = false;
   float effectiveGain = 0.0f;
-  float effectiveDb = -__builtin_inff();
-  uint64_t generation = 0;
+  float effectiveDb = -std::numeric_limits<float>::infinity();
+  std::uint64_t generation = 0;
 };
 
 /**
