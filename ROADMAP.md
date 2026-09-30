@@ -50,7 +50,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Exercise `skyapo restart` against the live desktop PipeWire server with an isolated XDG config; the daemon returned to `streaming`, recreated 2/2 physical links at 48 kHz stereo/1024, and the process PID changed.
 - [x] Verify an independent deterministic consumer after daemon restart on a private graph: 144384 stereo frames, measured expected-output RMS ratio 1.000006, and clean recovery with 2/2 links.
 - [ ] Test physical device unplug/replug and automatic consumer selection on real desktop clients.
-- [ ] Exercise overrun reporting under sustained DSP load.
+- [x] Exercise overrun reporting under sustained DSP load; an intentionally excessive 2048-BiQuad private-graph test reported every late callback while remaining connected (not a usable realtime chain).
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 
 ## 0.5.x — remaining core DSP
