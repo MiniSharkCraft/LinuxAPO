@@ -202,7 +202,15 @@ int main(int argc, char **argv) {
         if (found != plugins.end()) {
           const auto info = host.describe(requested);
           std::cout << info.name << "\nFormat: VST3\nClass UID: " << info.uri
-                    << "\nInput parameters: unsupported by catalog command\n";
+                    << '\n';
+          if (info.inputParameters.empty())
+            std::cout << "Input parameters: none\n";
+          for (const auto &parameter : info.inputParameters)
+            std::cout << parameter.symbol << "\t" << parameter.name << "\t"
+                      << "default=" << parameter.defaultValue << "\t"
+                      << "range=[" << parameter.minimum << ", "
+                      << parameter.maximum << "]\tvalue=" << parameter.value
+                      << '\n';
           return 0;
         }
       }

@@ -9,6 +9,8 @@
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include "pluginterfaces/vst/vstspeaker.h"
 
 #include <algorithm>
@@ -16,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -30,9 +33,66 @@ struct CatalogItem {
   std::string name;
 };
 using Catalog = std::vector<CatalogItem>;
+Steinberg::Vst::ParamID parseParameterId(const std::string &symbol) {
+  if (symbol.empty() || !std::all_of(symbol.begin(), symbol.end(),
+          [](unsigned char ch) { return ch >= '0' && ch <= '9'; }))
+    throw std::runtime_error("VST3 parameter IDs must be decimal numbers");
+  size_t consumed = 0;
+  unsigned long value = 0;
+  try {
+    value = std::stoul(symbol, &consumed);
+  } catch (const std::exception &) {
+    throw std::runtime_error("VST3 parameter ID is out of range: " + symbol);
+  }
+  if (consumed != symbol.size() ||
+      value > std::numeric_limits<Steinberg::Vst::ParamID>::max())
+    throw std::runtime_error("VST3 parameter ID is out of range: " + symbol);
+  return static_cast<Steinberg::Vst::ParamID>(value);
+}
+
 Steinberg::Vst::HostApplication &hostApplication() {
   static Steinberg::Vst::HostApplication host;
   return host;
+}
+
+std::string parameterName(const Steinberg::Vst::ParameterInfo &info) {
+  std::wstring wide;
+  for (const auto ch : info.title) {
+    if (!ch)
+      break;
+    wide.push_back(static_cast<wchar_t>(ch));
+  }
+  return StringHelper::toString(wide, 65001);
+}
+
+std::vector<PluginParameterInfo> readParameters(
+    const Module::Ptr &module, const VST3::Hosting::ClassInfo &classInfo) {
+  using namespace Steinberg;
+  using namespace Steinberg::Vst;
+  PluginContextFactory::instance().setPluginContext(&hostApplication());
+  PlugProvider provider(module->getFactory(), classInfo);
+  if (!provider.initialize())
+    throw std::runtime_error("VST3 plugin initialization failed: " +
+                             classInfo.ID().toString(false));
+  auto controller = provider.getControllerPtr();
+  std::vector<PluginParameterInfo> result;
+  if (!controller)
+    return result;
+  const int32 count = controller->getParameterCount();
+  if (count < 0 || count > 4096)
+    throw std::runtime_error("VST3 plugin declares too many parameters");
+  result.reserve(static_cast<size_t>(count));
+  for (int32 index = 0; index < count; ++index) {
+    ParameterInfo info{};
+    if (controller->getParameterInfo(index, info) != kResultOk ||
+        (info.flags & ParameterInfo::kIsReadOnly))
+      continue;
+    const auto value = controller->getParamNormalized(info.id);
+    result.push_back({std::to_string(info.id), parameterName(info),
+                      static_cast<float>(info.defaultNormalizedValue), 0.0f,
+                      1.0f, static_cast<float>(value)});
+  }
+  return result;
 }
 
 std::vector<std::string> modulePaths() {
@@ -113,7 +173,8 @@ public:
   VST3Instance(Module::Ptr pluginModule,
                const VST3::Hosting::ClassInfo &classInfo, std::string uid,
                float sampleRate, unsigned maxFrames,
-               const std::vector<std::wstring> &channels)
+               const std::vector<std::wstring> &channels,
+               const std::vector<PluginParameterValue> &overrides)
       : module(std::move(pluginModule)), pluginUid(std::move(uid)),
         channelCount(channels.size()), maxFrameCount(maxFrames) {
     using namespace Steinberg;
@@ -125,6 +186,49 @@ public:
     provider = std::make_unique<PlugProvider>(module->getFactory(), classInfo);
     if (!provider->initialize())
       throw std::runtime_error("VST3 plugin initialization failed: " + pluginUid);
+    parameterController = provider->getControllerPtr();
+    if (parameterController) {
+      const int32 count = parameterController->getParameterCount();
+      if (count < 0 || count > 4096)
+        throw std::runtime_error("VST3 plugin declares too many parameters: " + pluginUid);
+      parameterInfos.reserve(static_cast<size_t>(count));
+      for (int32 index = 0; index < count; ++index) {
+        ParameterInfo info{};
+        if (parameterController->getParameterInfo(index, info) != kResultOk ||
+            (info.flags & ParameterInfo::kIsReadOnly))
+          continue;
+        parameterInfos.push_back({std::to_string(info.id), parameterName(info),
+            static_cast<float>(info.defaultNormalizedValue), 0.0f, 1.0f,
+            static_cast<float>(parameterController->getParamNormalized(info.id))});
+      }
+    }
+    for (const auto &overrideValue : overrides) {
+      const auto found = std::find_if(parameterInfos.begin(), parameterInfos.end(),
+          [&](const auto &parameter) { return parameter.symbol == overrideValue.symbol; });
+      if (found == parameterInfos.end())
+        throw std::runtime_error("unknown or read-only VST3 parameter '" +
+                                 overrideValue.symbol + "' in " + pluginUid);
+      if (!std::isfinite(overrideValue.value) || overrideValue.value < 0.0f ||
+          overrideValue.value > 1.0f)
+        throw std::runtime_error("VST3 parameter '" + overrideValue.symbol +
+                                 "' must be in normalized range [0, 1]");
+      if (!parameterController || parameterController->setParamNormalized(
+              parseParameterId(overrideValue.symbol),
+              overrideValue.value) != kResultOk)
+        throw std::runtime_error("VST3 plugin rejected parameter '" +
+                                 overrideValue.symbol + "'");
+      found->value = overrideValue.value;
+    }
+    parameterChanges = std::make_unique<ParameterChanges>(
+        static_cast<int32>(overrides.size()));
+    for (const auto &overrideValue : overrides) {
+      const ParamID id = parseParameterId(overrideValue.symbol);
+      int32 queueIndex = 0;
+      auto *queue = parameterChanges->addParameterData(id, queueIndex);
+      int32 pointIndex = 0;
+      if (!queue || queue->addPoint(0, overrideValue.value, pointIndex) != kResultTrue)
+        throw std::runtime_error("cannot prepare VST3 parameter event");
+    }
     component = provider->getComponentPtr();
     processor = FUnknownPtr<IAudioProcessor>(component);
     if (!component || !processor)
@@ -180,6 +284,7 @@ public:
     data.numInputs = data.numOutputs = 1;
     data.inputs = &inputBus;
     data.outputs = &outputBus;
+    data.inputParameterChanges = overrides.empty() ? nullptr : parameterChanges.get();
   }
 
   ~VST3Instance() override {
@@ -189,7 +294,7 @@ public:
 
   const std::string &uri() const noexcept override { return pluginUid; }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
-    return emptyParameters;
+    return parameterInfos;
   }
   std::vector<std::wstring> initialize(float, unsigned,
       const std::vector<std::wstring> &channels) override { return channels; }
@@ -220,18 +325,22 @@ private:
   std::unique_ptr<float *[]> inputs, outputs;
   Steinberg::Vst::AudioBusBuffers inputBus{}, outputBus{};
   Steinberg::Vst::ProcessData data{};
-  std::vector<PluginParameterInfo> emptyParameters;
+  Steinberg::IPtr<Steinberg::Vst::IEditController> parameterController;
+  std::vector<PluginParameterInfo> parameterInfos;
+  std::unique_ptr<Steinberg::Vst::ParameterChanges> parameterChanges;
   bool active = false, processing = false;
 };
 
 class VST3PluginFilter final : public IFilter {
 public:
-  VST3PluginFilter(VST3PluginHost &owner, std::string uid)
-      : host(owner), pluginUid(std::move(uid)) {}
+  VST3PluginFilter(VST3PluginHost &owner, std::string uid,
+                   std::vector<PluginParameterValue> overrides)
+      : host(owner), pluginUid(std::move(uid)),
+        parameterOverrides(std::move(overrides)) {}
   bool getInPlace() override { return false; }
   std::vector<std::wstring> initialize(float rate, unsigned maxFrames,
                                        std::vector<std::wstring> channels) override {
-    instance = host.create(pluginUid, rate, maxFrames, channels);
+    instance = host.create(pluginUid, rate, maxFrames, channels, parameterOverrides);
     return instance->initialize(rate, maxFrames, channels);
   }
   void process(float **output, float **input, unsigned frames) override {
@@ -240,12 +349,15 @@ public:
 private:
   VST3PluginHost &host;
   std::string pluginUid;
+  std::vector<PluginParameterValue> parameterOverrides;
   std::unique_ptr<IPluginInstance> instance;
 };
 
-IFilter *allocateFilter(VST3PluginHost &host, std::string uid) {
+IFilter *allocateFilter(VST3PluginHost &host, std::string uid,
+                        std::vector<PluginParameterValue> overrides) {
   void *memory = MemoryHelper::alloc(sizeof(VST3PluginFilter));
-  try { return new (memory) VST3PluginFilter(host, std::move(uid)); }
+  try { return new (memory) VST3PluginFilter(host, std::move(uid),
+                                              std::move(overrides)); }
   catch (...) { MemoryHelper::free(memory); throw; }
 }
 
@@ -262,11 +374,33 @@ public:
     if (format != L"VST3")
       return {};
     if (uid.empty())
-      throw std::runtime_error("expected Plugin: VST3 <class-uid>");
+      throw std::runtime_error("expected Plugin: VST3 <class-uid> [parameter-id=value ...]");
+    std::vector<PluginParameterValue> overrides;
     std::wstring token;
-    if (input >> token)
-      throw std::runtime_error("VST3 config parameter overrides are not supported yet");
-    return {allocateFilter(*host, StringHelper::toString(uid, 65001))};
+    while (input >> token) {
+      const auto separator = token.find(L'=');
+      if (separator == std::wstring::npos || separator == 0 ||
+          separator + 1 == token.size())
+        throw std::runtime_error("expected VST3 parameter as parameter-id=value");
+      const auto symbol = StringHelper::toString(token.substr(0, separator), 65001);
+      try {
+        size_t consumed = 0;
+        const auto valueText = StringHelper::toString(token.substr(separator + 1), 65001);
+        const float value = std::stof(valueText, &consumed);
+        if (consumed != valueText.size() || !std::isfinite(value))
+          throw std::runtime_error("not finite");
+        if (std::any_of(overrides.begin(), overrides.end(), [&](const auto &entry) {
+              return entry.symbol == symbol;
+            }))
+          throw std::runtime_error("duplicate");
+        overrides.push_back({symbol, value});
+      } catch (const std::exception &) {
+        throw std::runtime_error("invalid or duplicate VST3 parameter override '" +
+                                 symbol + "'");
+      }
+    }
+    return {allocateFilter(*host, StringHelper::toString(uid, 65001),
+                           std::move(overrides))};
   }
 private:
   std::unique_ptr<VST3PluginHost> host;
@@ -279,18 +413,20 @@ VST3PluginHost::create(const std::string &uid, float sampleRate,
                        const std::vector<std::wstring> &channels,
                        const std::vector<PluginParameterValue> &parameters) {
   if (!parameters.empty())
-    throw std::runtime_error("VST3 parameter overrides are not supported yet");
+    for (const auto &parameter : parameters)
+      (void)parseParameterId(parameter.symbol);
   for (const auto &item : catalog())
     if (item.uid == uid)
       return std::make_unique<VST3Instance>(item.module, item.info, uid,
-                                            sampleRate, maxFrames, channels);
+                                            sampleRate, maxFrames, channels,
+                                            parameters);
   throw std::runtime_error("VST3 class UID not found: " + uid);
 }
 
 PluginDescription VST3PluginHost::describe(const std::string &uid) const {
   for (const auto &item : catalog())
     if (item.uid == uid)
-      return {item.uid, item.name, {}};
+      return {item.uid, item.name, readParameters(item.module, item.info)};
   throw std::runtime_error("VST3 class UID not found: " + uid);
 }
 

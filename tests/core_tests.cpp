@@ -86,6 +86,52 @@ int main() {
   }
 #endif
 
+#ifdef SKYAPO_TEST_VST3
+  const std::string vst3Uid = "534B5941504F00010000000000000001";
+  if (!write(path, "Plugin: VST3 " + vst3Uid + "\n"))
+    return 1;
+  Engine vst3Plugin(48000, 2, 128, {L"L", L"R"});
+  vst3Plugin.loadConfig(path);
+  float vst3Block[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float vst3Expected[8] = {.1f, -.2f, .3f, -.4f, .5f, -.5f, .25f, -.25f};
+  vst3Plugin.process(vst3Block, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst3Block[i] - vst3Expected[i]) > 1e-5f) {
+      std::cerr << "VST3 fixture default gain mismatch at " << i << '\n';
+      return 1;
+    }
+  if (!write(path, "Plugin: VST3 " + vst3Uid + " 7=0.25\n"))
+    return 1;
+  Engine vst3Override(48000, 2, 128, {L"L", L"R"});
+  vst3Override.loadConfig(path);
+  float vst3OverrideBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  vst3Override.process(vst3OverrideBlock, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst3OverrideBlock[i] - .5f * vst3Expected[i]) > 1e-5f) {
+      std::cerr << "VST3 parameter override mismatch at " << i << '\n';
+      return 1;
+    }
+  for (const auto *invalid : {
+           "Plugin: VST3 534B5941504F00010000000000000001 999=0.25\n",
+           "Plugin: VST3 534B5941504F00010000000000000001 7=1.25\n",
+           "Plugin: VST3 534B5941504F00010000000000000001 bad=0.25\n",
+       }) {
+    if (!write(path, invalid))
+      return 1;
+    bool rejected = false;
+    try {
+      Engine invalidVst3(48000, 2, 128, {L"L", L"R"});
+      invalidVst3.loadConfig(path);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    if (!rejected) {
+      std::cerr << "invalid VST3 parameter override was accepted\n";
+      return 1;
+    }
+  }
+#endif
+
 #ifdef SKYAPO_TEST_CLAP
   if (!write(path, "Plugin: CLAP org.skyapo.test.gain\n"))
     return 1;

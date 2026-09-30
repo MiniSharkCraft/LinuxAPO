@@ -140,7 +140,7 @@ int main() {
     close(pluginFd);
     {
       std::ofstream f(pluginPath);
-      f << "Plugin: VST3 534B5941504F00010000000000000001\n";
+      f << "Plugin: VST3 534B5941504F00010000000000000001 7=0.25\n";
     }
     Engine plugin(48000, 2, 8192, {L"L", L"R"});
     plugin.loadConfig(pluginPath);

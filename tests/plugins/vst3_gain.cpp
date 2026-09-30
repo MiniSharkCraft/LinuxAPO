@@ -2,6 +2,8 @@
 // test code; it uses Steinberg's SDK interfaces but copies no SDK sample code.
 #include "public.sdk/source/main/pluginfactory.h"
 #include "public.sdk/source/vst/vstsinglecomponenteffect.h"
+#include "pluginterfaces/base/ustring.h"
+#include "pluginterfaces/vst/ivstparameterchanges.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -17,6 +19,8 @@ public:
       return result;
     addAudioInput(STR16("Input"), SpeakerArr::kStereo);
     addAudioOutput(STR16("Output"), SpeakerArr::kStereo);
+    parameters.addParameter(USTRING("Gain"), nullptr, kStepCountContinuous,
+                            0.5, ParameterInfo::kCanAutomate, 7);
     return kResultOk;
   }
 
@@ -27,15 +31,29 @@ public:
         !data.outputs || data.inputs[0].numChannels != 2 ||
         data.outputs[0].numChannels != 2 || data.symbolicSampleSize != kSample32)
       return kResultFalse;
+    if (data.inputParameterChanges) {
+      for (int32 index = 0; index < data.inputParameterChanges->getParameterCount(); ++index) {
+        auto *queue = data.inputParameterChanges->getParameterData(index);
+        if (!queue || queue->getParameterId() != 7 || queue->getPointCount() == 0)
+          continue;
+        int32 sampleOffset = 0;
+        ParamValue value = gain;
+        if (queue->getPoint(queue->getPointCount() - 1, sampleOffset, value) == kResultTrue)
+          gain = static_cast<float>(value);
+      }
+    }
     for (int32 channel = 0; channel < 2; ++channel) {
       const auto *input = data.inputs[0].channelBuffers32[channel];
       auto *output = data.outputs[0].channelBuffers32[channel];
       for (int32 frame = 0; frame < data.numSamples; ++frame)
-        output[frame] = input[frame] * 0.5f;
+        output[frame] = input[frame] * gain;
     }
     data.outputs[0].silenceFlags = 0;
     return kResultOk;
   }
+
+private:
+  float gain = 0.5f;
 };
 } // namespace
 

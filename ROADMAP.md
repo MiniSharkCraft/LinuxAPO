@@ -69,7 +69,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Discover and offline-process the local yabridge ATKExpander VST3 wrapper via the native VST3 host (192000 mono frames at 48 kHz; samples changed).
 - [x] Add a redistributable SkyAPO-authored VST3 half-gain fixture; CTest verifies −6.0206 dB offline and 1000 variable realtime DSP blocks pass the allocation audit.
 - [ ] Verify third-party VST3/yabridge processing in the realtime PipeWire graph; the fixture audit does not guarantee allocations inside unrelated plugins.
-- [ ] Add VST3 parameter metadata/config overrides, state/bypass, latency, auxiliary buses and plugin failure isolation.
+- [x] Expose VST3 normalized parameter metadata and validated numeric-ID config overrides; verify default/override audio numerically, metadata CLI, bad-ID/range rejection, and callback allocation audit.
+- [ ] Add VST3 plugin state/bypass, latency, auxiliary buses and plugin failure isolation.
 - [!] VST2 distribution is externally license-blocked: official Steinberg terms require a pre-October-2018 signed VST2 license and forbid redistributing its proprietary headers. Keep the 1.0 requirement open; resume only if valid authorization is established. See `docs/PLUGINS.md`.
 - [ ] Test yabridge VST2 wrappers if a lawful host path becomes available.
 - [ ] Add CLAP live parameter/control changes, state/latency support, production-plugin validation and safer failure isolation.

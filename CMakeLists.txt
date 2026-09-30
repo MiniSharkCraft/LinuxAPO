@@ -43,6 +43,7 @@ if(EXISTS "${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp" AND
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp
@@ -353,12 +354,25 @@ if(SKYAPO_HAVE_VST3)
   add_test(NAME skyapo-offline-vst3-render COMMAND skyapo-render-tests
     $<TARGET_FILE:skyapo-render>
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_gain.txt -6.0206)
-  set_tests_properties(skyapo-offline-vst3-render PROPERTIES
-    ENVIRONMENT "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+  add_test(NAME skyapo-offline-vst3-parameter-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_parameter.txt -12.0412)
+  add_test(NAME skyapo-vst3-plugin-info COMMAND skyapo plugin info
+    534B5941504F00010000000000000001)
+  set_tests_properties(skyapo-vst3-plugin-info PROPERTIES
+    ENVIRONMENT "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1"
+    PASS_REGULAR_EXPRESSION "7[ \t]+Gain[ \t]+default=0.5")
+  set_tests_properties(skyapo-offline-vst3-render skyapo-offline-vst3-parameter-render
+    PROPERTIES ENVIRONMENT
+    "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
   add_dependencies(skyapo-render-tests skyapo-test-vst3)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_VST3=1)
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-vst3)
+  target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST3=1)
+  add_dependencies(skyapo-tests skyapo-test-vst3)
   set_property(TEST skyapo-realtime-safety APPEND PROPERTY ENVIRONMENT
+    "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+  set_property(TEST skyapo-core APPEND PROPERTY ENVIRONMENT
     "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
 endif()
 if(LILV_FOUND AND LV2_FOUND)
