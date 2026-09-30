@@ -3,6 +3,8 @@
 #include "IPluginLatencyState.h"
 #include "IPluginParameterControl.h"
 #include "IPluginBypassControl.h"
+#include "IPluginSourceContext.h"
+#include "IPluginStatePersistence.h"
 
 #include "IFilter.h"
 #include "helpers/MemoryHelper.h"
@@ -15,12 +17,24 @@
 #include <filesystem>
 #include <memory>
 #include <atomic>
+#include <array>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <fcntl.h>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <system_error>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #ifndef SKYAPO_VERSION
 #define SKYAPO_VERSION "0.1.0"
@@ -35,6 +49,277 @@ static_assert(std::atomic<float>::is_always_lock_free,
               "CLAP parameter values must be lock-free on the audio thread");
 
 namespace {
+constexpr size_t MaxClapStateBytes = 16 * 1024 * 1024;
+constexpr std::array<char, 8> StateMagic{'S', 'K', 'Y', 'C', 'L', 'A', 'P', '1'};
+
+struct MemoryStream {
+  const std::vector<uint8_t> *input{};
+  std::vector<uint8_t> output;
+  size_t cursor{};
+  bool failed{};
+};
+
+int64_t CLAP_ABI stateRead(const clap_istream_t *stream, void *buffer,
+                           uint64_t size) {
+  auto &state = *static_cast<MemoryStream *>(stream->ctx);
+  if ((!buffer && size) || size > static_cast<uint64_t>(INT64_MAX)) {
+    state.failed = true;
+    return -1;
+  }
+  if (!state.input || state.cursor >= state.input->size() || !size)
+    return 0;
+  const size_t count = std::min<uint64_t>(
+      size, state.input->size() - state.cursor);
+  std::memcpy(buffer, state.input->data() + state.cursor, count);
+  state.cursor += count;
+  return static_cast<int64_t>(count);
+}
+
+int64_t CLAP_ABI stateWrite(const clap_ostream_t *stream, const void *buffer,
+                            uint64_t size) {
+  auto &state = *static_cast<MemoryStream *>(stream->ctx);
+  if ((!buffer && size) || size > MaxClapStateBytes ||
+      state.output.size() > MaxClapStateBytes - size) {
+    state.failed = true;
+    return -1;
+  }
+  if (!size)
+    return 0;
+  const auto *bytes = static_cast<const uint8_t *>(buffer);
+  try {
+    state.output.insert(state.output.end(), bytes, bytes + size);
+  } catch (...) {
+    state.failed = true;
+    return -1;
+  }
+  return static_cast<int64_t>(size);
+}
+
+std::string stateIdentity(const fs::path &source, unsigned line,
+                          const std::string &pluginId) {
+  return source.generic_string() + "\n" + std::to_string(line) + "\n" +
+         pluginId;
+}
+
+uint64_t stableHash(std::string_view value) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const unsigned char byte : value) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+uint64_t stateChecksum(const std::string &identity,
+                       const std::vector<uint8_t> &payload) {
+  uint64_t hash = stableHash(identity);
+  hash ^= 0xff;
+  hash *= 1099511628211ull;
+  for (const uint8_t byte : payload) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+fs::path stateDirectory() {
+  if (const char *xdg = std::getenv("XDG_STATE_HOME")) {
+    fs::path base(xdg);
+    if (base.is_absolute())
+      return base / "skyapo" / "clap-state";
+  }
+  if (const char *home = std::getenv("HOME"))
+    return fs::path(home) / ".local" / "state" / "skyapo" / "clap-state";
+  throw std::runtime_error(
+      "CLAP state persistence needs absolute XDG_STATE_HOME or HOME");
+}
+
+fs::path statePathFor(const std::string &identity) {
+  std::ostringstream name;
+  name << std::hex << std::setw(16) << std::setfill('0')
+       << stableHash(identity) << ".clapstate";
+  return stateDirectory() / name.str();
+}
+
+void appendU32(std::vector<uint8_t> &out, uint32_t value) {
+  for (unsigned i = 0; i < 4; ++i)
+    out.push_back(static_cast<uint8_t>(value >> (i * 8)));
+}
+void appendU64(std::vector<uint8_t> &out, uint64_t value) {
+  for (unsigned i = 0; i < 8; ++i)
+    out.push_back(static_cast<uint8_t>(value >> (i * 8)));
+}
+bool takeU32(const std::vector<uint8_t> &in, size_t &at, uint32_t &value) {
+  if (in.size() - at < 4)
+    return false;
+  value = 0;
+  for (unsigned i = 0; i < 4; ++i)
+    value |= uint32_t(in[at++]) << (i * 8);
+  return true;
+}
+bool takeU64(const std::vector<uint8_t> &in, size_t &at, uint64_t &value) {
+  if (in.size() - at < 8)
+    return false;
+  value = 0;
+  for (unsigned i = 0; i < 8; ++i)
+    value |= uint64_t(in[at++]) << (i * 8);
+  return true;
+}
+
+std::vector<uint8_t> encodeState(const std::string &identity,
+                                 const std::vector<uint8_t> &payload) {
+  if (identity.size() > 4096 || payload.size() > MaxClapStateBytes)
+    throw std::runtime_error("CLAP state exceeds supported size limit");
+  std::vector<uint8_t> out;
+  out.reserve(StateMagic.size() + 4 + 8 + 8 + 8 + identity.size() +
+              payload.size());
+  out.insert(out.end(), StateMagic.begin(), StateMagic.end());
+  appendU32(out, 1);
+  appendU64(out, identity.size());
+  appendU64(out, payload.size());
+  appendU64(out, stateChecksum(identity, payload));
+  out.insert(out.end(), identity.begin(), identity.end());
+  out.insert(out.end(), payload.begin(), payload.end());
+  return out;
+}
+
+std::vector<uint8_t> decodeState(const std::vector<uint8_t> &data,
+                                 const std::string &identity) {
+  size_t at = StateMagic.size();
+  uint32_t version{};
+  uint64_t identitySize{}, payloadSize{}, checksum{};
+  if (data.size() < StateMagic.size() ||
+      !std::equal(StateMagic.begin(), StateMagic.end(), data.begin()) ||
+      !takeU32(data, at, version) || version != 1 ||
+      !takeU64(data, at, identitySize) || identitySize > 4096 ||
+      !takeU64(data, at, payloadSize) || payloadSize > MaxClapStateBytes ||
+      !takeU64(data, at, checksum) ||
+      identitySize > data.size() - at ||
+      payloadSize != data.size() - at - identitySize)
+    throw std::runtime_error("corrupt CLAP state sidecar");
+  const std::string storedIdentity(
+      reinterpret_cast<const char *>(data.data() + at), identitySize);
+  at += static_cast<size_t>(identitySize);
+  if (storedIdentity != identity)
+    throw std::runtime_error("CLAP state sidecar identity mismatch");
+  std::vector<uint8_t> payload(data.begin() + at, data.end());
+  if (checksum != stateChecksum(identity, payload))
+    throw std::runtime_error("CLAP state sidecar checksum mismatch");
+  return payload;
+}
+
+struct ScopedFd {
+  int value{-1};
+  explicit ScopedFd(int fd) : value(fd) {}
+  ~ScopedFd() {
+    if (value >= 0)
+      close(value);
+  }
+  int release() noexcept {
+    const int fd = value;
+    value = -1;
+    return fd;
+  }
+  ScopedFd(const ScopedFd &) = delete;
+  ScopedFd &operator=(const ScopedFd &) = delete;
+};
+
+std::optional<std::vector<uint8_t>> readStateFile(const fs::path &path,
+                                                  const std::string &identity) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    if (errno == ENOENT)
+      return std::nullopt;
+    throw std::runtime_error("cannot open CLAP state sidecar: " +
+                             path.string() + ": " + std::strerror(errno));
+  }
+  ScopedFd owner(fd);
+  struct stat status {};
+  if (fstat(fd, &status) < 0 || !S_ISREG(status.st_mode) || status.st_size < 0 ||
+      (status.st_mode & 0077) != 0 || status.st_uid != geteuid() ||
+      static_cast<uint64_t>(status.st_size) > MaxClapStateBytes + 8192) {
+    throw std::runtime_error("invalid or oversized CLAP state sidecar: " +
+                             path.string());
+  }
+  std::vector<uint8_t> data(static_cast<size_t>(status.st_size));
+  size_t offset = 0;
+  while (offset < data.size()) {
+    const auto count = read(fd, data.data() + offset, data.size() - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::runtime_error("short read from CLAP state sidecar: " +
+                               path.string());
+    offset += static_cast<size_t>(count);
+  }
+  return decodeState(data, identity);
+}
+
+void writeAll(int fd, const uint8_t *data, size_t size) {
+  size_t offset = 0;
+  while (offset < size) {
+    const auto count = write(fd, data + offset, size - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::runtime_error("cannot write CLAP state sidecar: " +
+                               std::string(std::strerror(errno)));
+    offset += static_cast<size_t>(count);
+  }
+}
+
+void atomicWriteState(const fs::path &path, const std::string &identity,
+                      const std::vector<uint8_t> &payload) {
+  auto data = encodeState(identity, payload);
+  const auto directory = path.parent_path();
+  std::error_code ec;
+  fs::create_directories(directory, ec);
+  if (ec)
+    throw std::runtime_error("cannot create CLAP state directory: " +
+                             directory.string() + ": " + ec.message());
+  if (fs::is_symlink(fs::symlink_status(directory, ec)) || ec)
+    throw std::runtime_error("CLAP state directory must not be a symlink: " +
+                             directory.string());
+  if (chmod(directory.c_str(), 0700) < 0)
+    throw std::runtime_error("cannot secure CLAP state directory: " +
+                             directory.string() + ": " + std::strerror(errno));
+  std::string pattern = (path.string() + ".tmp-XXXXXX");
+  std::vector<char> temp(pattern.begin(), pattern.end());
+  temp.push_back('\0');
+  const int rawFd = mkstemp(temp.data());
+  if (rawFd < 0)
+    throw std::runtime_error("cannot create CLAP state temporary file: " +
+                             std::string(std::strerror(errno)));
+  ScopedFd owner(rawFd);
+  bool renamed = false;
+  try {
+    if (fchmod(owner.value, 0600) < 0)
+      throw std::runtime_error("cannot set CLAP state file permissions");
+    writeAll(owner.value, data.data(), data.size());
+    if (fsync(owner.value) < 0)
+      throw std::runtime_error("cannot sync CLAP state sidecar");
+    const int fd = owner.release();
+    if (close(fd) < 0)
+      throw std::runtime_error("cannot close CLAP state sidecar");
+    if (rename(temp.data(), path.c_str()) < 0)
+      throw std::runtime_error("cannot atomically replace CLAP state sidecar: " +
+                               std::string(std::strerror(errno)));
+    renamed = true;
+    const int dirFd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0)
+      throw std::runtime_error("cannot open CLAP state directory for sync: " +
+                               std::string(std::strerror(errno)));
+    ScopedFd dirOwner(dirFd);
+    if (fsync(dirFd) < 0)
+      throw std::runtime_error("cannot sync CLAP state directory: " +
+                               std::string(std::strerror(errno)));
+  } catch (...) {
+    if (!renamed)
+      unlink(temp.data());
+    throw;
+  }
+}
+
 struct ClapLibrary {
   void *handle{};
   const clap_plugin_entry_t *entry{};
@@ -144,15 +429,18 @@ bool CLAP_ABI rejectEvent(const clap_output_events_t *,
 }
 
 class CLAPInstance final : public IPluginInstance,
-                           public IPluginParameterControl {
+                           public IPluginParameterControl,
+                           public IPluginStatePersistence {
 public:
   CLAPInstance(std::shared_ptr<ClapLibrary> lib,
                const clap_plugin_descriptor_t *descriptor, std::string id,
                float sampleRate, unsigned maxFrames,
                const std::vector<std::wstring> &channels,
-               const std::vector<PluginParameterValue> &overrides)
+               const std::vector<PluginParameterValue> &overrides,
+               std::string stateIdentity = {})
       : library(std::move(lib)), pluginId(std::move(id)), maxFrameCount(maxFrames),
-        inputChannels(channels.size()), outputChannels(channels.size()) {
+        inputChannels(channels.size()), outputChannels(channels.size()),
+        persistentIdentity(std::move(stateIdentity)) {
     if (!std::isfinite(sampleRate) || sampleRate < 8000 || !maxFrames ||
         channels.empty())
       throw std::runtime_error("invalid CLAP audio configuration");
@@ -192,6 +480,23 @@ public:
     };
     std::unique_ptr<const clap_plugin_t, decltype(cleanupPlugin)> cleanup(
         plugin, cleanupPlugin);
+    stateExtension = static_cast<const clap_plugin_state_t *>(
+        plugin->get_extension(plugin, CLAP_EXT_STATE));
+    if (!persistentIdentity.empty()) {
+      statePath = statePathFor(persistentIdentity);
+      if (auto saved = readStateFile(statePath, persistentIdentity)) {
+        if (!stateExtension)
+          throw std::runtime_error(
+              "CLAP state exists but plugin does not implement clap.state: " +
+              pluginId);
+        MemoryStream stream{&*saved};
+        clap_istream_t input{&stream, stateRead};
+        if (!stateExtension->load(plugin, &input) || stream.failed ||
+            stream.cursor != saved->size())
+          throw std::runtime_error("CLAP plugin rejected saved state: " +
+                                   pluginId);
+      }
+    }
     ports = static_cast<const clap_plugin_audio_ports_t *>(
         plugin->get_extension(plugin, CLAP_EXT_AUDIO_PORTS));
     if (!ports || ports->count(plugin, true) != 1 ||
@@ -409,6 +714,42 @@ public:
     liveParameters[match].revision.fetch_add(1, std::memory_order_release);
   }
 
+  bool savePersistentPluginState() override {
+    if (!stateExtension || persistentIdentity.empty())
+      return false;
+    if (processingError.load(std::memory_order_acquire))
+      throw std::runtime_error("cannot persist failed CLAP plugin state: " +
+                               pluginId);
+
+    if (processing) {
+      currentClapAudioHost = &host;
+      plugin->stop_processing(plugin);
+      currentClapAudioHost = nullptr;
+      processing = false;
+    }
+    if (parameterExtension && parameterExtension->flush) {
+      buildParameterEvents();
+      currentClapAudioHost = &host;
+      parameterExtension->flush(plugin, &emptyInputEvents, &outputEvents);
+      currentClapAudioHost = nullptr;
+    }
+    MemoryStream stream;
+    clap_ostream_t output{&stream, stateWrite};
+    bool saved = false;
+    try {
+      saved = stateExtension->save(plugin, &output);
+      if (!saved || stream.failed)
+        throw std::runtime_error("CLAP plugin failed to save state: " +
+                                 pluginId);
+      atomicWriteState(statePath, persistentIdentity, stream.output);
+    } catch (...) {
+      restartProcessing();
+      throw;
+    }
+    restartProcessing();
+    return saved;
+  }
+
 private:
   struct LiveParameter {
     std::atomic<float> value{0.0f};
@@ -459,6 +800,18 @@ private:
     const auto *self = static_cast<const CLAPInstance *>(list->ctx);
     return self->eventBatchCount;
   }
+
+  void restartProcessing() {
+    currentClapAudioHost = &host;
+    const bool started = plugin->start_processing(plugin);
+    currentClapAudioHost = nullptr;
+    if (!started) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error("CLAP plugin could not resume after state save: " +
+                               pluginId);
+    }
+    processing = true;
+  }
   static const clap_event_header_t *CLAP_ABI
   parameterEventAt(const clap_input_events_t *list, uint32_t index) {
     const auto *self = static_cast<const CLAPInstance *>(list->ctx);
@@ -476,6 +829,9 @@ private:
   const clap_plugin_audio_ports_t *ports{};
   const clap_plugin_params_t *parameterExtension{};
   const clap_plugin_latency_t *latencyExtension{};
+  const clap_plugin_state_t *stateExtension{};
+  std::string persistentIdentity;
+  fs::path statePath;
   std::vector<clap_param_info_t> clapParameters;
   std::vector<clap_event_param_value_t> parameterEvents;
   std::vector<clap_event_param_value_t> eventBatch;
@@ -500,18 +856,21 @@ class CLAPPluginFilter final : public IFilter,
                                public AtomicPluginBypass,
                                public IPluginParameterControl,
                                public IPluginFailureState,
-                               public IPluginLatencyState {
+                               public IPluginLatencyState,
+                               public IPluginStatePersistence {
 public:
   CLAPPluginFilter(CLAPPluginHost &host, std::string id,
-                   std::vector<PluginParameterValue> overrides)
+                   std::vector<PluginParameterValue> overrides,
+                   std::filesystem::path source, unsigned line)
       : host(host), pluginId(std::move(id)),
-        parameterOverrides(std::move(overrides)) {}
+        parameterOverrides(std::move(overrides)), source(std::move(source)),
+        line(line) {}
   bool getInPlace() override { return false; }
   std::vector<std::wstring> initialize(float sampleRate, unsigned maxFrames,
                                       std::vector<std::wstring> channels) override {
     channelCount = static_cast<unsigned>(channels.size());
-    instance = host.create(pluginId, sampleRate, maxFrames, channels,
-                           parameterOverrides);
+    instance = host.createForConfig(pluginId, sampleRate, maxFrames, channels,
+                                    parameterOverrides, source, line);
     return instance->initialize(sampleRate, maxFrames, channels);
   }
   void process(float **output, float **input, unsigned frames) override {
@@ -540,29 +899,45 @@ public:
                                pluginId);
     control->setParameterValue(symbol, value);
   }
+  bool savePersistentPluginState() override {
+    if (!instance)
+      return false;
+    auto *state = dynamic_cast<IPluginStatePersistence *>(instance.get());
+    return state && state->savePersistentPluginState();
+  }
 
 private:
   CLAPPluginHost &host;
   std::string pluginId;
   std::vector<PluginParameterValue> parameterOverrides;
+  std::filesystem::path source;
+  unsigned line{};
   std::unique_ptr<IPluginInstance> instance;
   unsigned channelCount{};
 };
 
 IFilter *allocateFilter(CLAPPluginHost &host, std::string id,
-                        std::vector<PluginParameterValue> overrides) {
+                        std::vector<PluginParameterValue> overrides,
+                        const std::filesystem::path &source, unsigned line) {
   void *memory = MemoryHelper::alloc(sizeof(CLAPPluginFilter));
   try {
     return new (memory) CLAPPluginFilter(host, std::move(id),
-                                         std::move(overrides));
+                                         std::move(overrides), source, line);
   } catch (...) {
     MemoryHelper::free(memory);
     throw;
   }
 }
 
-class CLAPPluginFilterFactory final : public IFilterFactory {
+class CLAPPluginFilterFactory final : public IFilterFactory,
+                                      public IPluginSourceContext {
 public:
+  void setPluginSourceLocation(const std::filesystem::path &path,
+                               unsigned sourceLine) override {
+    source = path;
+    line = sourceLine;
+  }
+
   std::vector<IFilter *> createFilter(const std::wstring &, std::wstring &command,
                                       std::wstring &parameters) override {
     if (command != L"Plugin")
@@ -607,11 +982,13 @@ public:
       overrides.push_back({symbol, value});
     }
     return {allocateFilter(host, StringHelper::toString(wideId, 65001),
-                           std::move(overrides))};
+                           std::move(overrides), source, line)};
   }
 
 private:
   CLAPPluginHost host;
+  std::filesystem::path source;
+  unsigned line{};
 };
 } // namespace
 
@@ -708,6 +1085,14 @@ CLAPPluginHost::create(const std::string &id, float sampleRate,
                        unsigned maxFrames,
                        const std::vector<std::wstring> &channels,
                        const std::vector<PluginParameterValue> &parameters) {
+  return createForConfig(id, sampleRate, maxFrames, channels, parameters, {}, 0);
+}
+
+std::unique_ptr<IPluginInstance> CLAPPluginHost::createForConfig(
+    const std::string &id, float sampleRate, unsigned maxFrames,
+    const std::vector<std::wstring> &channels,
+    const std::vector<PluginParameterValue> &parameters,
+    const std::filesystem::path &source, unsigned line) {
   scan();
   const auto found = std::find_if(catalog.begin(), catalog.end(),
                                   [&](const auto &item) { return item.id == id; });
@@ -722,7 +1107,10 @@ CLAPPluginHost::create(const std::string &id, float sampleRate,
     if (descriptor && descriptor->id && id == descriptor->id)
       return std::make_unique<CLAPInstance>(found->library, descriptor, id,
                                             sampleRate, maxFrames, channels,
-                                            parameters);
+                                            parameters,
+                                            source.empty()
+                                                ? std::string{}
+                                                : stateIdentity(source, line, id));
   }
   throw std::runtime_error("CLAP plugin descriptor disappeared: " + id);
 }

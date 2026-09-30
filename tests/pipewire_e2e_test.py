@@ -181,8 +181,10 @@ def main():
         root = pathlib.Path(temp)
         runtime = root / "runtime"
         config_home = root / "config"
+        state_home = root / "state"
         runtime.mkdir(mode=0o700)
         config_home.mkdir(mode=0o700)
+        state_home.mkdir(mode=0o700)
         rate_config = make_rate_config(
             pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
         included_config = config_home / "include-reload-root.txt"
@@ -198,6 +200,7 @@ def main():
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
             "XDG_CONFIG_HOME": str(config_home),
+            "XDG_STATE_HOME": str(state_home),
             "PIPEWIRE_RUNTIME_DIR": str(runtime),
         })
         logs = (root / "pipewire.log").open("w+")
@@ -363,7 +366,7 @@ def main():
 
             expected_db = -12.020599913 if latency_plugin else -6.0
             if plugin_live:
-                live_value = "0.75" if vst2_live else "0.25"
+                live_value = "0.75" if (vst2_live or mode == "plugin-live-param") else "0.25"
                 changed = run([str(cli), "plugin", "set",
                                live_plugin_id, live_parameter, live_value], env)
                 if f"Updated {live_plugin_id} parameter {live_parameter} " \
@@ -372,7 +375,23 @@ def main():
                     raise RuntimeError(
                         f"live {mode} parameter update was not acknowledged: "
                         f"{changed.stdout}")
-                expected_db = (-2.498774732 if vst2_live else -18.041199913)
+                expected_db = (-2.498774732 if vst2_live else
+                               (-8.498774732 if mode == "plugin-live-param"
+                                else -18.041199913))
+                if mode == "plugin-live-param":
+                    reloaded = run([str(cli), "config", "reload"], env)
+                    if "Config reload succeeded" not in reloaded.stdout:
+                        raise RuntimeError(
+                            "CLAP state did not survive live graph rebuild:\n"
+                            f"{reloaded.stdout}")
+                    reloaded_status = run([str(cli), "status"], env).stdout
+                    for expected in (
+                            "Daemon: streaming", "Callback allocations: 0",
+                            "Callback deallocations: 0"):
+                        if expected not in reloaded_status:
+                            raise RuntimeError(
+                                "CLAP state reload violated runtime safety "
+                                f"expectation {expected!r}:\n{reloaded_status}")
             if plugin_bypass:
                 changed = run([str(cli), "plugin", "bypass",
                                "org.skyapo.test.gain", "on"], env)
@@ -484,6 +503,94 @@ def main():
             if daemon_process.returncode != 0:
                 raise RuntimeError(
                     f"skyapod exited with status {daemon_process.returncode}")
+            if mode == "plugin-live-param":
+                state_dir = state_home / "skyapo" / "clap-state"
+                sidecars = list(state_dir.glob("*.clapstate"))
+                if len(sidecars) != 1:
+                    raise RuntimeError(
+                        "orderly CLAP daemon stop did not save exactly one "
+                        f"state sidecar: {sidecars}")
+                if sidecars[0].stat().st_mode & 0o077:
+                    raise RuntimeError("CLAP state sidecar permissions are not 0600")
+                daemon_process = subprocess.Popen(
+                    [str(daemon), "--config", str(dsp_config)], env=env,
+                    stdout=daemon_log, stderr=subprocess.STDOUT)
+                deadline = time.monotonic() + 15
+                restored_status = ""
+                while time.monotonic() < deadline:
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "skyapod exited during CLAP state restoration")
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    restored_status = result.stdout
+                    if (result.returncode == 0 and
+                            "Daemon: streaming" in restored_status and
+                            "SkyAPO Virtual Mic" in restored_status and
+                            "Active capture links: 2/2" in restored_status):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "daemon did not resume the CLAP state graph:\n"
+                        f"{restored_status}")
+                restored_capture = run(
+                    [str(consumer), "--expected-rate", str(sample_rate),
+                     "--expected-db", str(expected_db)], env, timeout=12)
+                restored_ratio = re.search(
+                    r"RMS ratio to expected: ([0-9.]+)",
+                    restored_capture.stdout)
+                if (not restored_ratio or
+                        abs(float(restored_ratio.group(1)) - 1.0) >= 0.03):
+                    raise RuntimeError(
+                        "fresh daemon did not restore saved CLAP audio state:\n"
+                        f"{restored_capture.stdout}")
+                valid_state = sidecars[0].read_bytes()
+                corrupted_state = bytearray(valid_state)
+                corrupted_state[-1] ^= 0x01
+                sidecars[0].write_bytes(corrupted_state)
+                rejected_reload = run(
+                    [str(cli), "config", "reload"], env, check=False)
+                if ("Config reload failed; keeping last valid graph" not in
+                        rejected_reload.stdout or
+                        "checksum mismatch" not in rejected_reload.stdout):
+                    raise RuntimeError(
+                        "runtime accepted a corrupt CLAP state sidecar:\n"
+                        f"{rejected_reload.stdout}")
+                retained_status = run([str(cli), "status"], env).stdout
+                if "Daemon: streaming" not in retained_status:
+                    raise RuntimeError(
+                        "corrupt CLAP state stopped the active graph:\n"
+                        f"{retained_status}")
+                retained_capture = run(
+                    [str(consumer), "--expected-rate", str(sample_rate),
+                     "--expected-db", str(expected_db)], env, timeout=12)
+                retained_ratio = re.search(
+                    r"RMS ratio to expected: ([0-9.]+)",
+                    retained_capture.stdout)
+                if (not retained_ratio or
+                        abs(float(retained_ratio.group(1)) - 1.0) >= 0.03):
+                    raise RuntimeError(
+                        "corrupt state did not retain the prior live DSP "
+                        f"output:\n{retained_capture.stdout}")
+                sidecars[0].write_bytes(valid_state)
+                recovered_reload = run(
+                    [str(cli), "config", "reload"], env, check=False)
+                if "Config reload succeeded" not in recovered_reload.stdout:
+                    raise RuntimeError(
+                        "restored valid sidecar could not reload:\n"
+                        f"{recovered_reload.stdout}")
+                stopped_again = run([str(cli), "stop"], env, timeout=8)
+                if "Stopping skyapod" not in stopped_again.stdout:
+                    raise RuntimeError(
+                        "restored daemon stop was not acknowledged")
+                daemon_process.wait(timeout=5)
+                if daemon_process.returncode != 0:
+                    raise RuntimeError(
+                        "restored skyapod exited with status "
+                        f"{daemon_process.returncode}")
+                print("CLAP state survived orderly shutdown/recreation; "
+                      f"independent capture: {restored_capture.stdout.strip()}")
         except Exception:
             for label, log in (("PipeWire server", logs),
                                ("test source", source_log),

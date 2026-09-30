@@ -53,6 +53,8 @@ public:
   }
   std::vector<std::string> failedPluginDescriptions() const;
   std::optional<uint64_t> pluginLatencySamples() const noexcept;
+  // Control-thread only: caller must quiesce the audio graph first.
+  unsigned savePersistentPluginStates();
   void setPluginParameter(const std::string &pluginId,
                           const std::string &parameter,
                           float value);

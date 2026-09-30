@@ -4,6 +4,8 @@
 #include "../plugin/IPluginParameterControl.h"
 #include "../plugin/IPluginIdentity.h"
 #include "../plugin/IPluginLatencyState.h"
+#include "../plugin/IPluginSourceContext.h"
+#include "../plugin/IPluginStatePersistence.h"
 #include "FilterConfiguration.h"
 #include "FilterConfigurationContext.h"
 
@@ -747,6 +749,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     const auto originalCommand = command;
     std::vector<IFilter *> made;
     for (auto &factory : factories) {
+      if (auto *sourceContext =
+              dynamic_cast<IPluginSourceContext *>(factory.get()))
+        sourceContext->setPluginSourceLocation(normalizedPath, lineNo);
       made = factory->createFilter(widePath, command, params);
       if (!made.empty() || command.empty())
         break;
@@ -841,6 +846,16 @@ std::optional<uint64_t> Engine::pluginLatencySamples() const noexcept {
     total += samples;
   }
   return total;
+}
+
+unsigned Engine::savePersistentPluginStates() {
+  unsigned saved = 0;
+  for (const auto &node : graph) {
+    auto *state = dynamic_cast<IPluginStatePersistence *>(node.filter);
+    if (state && state->savePersistentPluginState())
+      ++saved;
+  }
+  return saved;
 }
 
 void Engine::setPluginParameter(const std::string &pluginId,

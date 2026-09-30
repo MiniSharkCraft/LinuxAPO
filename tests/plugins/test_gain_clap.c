@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <stdatomic.h>
 
 typedef struct gain_data {
   const clap_host_t *host;
@@ -11,17 +13,24 @@ typedef struct gain_data {
   float latency_history[2][64];
   bool failFirstProcess;
   unsigned processCalls;
+  atomic_bool processing;
 } gain_data;
+static atomic_uint destroyed_plugin_count;
+CLAP_EXPORT uint32_t skyapo_test_clap_destroyed_plugin_count(void) {
+  return atomic_load(&destroyed_plugin_count);
+}
 
 static bool CLAP_ABI plugin_init(const clap_plugin_t *plugin) {
   if (!plugin || !plugin->plugin_data)
     return false;
   gain_data *data = plugin->plugin_data;
+  atomic_store(&data->processing, false);
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   return thread_check && thread_check->is_main_thread(data->host);
 }
 static void CLAP_ABI plugin_destroy(const clap_plugin_t *plugin) {
+  atomic_fetch_add(&destroyed_plugin_count, 1);
   free(plugin->plugin_data);
   free((void *)plugin);
 }
@@ -44,12 +53,15 @@ static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
   gain_data *data = plugin->plugin_data;
   if (data->failFirstProcess && data->processCalls++ == 0)
     return CLAP_PROCESS_ERROR;
+  atomic_store(&data->processing, true);
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   if (!process || process->audio_inputs_count != 1 ||
       process->audio_outputs_count != 1 || !thread_check ||
-      !thread_check->is_audio_thread(data->host))
+      !thread_check->is_audio_thread(data->host)) {
+    atomic_store(&data->processing, false);
     return CLAP_PROCESS_ERROR;
+  }
   for (uint32_t e = 0; process->in_events &&
                         e < process->in_events->size(process->in_events);
        ++e) {
@@ -79,6 +91,7 @@ static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
       data->latency_cursor = (data->latency_cursor + 1) % data->latency_samples;
     }
   }
+  atomic_store(&data->processing, false);
   return CLAP_PROCESS_CONTINUE;
 }
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
@@ -153,9 +166,18 @@ static bool CLAP_ABI param_text_to_value(const clap_plugin_t *plugin, clap_id id
 static void CLAP_ABI param_flush(const clap_plugin_t *plugin,
                                 const clap_input_events_t *input,
                                 const clap_output_events_t *output) {
-  (void)plugin;
-  (void)input;
   (void)output;
+  gain_data *data = plugin->plugin_data;
+  for (uint32_t e = 0; input && e < input->size(input); ++e) {
+    const clap_event_header_t *header = input->get(input, e);
+    if (header && header->space_id == CLAP_CORE_EVENT_SPACE_ID &&
+        header->type == CLAP_EVENT_PARAM_VALUE) {
+      const clap_event_param_value_t *event =
+          (const clap_event_param_value_t *)header;
+      if (event->param_id == 7)
+        data->gain = event->value;
+    }
+  }
 }
 static const clap_plugin_params_t plugin_params = {
     param_count,         param_info,          param_value,
@@ -164,15 +186,81 @@ static uint32_t CLAP_ABI plugin_latency_get(const clap_plugin_t *plugin) {
   return ((const gain_data *)plugin->plugin_data)->latency_samples;
 }
 static const clap_plugin_latency_t plugin_latency = {plugin_latency_get};
+static int64_t write_all(const clap_ostream_t *stream, const void *buffer,
+                         uint64_t size) {
+  const unsigned char *bytes = (const unsigned char *)buffer;
+  uint64_t offset = 0;
+  while (offset < size) {
+    const int64_t written = stream->write(stream, bytes + offset, size - offset);
+    if (written <= 0)
+      return -1;
+    offset += (uint64_t)written;
+  }
+  return (int64_t)offset;
+}
+static int64_t read_all(const clap_istream_t *stream, void *buffer,
+                        uint64_t size) {
+  unsigned char *bytes = (unsigned char *)buffer;
+  uint64_t offset = 0;
+  while (offset < size) {
+    const int64_t received = stream->read(stream, bytes + offset, size - offset);
+    if (received <= 0)
+      return -1;
+    offset += (uint64_t)received;
+  }
+  return (int64_t)offset;
+}
+static bool CLAP_ABI state_save(const clap_plugin_t *plugin,
+                               const clap_ostream_t *stream) {
+  gain_data *data = plugin->plugin_data;
+  const clap_host_thread_check_t *thread_check =
+      data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
+  if (!stream || !thread_check || !thread_check->is_main_thread(data->host) ||
+      thread_check->is_audio_thread(data->host) ||
+      atomic_load(&data->processing) || !isfinite(data->gain))
+    return false;
+  unsigned char state[20] = {0};
+  memcpy(state, "SKYGAIN1", 8);
+  memcpy(state + 8, &data->gain, sizeof(data->gain));
+  state[16] = 0x53;
+  state[17] = 0x4b;
+  state[18] = 0x59;
+  state[19] = 0x31;
+  return write_all(stream, state, sizeof(state)) == (int64_t)sizeof(state);
+}
+static bool CLAP_ABI state_load(const clap_plugin_t *plugin,
+                               const clap_istream_t *stream) {
+  gain_data *data = plugin->plugin_data;
+  const clap_host_thread_check_t *thread_check =
+      data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
+  if (!stream || !thread_check || !thread_check->is_main_thread(data->host) ||
+      thread_check->is_audio_thread(data->host) ||
+      atomic_load(&data->processing))
+    return false;
+  unsigned char state[20];
+  if (read_all(stream, state, sizeof(state)) != (int64_t)sizeof(state) ||
+      memcmp(state, "SKYGAIN1", 8) != 0 || state[16] != 0x53 ||
+      state[17] != 0x4b || state[18] != 0x59 || state[19] != 0x31)
+    return false;
+  double gain = 0.0;
+  memcpy(&gain, state + 8, sizeof(gain));
+  if (!isfinite(gain) || gain < 0.0 || gain > 2.0)
+    return false;
+  data->gain = gain;
+  return true;
+}
+static const clap_plugin_state_t plugin_state = {state_save, state_load};
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
                                              const char *id) {
-  (void)plugin;
   if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)
     return &audio_ports;
   if (strcmp(id, CLAP_EXT_PARAMS) == 0)
     return &plugin_params;
   if (strcmp(id, CLAP_EXT_LATENCY) == 0)
     return &plugin_latency;
+  if (strcmp(id, CLAP_EXT_STATE) == 0 &&
+      strcmp(plugin->desc->id, "org.skyapo.test.gain") == 0)
+    return &plugin_state;
   return NULL;
 }
 
@@ -231,6 +319,7 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
   }
   data->host = host;
   data->gain = 0.5;
+  atomic_init(&data->processing, false);
   data->latency_samples = reportsLatency ? 64 : 0;
   data->failFirstProcess = failFirstProcess;
   plugin->desc = failFirstProcess
@@ -264,6 +353,7 @@ static const clap_plugin_descriptor_t *CLAP_ABI plugin_descriptor(
 static const clap_plugin_factory_t factory = {plugin_count, plugin_descriptor,
                                                create_plugin};
 static bool CLAP_ABI entry_init(const char *path) {
+  atomic_store(&destroyed_plugin_count, 0);
   return path != NULL;
 }
 static void CLAP_ABI entry_deinit(void) {}

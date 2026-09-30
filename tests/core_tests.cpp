@@ -4,11 +4,13 @@
 #ifdef SKYAPO_TEST_CLAP
 #include "CLAPPluginHost.h"
 #include "IPluginParameterControl.h"
+#include <dlfcn.h>
 #endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -17,6 +19,7 @@
 #include <limits>
 #include <thread>
 #include <sndfile.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -607,6 +610,186 @@ int main() {
     std::cerr << "live CLAP parameter update did not change processed audio\n";
     return 1;
   }
+
+  // Persist a real CLAP plugin state through its extension, verify the exact
+  // fixture payload bytes, then restore it into a fresh Engine and measure the
+  // resulting audio. Corrupt state must reject the candidate graph without
+  // replacing the already active graph; a missing sidecar means plugin default.
+  char stateHomeTemplate[] = "/tmp/skyapo-clap-state-XXXXXX";
+  char *stateHomeRaw = mkdtemp(stateHomeTemplate);
+  if (!stateHomeRaw) {
+    std::cerr << "cannot create isolated CLAP state test directory\n";
+    return 1;
+  }
+  const fs::path stateHome(stateHomeRaw);
+  const char *previousStateHomeValue = std::getenv("XDG_STATE_HOME");
+  const std::string previousStateHome =
+      previousStateHomeValue ? previousStateHomeValue : "";
+  const bool hadPreviousStateHome = previousStateHomeValue != nullptr;
+  if (!setTestPluginPath("XDG_STATE_HOME", stateHome.string().c_str()))
+    return 1;
+  const fs::path stateConfig = stateHome / "state-chain.txt";
+  const fs::path stateStore = stateHome / "skyapo" / "clap-state";
+  if (!write(stateConfig, "Plugin: CLAP org.skyapo.test.gain\n"))
+    return 1;
+  void *clapTestLibrary = dlopen(
+      (fs::path(SKYAPO_TEST_CLAP_PATH) / "skyapo-test-clap.clap").c_str(),
+      RTLD_NOW | RTLD_LOCAL);
+  using DestroyCount = uint32_t (*)();
+  auto destroyedCount = reinterpret_cast<DestroyCount>(
+      clapTestLibrary ? dlsym(clapTestLibrary,
+                              "skyapo_test_clap_destroyed_plugin_count")
+                      : nullptr);
+  if (!destroyedCount) {
+    std::cerr << "cannot inspect CLAP fixture cleanup counter\n";
+    return 1;
+  }
+  {
+    Engine stateSource(48000, 2, 128, {L"L", L"R"});
+    stateSource.loadConfig(stateConfig.string());
+    stateSource.setPluginParameter("org.skyapo.test.gain", "7", 0.75f);
+    float stateInput[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    stateSource.process(stateInput, 4);
+    stateSource.setPluginParameter("org.skyapo.test.gain", "7", 0.875f);
+    if (std::abs(stateInput[0] - 0.75f) > 1e-6f ||
+        stateSource.savePersistentPluginStates() != 1) {
+      std::cerr << "CLAP state save did not retain the active gain\n";
+      return 1;
+    }
+  }
+  std::vector<fs::path> sidecars;
+  for (const auto &entry : fs::directory_iterator(stateStore))
+    if (entry.is_regular_file())
+      sidecars.push_back(entry.path());
+  if (sidecars.size() != 1) {
+    std::cerr << "expected exactly one CLAP state sidecar\n";
+    return 1;
+  }
+  struct stat stateStat {};
+  if (stat(sidecars.front().c_str(), &stateStat) < 0 ||
+      (stateStat.st_mode & 0077) != 0) {
+    std::cerr << "CLAP state sidecar is not private (mode 0600)\n";
+    return 1;
+  }
+  struct stat stateDirStat {};
+  if (stat(stateStore.c_str(), &stateDirStat) < 0 ||
+      (stateDirStat.st_mode & 0077) != 0) {
+    std::cerr << "CLAP state directory is not private (mode 0700)\n";
+    return 1;
+  }
+  std::ifstream stateFile(sidecars.front(), std::ios::binary);
+  std::vector<uint8_t> stateBytes((std::istreambuf_iterator<char>(stateFile)),
+                                  std::istreambuf_iterator<char>());
+  const auto canonicalStateConfig = fs::weakly_canonical(stateConfig).string();
+  const std::string expectedIdentity =
+      canonicalStateConfig + "\n1\norg.skyapo.test.gain";
+  const size_t payloadOffset = 36 + expectedIdentity.size();
+  unsigned char expectedPayload[20]{};
+  std::memcpy(expectedPayload, "SKYGAIN1", 8);
+  const double expectedSavedGain = 0.875;
+  std::memcpy(expectedPayload + 8, &expectedSavedGain,
+              sizeof(expectedSavedGain));
+  expectedPayload[16] = 0x53;
+  expectedPayload[17] = 0x4b;
+  expectedPayload[18] = 0x59;
+  expectedPayload[19] = 0x31;
+  if (stateBytes.size() != payloadOffset + sizeof(expectedPayload) ||
+      std::string(stateBytes.begin() + 36,
+                  stateBytes.begin() + payloadOffset) != expectedIdentity ||
+      !std::equal(expectedPayload, expectedPayload + sizeof(expectedPayload),
+                  stateBytes.begin() + payloadOffset)) {
+    std::cerr << "CLAP state envelope/payload bytes did not round-trip\n";
+    return 1;
+  }
+  Engine stateRestored(48000, 2, 128, {L"L", L"R"});
+  stateRestored.loadConfig(stateConfig.string());
+  float restoredBlock[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  stateRestored.process(restoredBlock, 4);
+  if (std::abs(restoredBlock[0] - 0.875f) > 1e-6f ||
+      std::abs(restoredBlock[7] - 0.875f) > 1e-6f) {
+    std::cerr << "CLAP state restore did not numerically recover plugin gain\n";
+    return 1;
+  }
+  {
+    std::fstream corrupt(sidecars.front(),
+                         std::ios::binary | std::ios::in | std::ios::out);
+    corrupt.seekp(-1, std::ios::end);
+    char damaged = '\0';
+    corrupt.write(&damaged, 1);
+  }
+  bool corruptRejected = false;
+  const auto destroyedBeforeCorruptLoad = destroyedCount();
+  try {
+    stateRestored.loadConfig(stateConfig.string());
+  } catch (const std::exception &error) {
+    corruptRejected = std::string(error.what()).find("checksum") !=
+                      std::string::npos;
+  }
+  float retainedBlock[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  stateRestored.process(retainedBlock, 4);
+  if (!corruptRejected || std::abs(retainedBlock[0] - 0.875f) > 1e-6f) {
+    std::cerr << "corrupt CLAP state did not reject candidate/retain graph\n";
+    return 1;
+  }
+  if (destroyedCount() != destroyedBeforeCorruptLoad + 1) {
+    std::cerr << "corrupt-state candidate did not destroy its initialized CLAP plugin\n";
+    return 1;
+  }
+  auto pluginRejectedBytes = stateBytes;
+  pluginRejectedBytes[payloadOffset + 16] ^= 0x01;
+  uint64_t checksum = 14695981039346656037ull;
+  const auto hashByte = [&checksum](uint8_t byte) {
+    checksum ^= byte;
+    checksum *= 1099511628211ull;
+  };
+  for (const unsigned char byte : expectedIdentity)
+    hashByte(byte);
+  hashByte(0xff);
+  for (size_t i = payloadOffset; i < pluginRejectedBytes.size(); ++i)
+    hashByte(pluginRejectedBytes[i]);
+  for (unsigned i = 0; i < 8; ++i)
+    pluginRejectedBytes[28 + i] =
+        static_cast<uint8_t>(checksum >> (i * 8));
+  {
+    std::ofstream replacement(sidecars.front(), std::ios::binary | std::ios::trunc);
+    replacement.write(reinterpret_cast<const char *>(pluginRejectedBytes.data()),
+                      pluginRejectedBytes.size());
+  }
+  bool pluginLoadRejected = false;
+  const auto destroyedBeforePluginLoad = destroyedCount();
+  try {
+    stateRestored.loadConfig(stateConfig.string());
+  } catch (const std::exception &error) {
+    pluginLoadRejected = std::string(error.what()).find(
+                             "plugin rejected saved state") !=
+                         std::string::npos;
+  }
+  std::fill(std::begin(retainedBlock), std::end(retainedBlock), 1.0f);
+  stateRestored.process(retainedBlock, 4);
+  if (!pluginLoadRejected || std::abs(retainedBlock[0] - 0.875f) > 1e-6f) {
+    std::cerr << "CLAP load-false did not reject candidate/retain graph\n";
+    return 1;
+  }
+  if (destroyedCount() != destroyedBeforePluginLoad + 1) {
+    std::cerr << "load-false candidate did not destroy its initialized CLAP plugin\n";
+    return 1;
+  }
+  fs::remove(sidecars.front());
+  Engine stateMissing(48000, 2, 128, {L"L", L"R"});
+  stateMissing.loadConfig(stateConfig.string());
+  float defaultState[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+  stateMissing.process(defaultState, 4);
+  if (std::abs(defaultState[0] - 0.5f) > 1e-6f) {
+    std::cerr << "missing CLAP state did not use plugin default\n";
+    return 1;
+  }
+  fs::remove_all(stateHome);
+  if (hadPreviousStateHome)
+    setenv("XDG_STATE_HOME", previousStateHome.c_str(), 1);
+  else
+    unsetenv("XDG_STATE_HOME");
+  dlclose(clapTestLibrary);
+
   for (const auto &invalid : std::vector<std::pair<std::string, float>>{
            {"missing", 0.5f}, {"Gain", 3.0f}, {"Gain", INFINITY}}) {
     bool rejectedLiveValue = false;

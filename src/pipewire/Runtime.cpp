@@ -26,6 +26,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <time.h>
+#include <thread>
 
 namespace {
 constexpr unsigned MaxFrames = 65536, MaxChannels = 8;
@@ -195,9 +196,22 @@ struct Runtime {
     std::vector<std::wstring> names;
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
-    auto engine =
-        std::make_unique<Engine>(hz, channels, blockFrames, names, true);
-    engine->loadConfig(config);
+    const auto createEngine = [&] {
+      auto candidate =
+          std::make_unique<Engine>(hz, channels, blockFrames, names, true);
+      candidate->loadConfig(config);
+      return candidate;
+    };
+    // Validate the existing sidecars before the active graph is allowed to
+    // overwrite them with a fresh snapshot. If corrupt state/plugin load is
+    // rejected, this candidate fails and the active graph and bytes survive.
+    auto engine = createEngine();
+    const auto saved = saveCurrentPluginStates();
+    if (saved)
+      std::cerr << "skyapod: saved state for " << saved
+                << " CLAP plugin instance(s) before graph rebuild\n";
+    if (saved)
+      engine = createEngine();
     configWatcher->update(engine->configFiles());
     installEngine(std::move(engine));
     auto *pointer = active.load(std::memory_order_acquire);
@@ -218,6 +232,67 @@ struct Runtime {
     if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
       retiredEngines.clear();
   }
+  bool waitForCallbacksToDrain() {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(500);
+    while (callbacksInFlight.load(std::memory_order_seq_cst) != 0) {
+      if (std::chrono::steady_clock::now() >= deadline)
+        return false;
+      std::this_thread::yield();
+    }
+    return true;
+  }
+  unsigned saveCurrentPluginStates() {
+    Engine *current = active.exchange(nullptr, std::memory_order_seq_cst);
+    if (!current)
+      return 0;
+    if (!waitForCallbacksToDrain()) {
+      active.store(current, std::memory_order_seq_cst);
+      throw std::runtime_error(
+          "timed out waiting for realtime callbacks before CLAP state save");
+    }
+    try {
+      const auto saved = current->savePersistentPluginStates();
+      active.store(current, std::memory_order_seq_cst);
+      return saved;
+    } catch (...) {
+      active.store(current, std::memory_order_seq_cst);
+      throw;
+    }
+  }
+  void shutdownAudio() noexcept {
+    // Explicit shutdown path: disconnect/destroy PipeWire first, then drain
+    // callbacks before making any main-thread CLAP state calls. Never save in
+    // Runtime/Engine/plugin destructors.
+    cleaning = true;
+    if (filter) {
+      pw_filter_disconnect(filter);
+      pw_filter_destroy(filter);
+      filter = nullptr;
+    }
+    Engine *current = active.exchange(nullptr, std::memory_order_seq_cst);
+    if (!current)
+      return;
+    if (!waitForCallbacksToDrain()) {
+      std::cerr << "skyapod: realtime callback drain exceeded 500 ms after "
+                   "filter destruction; waiting before Engine teardown\n";
+      // The filter has already been disconnected and destroyed, so no new
+      // callback may start. Continue draining rather than freeing an Engine
+      // that a stuck callback could still be using. State save remains skipped.
+      while (callbacksInFlight.load(std::memory_order_seq_cst) != 0)
+        std::this_thread::yield();
+      return;
+    }
+    try {
+      const auto count = current->savePersistentPluginStates();
+      if (count)
+        std::cerr << "skyapod: saved state for " << count
+                  << " CLAP plugin instance(s)\n";
+    } catch (const std::exception &error) {
+      std::cerr << "skyapod: CLAP state save failed during shutdown: "
+                << error.what() << '\n';
+    }
+  }
   void reloadConfig() {
     auto *current = active.load(std::memory_order_acquire);
     const unsigned hz = current ? current->sampleRate() : requestedRate.load();
@@ -228,9 +303,21 @@ struct Runtime {
       names.push_back(eapoChannel(p.channel));
     if (!hz || !blockFrames)
       throw std::runtime_error("cannot reload before PipeWire format negotiation");
-    auto replacement =
-        std::make_unique<Engine>(hz, channels, blockFrames, names, true);
-    replacement->loadConfig(config);
+    const auto createEngine = [&] {
+      auto candidate =
+          std::make_unique<Engine>(hz, channels, blockFrames, names, true);
+      candidate->loadConfig(config);
+      return candidate;
+    };
+    // Read/validate persisted state first. A malformed sidecar or plugin load
+    // rejection must not be silently overwritten by saving the live graph.
+    auto replacement = createEngine();
+    const auto saved = saveCurrentPluginStates();
+    if (saved)
+      std::cerr << "skyapod: saved state for " << saved
+                << " CLAP plugin instance(s) before config reload\n";
+    if (saved)
+      replacement = createEngine();
     configWatcher->update(replacement->configFiles());
     const unsigned count = replacement->filterCount();
     installEngine(std::move(replacement));
@@ -301,7 +388,7 @@ struct Runtime {
       out[c] =
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
-    Engine *engine = r.active.load(std::memory_order_acquire);
+    Engine *engine = r.active.load(std::memory_order_seq_cst);
     if (!engine || engine->sampleRate() != hz ||
         engine->maxFrames() != frames) {
       for (unsigned c = 0; c < r.channels; ++c)
@@ -885,6 +972,7 @@ void runPipeWire(const std::string &device, const std::string &config,
   Runtime r(stopping);
   r.init(device, config);
   pw_main_loop_run(r.main);
+  r.shutdownAudio();
   if (!r.error.empty())
     throw std::runtime_error(r.error);
 }
