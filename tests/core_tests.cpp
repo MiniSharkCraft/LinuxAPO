@@ -37,6 +37,36 @@ int main() {
       return 1;
     }
 
+  for (const auto &invalid : {
+           std::string("Preamp: 10000 dB\n"),
+           std::string("Filter: ON PK Fc 30000 Hz Gain 6 dB Q 1\n"),
+           std::string("Filter: ON PK Fc 1000 Hz Gain 10000 dB Q 1\n"),
+           std::string("Filter: ON PK Fc 1000 Hz Gain 6 dB Q -1\n"),
+       }) {
+    if (!write(path, invalid))
+      return 1;
+    bool actionable = false;
+    try {
+      Engine invalidNumeric(48000, 2, 128);
+      invalidNumeric.loadConfig(path);
+    } catch (const std::exception &ex) {
+      const std::string message = ex.what();
+      actionable = message.find(path + ":1:") != std::string::npos &&
+                   (message.find("finite float audio range") !=
+                        std::string::npos ||
+                    message.find("Nyquist") != std::string::npos ||
+                    message.find("finite and in range") !=
+                        std::string::npos);
+      if (!actionable)
+        std::cerr << "numeric range diagnostic was not actionable: "
+                  << message << '\n';
+    }
+    if (!actionable) {
+      std::cerr << "out-of-range DSP parameter was not diagnosed\n";
+      return 1;
+    }
+  }
+
 #ifdef SKYAPO_TEST_LV2
   if (!write(path, "Plugin: LV2 https://skyapo.example/plugins/test-gain\n"))
     return 1;

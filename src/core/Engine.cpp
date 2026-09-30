@@ -3,6 +3,7 @@
 #include "FilterEngine.h"
 
 #include "BiQuadFilterFactory.h"
+#include "BiQuadFilter.h"
 #include "ChannelFilterFactory.h"
 #include "CopyFilter.h"
 #include "CopyFilterFactory.h"
@@ -16,6 +17,7 @@
 #include "IFilterFactory.h"
 #include "IIRFilterFactory.h"
 #include "PreampFilterFactory.h"
+#include "PreampFilter.h"
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
@@ -32,6 +34,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -220,6 +223,44 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 
   for (auto &parsed : candidate) {
     IFilter *filter = parsed.filter.get();
+    const auto location = parsed.source.string() + ":" +
+                          std::to_string(parsed.line) + ": ";
+    if (auto *preamp = dynamic_cast<PreampFilter *>(filter)) {
+      const double db = preamp->getDbGain();
+      const double linear = std::pow(10.0, db / 20.0);
+      if (!std::isfinite(db) || !std::isfinite(linear) ||
+          linear > std::numeric_limits<float>::max())
+        throw std::runtime_error(location +
+                                 "Preamp gain is outside the finite float "
+                                 "audio range");
+    }
+    if (auto *biquad = dynamic_cast<BiQuadFilter *>(filter)) {
+      const double frequency = biquad->getFreq();
+      const double shape = biquad->getBandwidthOrQOrS();
+      const double gain = biquad->getDbGain();
+      const bool isShelf = biquad->getType() == BiQuad::LOW_SHELF ||
+                           biquad->getType() == BiQuad::HIGH_SHELF;
+      const bool gainIsUsed =
+          biquad->getType() == BiQuad::PEAKING || isShelf;
+      const double linearGain = std::pow(10.0, gain / 40.0);
+      bool shapeValid = std::isfinite(shape) && shape > 0.0;
+      if (isShelf && biquad->getIsBandwidthOrS())
+        shapeValid = shapeValid && shape <= 12.0;
+      if (!std::isfinite(frequency) || frequency <= 0.0 ||
+          frequency >= static_cast<double>(rate) / 2.0)
+        throw std::runtime_error(location +
+                                 "Filter frequency must be above 0 Hz and "
+                                 "below the Nyquist frequency (" +
+                                 std::to_string(rate / 2.0) + " Hz)");
+      if (!std::isfinite(gain) ||
+          (gainIsUsed &&
+           (!std::isfinite(linearGain) ||
+            linearGain > std::numeric_limits<float>::max())) ||
+          !shapeValid)
+        throw std::runtime_error(
+            location +
+            "Filter gain and Q/bandwidth/slope must be finite and in range");
+    }
     const auto savedSelection = selectedNames;
     if (filter->getAllChannels())
       selectedNames = allNames;
