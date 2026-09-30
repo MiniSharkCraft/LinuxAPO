@@ -22,6 +22,7 @@ option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
 if(SKYAPO_ENABLE_FFTW3F)
@@ -151,6 +152,20 @@ if(NOT SKYAPO_UPSTREAM_GIT_RESULT EQUAL 0)
   set(SKYAPO_UPSTREAM_REVISION unknown)
 endif()
 include(cmake/PortableEapo.cmake)
+set(SKYAPO_UPSTREAM_PROCESS_SOURCE
+    ${EAPO_PORT}/FilterEngineProcess.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/generate_upstream_filter_engine_process.py
+  ${EAPO}/FilterEngine.cpp)
+execute_process(
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/linux/generate_upstream_filter_engine_process.py
+          ${EAPO}/FilterEngine.cpp ${SKYAPO_UPSTREAM_PROCESS_SOURCE}
+  RESULT_VARIABLE SKYAPO_PROCESS_GENERATOR_RESULT
+  ERROR_VARIABLE SKYAPO_PROCESS_GENERATOR_ERROR)
+if(NOT SKYAPO_PROCESS_GENERATOR_RESULT EQUAL 0)
+  message(FATAL_ERROR "Could not generate upstream FilterEngine process slice: ${SKYAPO_PROCESS_GENERATOR_ERROR}")
+endif()
 add_library(skyapo-eapo-dsp STATIC
   ${EAPO_SOURCES}
   src/platform/linux/compat.cpp
@@ -169,7 +184,8 @@ if(FFTW3F_FOUND)
   target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::FFTW3F)
 endif()
 
-add_library(skyapo-core STATIC src/core/Engine.cpp ${EAPO_EXPRESSION_SOURCES})
+add_library(skyapo-core STATIC src/core/Engine.cpp
+  ${SKYAPO_UPSTREAM_PROCESS_SOURCE} ${EAPO_EXPRESSION_SOURCES})
 target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
 target_include_directories(skyapo-core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin src/core ${EAPO_PORT}
@@ -524,6 +540,13 @@ if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
 endif()
 add_test(NAME skyapo-core COMMAND skyapo-tests)
+
+add_executable(skyapo-upstream-process-tests
+  tests/upstream_filter_engine_process_test.cpp)
+target_include_directories(skyapo-upstream-process-tests PRIVATE
+  src/platform/linux ${EAPO_PORT} ${EAPO})
+target_link_libraries(skyapo-upstream-process-tests PRIVATE skyapo-core)
+add_test(NAME skyapo-upstream-process COMMAND skyapo-upstream-process-tests)
 if(SKYAPO_ENABLE_FST_VST2_HOST)
   add_library(skyapo-test-vst2-plugin SHARED
     tests/plugins/vst2_gain_fixture.c)

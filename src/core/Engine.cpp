@@ -8,6 +8,7 @@
 #include "../plugin/IPluginStatePersistence.h"
 #include "FilterConfiguration.h"
 #include "FilterConfigurationContext.h"
+#include "UpstreamFilterEngineProcess.h"
 
 #include "BiQuadFilterFactory.h"
 #include "BiQuadFilter.h"
@@ -820,9 +821,10 @@ void Engine::process(float *samples, unsigned frames) {
   if (fixedBlock && frames != maxFrameCount)
     throw std::runtime_error(
         "convolution filters require the negotiated fixed audio block size");
-  configuration->read(samples, frames);
-  configuration->process(frames);
-  configuration->write(samples, frames);
+  UpstreamFilterEngineProcess process(channelCount, channelCount,
+                                      maxFrameCount);
+  process.setConfigurations(configuration.get(), nullptr);
+  process.process(samples, samples, frames);
 }
 
 unsigned Engine::processTransitionTo(Engine &next, float *samples,
@@ -843,17 +845,14 @@ unsigned Engine::processTransitionTo(Engine &next, float *samples,
     throw std::runtime_error(
         "convolution filters require the negotiated fixed audio block size");
 
-  // `FilterConfiguration::read` copies the complete input into its own
-  // preallocated planes. Read both graphs before writing the mixed output so
-  // an in-place interleaved buffer remains the same source for each graph.
-  configuration->read(samples, frames);
-  configuration->process(frames);
-  next.configuration->read(samples, frames);
-  next.configuration->process(frames);
-  transitionCounter = configuration->doTransition(
-      next.configuration.get(), frames, transitionCounter, transitionLength);
-  configuration->write(samples, frames);
-  return transitionCounter;
+  UpstreamFilterEngineProcess process(channelCount, channelCount,
+                                      transitionLength);
+  process.setConfigurations(configuration.get(), next.configuration.get());
+  process.setTransitionCounter(transitionCounter);
+  process.process(samples, samples, frames);
+  return process.takeTransitionComplete()
+             ? process.getCompletedTransitionCounter()
+             : process.getTransitionCounter();
 }
 
 std::vector<std::string> Engine::failedPluginDescriptions() const {

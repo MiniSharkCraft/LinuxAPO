@@ -17,11 +17,23 @@ public:
         transitionLength(transitionLength) {}
 
   void setConfigurations(FilterConfiguration *current,
-                         FilterConfiguration *next) noexcept {
+                        FilterConfiguration *next) noexcept {
     currentConfig = current;
     nextConfig = next;
+    previousConfig = nullptr;
     transitionCounter = 0;
+    completedTransitionCounter = 0;
     transitionComplete.store(false, std::memory_order_relaxed);
+  }
+
+  void setTransitionCounter(unsigned counter) noexcept {
+    transitionCounter = counter;
+  }
+
+  unsigned getTransitionCounter() const noexcept { return transitionCounter; }
+
+  unsigned getCompletedTransitionCounter() const noexcept {
+    return completedTransitionCounter;
   }
 
   FilterConfiguration *takePreviousConfiguration() noexcept {
@@ -41,6 +53,7 @@ private:
   unsigned realChannelCount;
   unsigned outputChannelCount;
   unsigned transitionCounter{};
+  unsigned completedTransitionCounter{};
   unsigned transitionLength;
   FilterConfiguration *currentConfig{};
   FilterConfiguration *nextConfig{};

@@ -16,6 +16,11 @@ BEGIN = "#pragma AVRT_CODE_BEGIN"
 END = "#pragma AVRT_CODE_END"
 UPSTREAM_RELEASE = "ReleaseSemaphore(loadSemaphore, 1, NULL);"
 LINUX_HANDOFF = "transitionComplete.store(true, std::memory_order_release);"
+UPSTREAM_COUNTER_RESET = "transitionCounter = 0;"
+LINUX_COUNTER_RESET = (
+    "completedTransitionCounter = transitionCounter;\n"
+    "\t\ttransitionCounter = 0;"
+)
 
 
 def generate(source: Path, destination: Path) -> None:
@@ -27,9 +32,12 @@ def generate(source: Path, destination: Path) -> None:
         raise ValueError("expected exactly two upstream process overloads")
     if body.count(UPSTREAM_RELEASE) != 2:
         raise ValueError("expected two transition semaphore releases")
+    if body.count(UPSTREAM_COUNTER_RESET) != 2:
+        raise ValueError("expected two transition counter resets")
     body = body.replace("FilterEngine::process(",
                         "UpstreamFilterEngineProcess::process(")
     body = body.replace(UPSTREAM_RELEASE, LINUX_HANDOFF)
+    body = body.replace(UPSTREAM_COUNTER_RESET, LINUX_COUNTER_RESET)
     generated = (
         "/* Generated from official Equalizer APO FilterEngine.cpp.\n"
         " * Copyright (C) 2014 Jonas Thedering; GPL-2.0-or-later.\n"
