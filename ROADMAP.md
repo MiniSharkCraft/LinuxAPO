@@ -39,6 +39,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Background-of-callback (PipeWire control-loop) parse/build, safe graph swap, and last-known-good hot reload.
 - [x] Negotiate F32P at 44.1/48/96 kHz and verify stereo capture-to-virtual-source recordings with the -6 dB numerical regression.
+- [x] Destroy the live SkyAPO virtual node with `pw-cli`; verify daemon retry recreates the source, relinks both physical channels, and an independent recorder still measures the configured DSP gain.
 - [ ] Test PipeWire daemon restart and physical device unplug/replug; verify mono capture and virtual source consumer churn.
 - [ ] Test virtual source consumer churn, daemon restart, overrun reporting and format/quantum changes.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
