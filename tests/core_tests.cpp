@@ -1120,6 +1120,22 @@ int main() {
                 << ", expected " << intermediateExpected[sample] << '\n';
       return 1;
     }
+  const auto upstreamSelectiveCopy =
+      fs::path(SKYAPO_TEST_SOURCE_DIR) /
+      "upstream/equalizerapo/Setup/config/selective_delay.txt";
+  Engine upstreamCopyGraph(48000, 2, 128, {L"L", L"R"});
+  upstreamCopyGraph.loadConfig(upstreamSelectiveCopy.string());
+  float upstreamCopySamples[2] = {0.75f, -0.25f};
+  upstreamCopyGraph.process(upstreamCopySamples, 1);
+  if (upstreamCopyGraph.filterCount() != 6 ||
+      std::abs(upstreamCopySamples[0] - 0.375f) > 1e-4f ||
+      std::abs(upstreamCopySamples[1] + 0.125f) > 1e-4f) {
+    std::cerr << "unmodified upstream selective_delay config failed through "
+                 "the actual Copy/FilterConfiguration path: "
+              << upstreamCopySamples[0] << ", " << upstreamCopySamples[1]
+              << '\n';
+    return 1;
+  }
   if (!write(path, "Copy: L=unknown\n"))
     return 1;
   bool badCopyRejected = false;
