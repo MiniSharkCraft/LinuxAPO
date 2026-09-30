@@ -103,3 +103,74 @@ jobs:
           namcap "$GITHUB_WORKSPACE/packaging/${package[0]}"
           python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
             --render-test-binary "$render_test" "${package[0]}"
+
+      - name: Stage package and renderer harness for clean-root test
+        run: |
+          package=(./packaging/skyapo-[0-9]*.pkg.tar.zst)
+          render_test=./packaging/src/skyapo-build/skyapo-render-tests
+          if [[ ! -f "${package[0]}" || "${#package[@]}" -ne 1 ]]; then
+            printf 'Expected exactly one SkyAPO package archive, found %s.\n' "${#package[@]}" >&2
+            exit 1
+          fi
+          if [[ ! -x "$render_test" ]]; then
+            printf 'Built WAV render verification harness is missing: %s\n' "$render_test" >&2
+            exit 1
+          fi
+          mkdir -p .ci-artifacts/skyapo-clean-install
+          cp "${package[0]}" .ci-artifacts/skyapo-clean-install/
+          cp "$render_test" .ci-artifacts/skyapo-clean-install/skyapo-render-tests
+          tar -C .ci-artifacts/skyapo-clean-install \
+            -cf .ci-artifacts/skyapo-clean-install.tar .
+
+      - name: Upload package for clean-root installation test
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skyapo-arch-package
+          path: .ci-artifacts/skyapo-clean-install.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  arch-clean-install:
+    needs: arch-package
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    steps:
+      - name: Check out package smoke harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download Arch package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: skyapo-arch-package
+          path: artifacts
+
+      - name: Install only clean-root test tooling
+        run: pacman -Syu --noconfirm --needed python systemd
+
+      - name: Confirm SkyAPO runtime dependencies are initially absent
+        run: |
+          for dependency in pipewire libsndfile fftw lilv qt6-base hicolor-icon-theme; do
+            if pacman -Q "$dependency" >/dev/null 2>&1; then
+              printf 'Fresh-root test image unexpectedly preinstalled SkyAPO dependency: %s\n' "$dependency" >&2
+              exit 1
+            fi
+          done
+          printf 'Fresh Arch root has no SkyAPO runtime dependencies preinstalled.\n'
+
+      - name: Install, smoke-test and remove from fresh Arch root
+        run: |
+          mkdir -p artifacts
+          tar -xf artifacts/skyapo-clean-install.tar -C artifacts
+          package=(./artifacts/skyapo-[0-9]*.pkg.tar.zst)
+          render_test=./artifacts/skyapo-render-tests
+          if [[ ! -f "${package[0]}" || "${#package[@]}" -ne 1 ]]; then
+            printf 'Expected exactly one SkyAPO package archive, found %s.\n' "${#package[@]}" >&2
+            exit 1
+          fi
+          if [[ ! -f "$render_test" ]]; then
+            printf 'Downloaded WAV render verification harness is missing: %s\n' "$render_test" >&2
+            exit 1
+          fi
+          chmod +x "$render_test"
+          python packaging/container_fresh_install_test.py \
+            --render-test-binary "$render_test" "${package[0]}"

@@ -143,12 +143,18 @@ def pacman_install_test(package, render_test_binary):
     installed_files = []
     install_succeeded = False
     try:
-        run(["pacman", "-U", "--noconfirm", str(package)])
+        installation = run(["pacman", "-U", "--noconfirm", str(package)])
         install_succeeded = True
+        print("Pacman install transaction:")
+        print(installation.stdout.rstrip())
+        if installation.stderr.strip():
+            print(installation.stderr.rstrip(), file=sys.stderr)
         query = run(["pacman", "-Q", "skyapo"])
         if not query.stdout.startswith("skyapo "):
             raise RuntimeError(f"pacman reported an unexpected package: {query.stdout}")
         print(f"Pacman installed package: {query.stdout.strip()}")
+        integrity = run(["pacman", "-Qk", "skyapo"])
+        print(f"Installed package file integrity: {integrity.stdout.strip()}")
         files = run(["pacman", "-Qlq", "skyapo"])
         installed_files = [
             pathlib.Path(line)
@@ -177,6 +183,11 @@ def pacman_install_test(package, render_test_binary):
                     print(detail, file=sys.stderr)
                 else:
                     raise RuntimeError(detail)
+            else:
+                print("Pacman removal transaction:")
+                print(removal.stdout.rstrip())
+                if removal.stderr.strip():
+                    print(removal.stderr.rstrip(), file=sys.stderr)
         if package_is_installed():
             detail = "pacman -Rns left the skyapo package installed"
             if primary_error is not None:
