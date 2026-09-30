@@ -70,8 +70,8 @@ def main():
         # Renderer parsing must start and reject an incomplete invocation; do
         # not open devices or spawn an external audio process in package tests.
         render = run([str(root / "usr/bin/skyapo-render")], env, expected=2)
-        if "missing value" not in render.stderr:
-            raise RuntimeError("offline renderer did not report its missing arguments")
+        if "usage: skyapo-render" not in render.stderr:
+            raise RuntimeError("offline renderer did not print its usage on missing arguments")
 
     print("Staged package paths, user unit and safe CLI/render entrypoints verified.")
 
