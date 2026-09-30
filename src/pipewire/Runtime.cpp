@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -34,6 +36,57 @@ uint64_t now() {
   timespec t{};
   clock_gettime(CLOCK_MONOTONIC, &t);
   return uint64_t(t.tv_sec) * 1000000000 + t.tv_nsec;
+}
+std::string readControlRequest(int fd) {
+  std::string frame;
+  std::array<char, settings::ipc::MaxRequestBytes + 1> buffer{};
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(1000);
+  for (;;) {
+    pollfd ready{fd, POLLIN, 0};
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    const int result = poll(&ready, 1, std::max<int64_t>(0, remaining.count()));
+    if (result <= 0)
+      throw std::runtime_error("malformed request frame (incomplete/timeout)");
+    const auto count = recv(fd, buffer.data(), buffer.size(), 0);
+    if (count == 0)
+      break;
+    if (count < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+        continue;
+      throw std::runtime_error("cannot read daemon IPC request");
+    }
+    if (frame.size() + static_cast<size_t>(count) >
+        settings::ipc::MaxRequestBytes)
+      throw std::runtime_error("request frame exceeds size limit");
+    frame.append(buffer.data(), static_cast<size_t>(count));
+  }
+  return frame;
+}
+void sendControlResponse(int fd, bool ok, const std::string &payload) {
+  const auto frame = settings::ipc::responseFrame(ok, payload);
+  size_t sent = 0;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(1000);
+  while (sent < frame.size()) {
+    const auto count = send(fd, frame.data() + sent, frame.size() - sent,
+                            MSG_NOSIGNAL);
+    if (count > 0) {
+      sent += static_cast<size_t>(count);
+      continue;
+    }
+    if (count < 0 &&
+        (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      pollfd ready{fd, POLLOUT, 0};
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              deadline - std::chrono::steady_clock::now());
+      if (poll(&ready, 1, std::max<int64_t>(0, remaining.count())) > 0)
+        continue;
+    }
+    break;
+  }
 }
 std::string get(const spa_dict *p, const char *key) {
   auto *v = spa_dict_lookup(p, key);
@@ -493,15 +546,23 @@ struct Runtime {
           accept4(r.server, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
       if (client < 0)
         break;
-      pollfd requestReady{client, POLLIN, 0};
-      const int ready = poll(&requestReady, 1, 1000);
-      char request[64]{};
-      const ssize_t count = ready > 0 ? recv(client, request, sizeof(request) - 1, 0) : 0;
-      const std::string command = count > 0 ? std::string(request, count) : "STATUS";
+      settings::ipc::DecodedRequest request;
+      try {
+        request = settings::ipc::decodeRequest(readControlRequest(client));
+      } catch (const std::exception &e) {
+        sendControlResponse(client, false, std::string(e.what()) + "\n");
+        close(client);
+        continue;
+      }
+      if (request.command == settings::ipc::Command::Invalid) {
+        sendControlResponse(client, false, request.error + "\n");
+        close(client);
+        continue;
+      }
       std::string text;
-      if (command.rfind("STATUS", 0) == 0) {
+      if (request.command == settings::ipc::Command::Status) {
         text = r.status();
-      } else if (command.rfind("RELOAD", 0) == 0) {
+      } else if (request.command == settings::ipc::Command::Reload) {
         try {
           r.reloadConfig();
           text = "Config reload succeeded\n";
@@ -510,13 +571,11 @@ struct Runtime {
           text = std::string("Config reload failed; keeping last valid graph: ") +
                  e.what() + "\n";
         }
-      } else if (command.rfind("STOP", 0) == 0) {
+      } else if (request.command == settings::ipc::Command::Stop) {
         r.stopping = 1;
         text = "Stopping skyapod\n";
-      } else {
-        text = "Unsupported daemon command\n";
       }
-      send(client, text.data(), text.size(), MSG_NOSIGNAL);
+      sendControlResponse(client, true, text);
       close(client);
       if (r.stopping) {
         pw_main_loop_quit(r.main);

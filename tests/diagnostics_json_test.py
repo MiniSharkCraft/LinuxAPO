@@ -50,8 +50,12 @@ def query_with_fixture(
 
     def respond():
         connection, _ = server.accept()
-        connection.recv(128)
-        connection.sendall(STATUS.encode("utf-8"))
+        request = connection.recv(128)
+        assert request == b"SKYAPO/1 STATUS\n"
+        payload = STATUS.encode("utf-8")
+        connection.sendall(
+            b"SKYAPO/1 OK " + str(len(payload)).encode("ascii") + b"\n" + payload
+        )
         connection.close()
         server.close()
 
