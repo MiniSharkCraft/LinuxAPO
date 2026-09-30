@@ -107,13 +107,15 @@ struct Runtime {
   pw_registry *registry{};
   pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
-  spa_source *rateEvent{}, *statusEvent{}, *sigint{}, *sigterm{},
-      *selectionTimer{}, *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
+  spa_source *rateEvent{}, *transitionEvent{}, *statusEvent{}, *sigint{},
+      *sigterm{}, *selectionTimer{}, *configEvent{}, *reloadTimer{},
+      *linkRetryTimer{};
   std::unique_ptr<skyapo::platform::ConfigWatcher> configWatcher;
   int server = -1;
   bool ownsSocket = false;
   bool cleaning = false;
   bool initialized = false;
+  enum class AudioMode : unsigned { Running, Quiescing, Stopping };
   std::array<void *, MaxChannels> inputs{}, outputs{};
   std::array<uint32_t, MaxChannels> ownInputs{};
   std::array<pw_proxy *, MaxChannels> links{};
@@ -127,12 +129,18 @@ struct Runtime {
   std::array<bool, MaxChannels> linked{};
   std::vector<float> work;
   std::unique_ptr<Engine> activeEngine;
+  std::unique_ptr<Engine> pendingEngine;
   std::vector<std::unique_ptr<Engine>> retiredEngines;
   std::unique_ptr<skyapo::pipewire::DefaultSinkVolumeMonitor>
       renderVolumeMonitor;
   skyapo::pipewire::DefaultSinkVolumeSnapshot renderVolume;
   std::atomic<Engine *> active{nullptr};
+  std::atomic<Engine *> pending{nullptr};
   std::atomic<unsigned> callbacksInFlight{0};
+  std::atomic<AudioMode> audioMode{AudioMode::Running};
+  std::atomic<bool> transitionComplete{false};
+  unsigned transitionCounter{};
+  unsigned transitionLength{};
   std::atomic<bool> resetMetrics{false};
   std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0},
       requestedQuantum{0};
@@ -163,8 +171,8 @@ struct Runtime {
       pw_core_disconnect(core);
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
-      for (auto *s : {rateEvent, statusEvent, sigint, sigterm, selectionTimer,
-                      configEvent, reloadTimer, linkRetryTimer})
+      for (auto *s : {rateEvent, transitionEvent, statusEvent, sigint, sigterm,
+                      selectionTimer, configEvent, reloadTimer, linkRetryTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
@@ -183,12 +191,78 @@ struct Runtime {
     error = e;
     pw_main_loop_quit(main);
   }
+  bool sameFormat(const Engine &a, const Engine &b) const noexcept {
+    return a.sampleRate() == b.sampleRate() && a.channels() == b.channels() &&
+           a.maxFrames() == b.maxFrames();
+  }
+  void promoteCompletedTransition() {
+    if (!transitionComplete.load(std::memory_order_seq_cst))
+      return;
+    if (!pendingEngine)
+      return;
+    if (activeEngine)
+      retiredEngines.push_back(std::move(activeEngine));
+    activeEngine = std::move(pendingEngine);
+    transitionCounter = 0;
+    transitionLength = 0;
+    transitionComplete.store(false, std::memory_order_seq_cst);
+  }
+  void reclaimRetired() {
+    promoteCompletedTransition();
+    if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
+      retiredEngines.clear();
+  }
+  void waitForTransition() {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(500);
+    while (pending.load(std::memory_order_seq_cst)) {
+      reclaimRetired();
+      if (!pending.load(std::memory_order_seq_cst))
+        return;
+      if (std::chrono::steady_clock::now() >= deadline)
+        throw std::runtime_error(
+            "timed out waiting for previous DSP graph transition");
+      std::this_thread::yield();
+    }
+    reclaimRetired();
+  }
+  bool quiesceAndDrain() {
+    auto mode = audioMode.load(std::memory_order_seq_cst);
+    if (mode == AudioMode::Stopping)
+      throw std::runtime_error("audio runtime is shutting down");
+    audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    if (waitForCallbacksToDrain())
+      return true;
+    audioMode.store(AudioMode::Running, std::memory_order_seq_cst);
+    return false;
+  }
+  void resumeAudio() noexcept {
+    if (audioMode.load(std::memory_order_seq_cst) != AudioMode::Stopping)
+      audioMode.store(AudioMode::Running, std::memory_order_seq_cst);
+  }
   void buildEngine(unsigned hz, unsigned blockFrames) {
     if (hz < 8000 || hz > 384000)
       throw std::runtime_error("unsupported graph rate " + std::to_string(hz));
     if (!blockFrames || blockFrames > MaxFrames)
       throw std::runtime_error("unsupported graph quantum " +
                                std::to_string(blockFrames));
+    // A format change cannot use FilterConfiguration's transition because the
+    // preallocated configurations have different rate/block capacities. If a
+    // same-format reload was mid-fade when PipeWire renegotiated, choose that
+    // already accepted pending config before rebuilding at the new format.
+    if (pending.load(std::memory_order_seq_cst)) {
+      if (!quiesceAndDrain())
+        throw std::runtime_error(
+            "timed out draining callbacks for PipeWire format rebuild");
+      Engine *next = pending.load(std::memory_order_seq_cst);
+      if (next) {
+        active.store(next, std::memory_order_seq_cst);
+        pending.store(nullptr, std::memory_order_seq_cst);
+        transitionComplete.store(true, std::memory_order_seq_cst);
+      }
+      reclaimRetired();
+      resumeAudio();
+    }
     auto *current = active.load(std::memory_order_acquire);
     if (current && current->sampleRate() == hz &&
         current->maxFrames() == blockFrames)
@@ -219,18 +293,31 @@ struct Runtime {
               << " channels, " << pointer->filterCount() << " filters\n";
   }
   void installEngine(std::unique_ptr<Engine> replacement) {
-    // Keep the old graph owned until every callback that could have loaded it
-    // has left. All graph destruction remains on this control thread.
-    if (activeEngine)
+    promoteCompletedTransition();
+    if (pendingEngine || pending.load(std::memory_order_seq_cst))
+      throw std::runtime_error("another DSP graph transition is still active");
+    auto *current = active.load(std::memory_order_seq_cst);
+    if (current && sameFormat(*current, *replacement)) {
+      // Keep both owners on the control thread. The callback only reads the
+      // published raw pointer and never destroys or mutates ownership.
+      retiredEngines.reserve(retiredEngines.size() + 1);
+      transitionCounter = 0;
+      transitionLength = std::max(1u, replacement->sampleRate() / 100);
+      auto *next = replacement.get();
+      pendingEngine = std::move(replacement);
+      pending.store(next, std::memory_order_seq_cst);
+      return;
+    }
+    // Format changes keep the old graph alive until every callback that could
+    // have loaded it has left; incompatible formats use a hard rebuild.
+    if (activeEngine) {
+      retiredEngines.reserve(retiredEngines.size() + 1);
       retiredEngines.push_back(std::move(activeEngine));
+    }
     auto *pointer = replacement.get();
     active.store(pointer, std::memory_order_seq_cst);
     activeEngine = std::move(replacement);
     reclaimRetired();
-  }
-  void reclaimRetired() {
-    if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
-      retiredEngines.clear();
   }
   bool waitForCallbacksToDrain() {
     const auto deadline = std::chrono::steady_clock::now() +
@@ -243,20 +330,18 @@ struct Runtime {
     return true;
   }
   unsigned saveCurrentPluginStates() {
-    Engine *current = active.exchange(nullptr, std::memory_order_seq_cst);
-    if (!current)
-      return 0;
-    if (!waitForCallbacksToDrain()) {
-      active.store(current, std::memory_order_seq_cst);
+    if (!quiesceAndDrain()) {
       throw std::runtime_error(
           "timed out waiting for realtime callbacks before CLAP state save");
     }
     try {
-      const auto saved = current->savePersistentPluginStates();
-      active.store(current, std::memory_order_seq_cst);
+      promoteCompletedTransition();
+      Engine *current = active.load(std::memory_order_seq_cst);
+      const auto saved = current ? current->savePersistentPluginStates() : 0;
+      resumeAudio();
       return saved;
     } catch (...) {
-      active.store(current, std::memory_order_seq_cst);
+      resumeAudio();
       throw;
     }
   }
@@ -265,14 +350,12 @@ struct Runtime {
     // callbacks before making any main-thread CLAP state calls. Never save in
     // Runtime/Engine/plugin destructors.
     cleaning = true;
+    audioMode.store(AudioMode::Stopping, std::memory_order_seq_cst);
     if (filter) {
       pw_filter_disconnect(filter);
       pw_filter_destroy(filter);
       filter = nullptr;
     }
-    Engine *current = active.exchange(nullptr, std::memory_order_seq_cst);
-    if (!current)
-      return;
     if (!waitForCallbacksToDrain()) {
       std::cerr << "skyapod: realtime callback drain exceeded 500 ms after "
                    "filter destruction; waiting before Engine teardown\n";
@@ -281,8 +364,19 @@ struct Runtime {
       // that a stuck callback could still be using. State save remains skipped.
       while (callbacksInFlight.load(std::memory_order_seq_cst) != 0)
         std::this_thread::yield();
-      return;
     }
+    // A callback may have completed the fade just before filter destruction;
+    // resolve owner movement only after the in-flight barrier.
+    if (pending.load(std::memory_order_seq_cst)) {
+      Engine *next = pending.load(std::memory_order_seq_cst);
+      active.store(next, std::memory_order_seq_cst);
+      pending.store(nullptr, std::memory_order_seq_cst);
+      transitionComplete.store(true, std::memory_order_seq_cst);
+    }
+    promoteCompletedTransition();
+    Engine *current = active.exchange(nullptr, std::memory_order_seq_cst);
+    if (!current)
+      return;
     try {
       const auto count = current->savePersistentPluginStates();
       if (count)
@@ -294,6 +388,10 @@ struct Runtime {
     }
   }
   void reloadConfig() {
+    // Only one pair of configurations may be in flight. A very short wait on
+    // the control thread lets realtime finish and retire the accepted graph
+    // before another candidate is prepared.
+    waitForTransition();
     auto *current = active.load(std::memory_order_acquire);
     const unsigned hz = current ? current->sampleRate() : requestedRate.load();
     const unsigned blockFrames = current ? current->maxFrames()
@@ -346,10 +444,17 @@ struct Runtime {
   static void rateChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
     try {
+      r.reclaimRetired();
       r.buildEngine(r.requestedRate.load(), r.requestedQuantum.load());
     } catch (const std::exception &e) {
       r.fail(e.what());
     }
+  }
+  static void transitionReady(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    r.reclaimRetired();
+    // Drop the one crossfade quantum from the steady-state signal statistics.
+    r.resetMetrics.store(true, std::memory_order_release);
   }
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
@@ -388,7 +493,14 @@ struct Runtime {
       out[c] =
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
+    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
+      for (unsigned c = 0; c < r.channels; ++c)
+        if (out[c])
+          std::fill_n(out[c], frames, 0.0f);
+      return;
+    }
     Engine *engine = r.active.load(std::memory_order_seq_cst);
+    Engine *nextEngine = r.pending.load(std::memory_order_seq_cst);
     if (!engine || engine->sampleRate() != hz ||
         engine->maxFrames() != frames) {
       for (unsigned c = 0; c < r.channels; ++c)
@@ -410,7 +522,23 @@ struct Runtime {
           r.work[f * r.channels + c] = s;
           raw += double(s) * s;
         }
-      engine->process(r.work.data(), n);
+      if (nextEngine) {
+        r.transitionCounter = engine->processTransitionTo(
+            *nextEngine, r.work.data(), n, r.transitionCounter,
+            r.transitionLength);
+        if (r.transitionCounter >= r.transitionLength) {
+          engine = nextEngine;
+          r.active.store(engine, std::memory_order_seq_cst);
+          r.pending.store(nullptr, std::memory_order_seq_cst);
+          r.transitionComplete.store(true, std::memory_order_seq_cst);
+          nextEngine = nullptr;
+          if (r.transitionEvent)
+            pw_loop_signal_event(pw_main_loop_get_loop(r.main),
+                                 r.transitionEvent);
+        }
+      } else {
+        engine->process(r.work.data(), n);
+      }
       for (unsigned f = 0; f < n; ++f)
         for (unsigned c = 0; c < r.channels; ++c) {
           float s = r.work[f * r.channels + c];
@@ -621,6 +749,8 @@ struct Runtime {
       << ")\nVirtual microphone: SkyAPO Virtual Mic\nVirtual node: "
       << pw_filter_get_node_id(filter)
       << " (skyapo.virtual_mic)\nFormat: F32 planar DSP\nChannels: " << channels
+      << "\nGraph transition: "
+      << (pending.load(std::memory_order_seq_cst) ? "crossfading" : "stable")
       << "\nChannel positions:";
     for (auto &p : ports)
       s << ' ' << p.channel;
@@ -733,6 +863,10 @@ struct Runtime {
       } else if (request.command ==
                  settings::ipc::Command::SetPluginParameter) {
         try {
+          if (r.pending.load(std::memory_order_seq_cst))
+            throw std::runtime_error(
+                "plugin controls are unavailable during the brief DSP graph "
+                "transition; retry shortly");
           auto *engine = r.active.load(std::memory_order_acquire);
           if (!engine)
             throw std::runtime_error("audio graph is not active");
@@ -749,6 +883,10 @@ struct Runtime {
       } else if (request.command ==
                  settings::ipc::Command::SetPluginBypass) {
         try {
+          if (r.pending.load(std::memory_order_seq_cst))
+            throw std::runtime_error(
+                "plugin controls are unavailable during the brief DSP graph "
+                "transition; retry shortly");
           auto *engine = r.active.load(std::memory_order_acquire);
           if (!engine)
             throw std::runtime_error("audio graph is not active");
@@ -817,6 +955,7 @@ struct Runtime {
     }();
     pw_core_add_listener(core, &coreHook, &ce, this);
     rateEvent = pw_loop_add_event(loop, rateChanged, this);
+    transitionEvent = pw_loop_add_event(loop, transitionReady, this);
     sigint = pw_loop_add_signal(loop, SIGINT, signal, this);
     sigterm = pw_loop_add_signal(loop, SIGTERM, signal, this);
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
@@ -825,8 +964,8 @@ struct Runtime {
     configWatcher = std::make_unique<skyapo::platform::ConfigWatcher>(config);
     configEvent = pw_loop_add_io(loop, configWatcher->fileDescriptor(),
                                  SPA_IO_IN, false, configReady, this);
-    if (!rateEvent || !sigint || !sigterm || !selectionTimer || !reloadTimer ||
-        !linkRetryTimer || !configEvent)
+    if (!rateEvent || !transitionEvent || !sigint || !sigterm ||
+        !selectionTimer || !reloadTimer || !linkRetryTimer || !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);
