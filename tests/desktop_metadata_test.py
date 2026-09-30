@@ -27,3 +27,6 @@ if launchable is None or launchable.text != desktop_path.name:
 for required in ("name", "summary", "metadata_license", "project_license"):
     if not root.findtext(required):
         raise SystemExit(f"AppStream metadata is missing {required}")
+homepage = root.find("url[@type='homepage']")
+if homepage is not None and "equalizerapo" in (homepage.text or "").lower():
+    raise SystemExit("AppStream homepage must identify SkyAPO, not Equalizer APO")

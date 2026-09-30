@@ -19,7 +19,6 @@
     <binary>skyapo-ui</binary>
     <binary>skyapo-render</binary>
   </provides>
-  <url type="homepage">https://sourceforge.net/projects/equalizerapo/</url>
   <releases>
     <release version="0.1.0" date="2026-09-30">
       <description><p>Initial Linux release with PipeWire realtime processing and an offline renderer.</p></description>
