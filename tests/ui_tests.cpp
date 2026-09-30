@@ -1,5 +1,6 @@
 #include "ConfigFile.h"
 #include "ChannelCopyEditor.h"
+#include "ConvolutionEditor.h"
 #include "IncludeEditor.h"
 #include "IIRFilterEditor.h"
 #include "MainWindow.h"
@@ -19,12 +20,16 @@
 #include "Editor/guis/StageFilterGUI.h"
 #include "Editor/guis/StageFilterGUIFactory.h"
 #include <QApplication>
+#include <QByteArray>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
+#include <QProcess>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -35,6 +40,49 @@
 #include <QTableWidget>
 #endif
 #include <iostream>
+
+namespace {
+bool writeTestImpulseResponse(const QString &path) {
+  QByteArray wav;
+  const auto append16 = [&wav](quint16 value) {
+    wav.append(static_cast<char>(value & 0xff));
+    wav.append(static_cast<char>((value >> 8) & 0xff));
+  };
+  const auto append32 = [&wav](quint32 value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+      wav.append(static_cast<char>((value >> shift) & 0xff));
+  };
+  wav.append("RIFF", 4);
+  append32(36 + 16);
+  wav.append("WAVEfmt ", 8);
+  append32(16);
+  append16(1); // PCM
+  append16(1); // mono
+  append32(48000);
+  append32(96000);
+  append16(2);
+  append16(16);
+  wav.append("data", 4);
+  append32(16);
+  for (int sample = 0; sample < 8; ++sample)
+    append16(static_cast<quint16>(sample * 256));
+
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) && file.write(wav) == wav.size();
+}
+
+bool configIsValid(const QString &cli, const QString &path,
+                   QString *diagnostic = nullptr) {
+  QProcess process;
+  process.start(cli, {QStringLiteral("config"), QStringLiteral("check"), path});
+  if (!process.waitForStarted() || !process.waitForFinished(10000))
+    return false;
+  if (diagnostic)
+    *diagnostic = QString::fromUtf8(process.readAllStandardError());
+  return process.exitStatus() == QProcess::NormalExit &&
+         process.exitCode() == 0;
+}
+} // namespace
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
@@ -303,8 +351,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (argc != 2) {
-    std::cerr << "UI integration test needs the delayed CLI fixture path\n";
+  if (argc != 3) {
+    std::cerr << "UI integration test needs CLI fixture and skyapo paths\n";
     return 1;
   }
   QTemporaryDir temporary;
@@ -335,6 +383,109 @@ int main(int argc, char **argv) {
     std::cerr << "Include editor changed the directive path on serialization\n";
     return 1;
   }
+
+  const QString convolutionConfigPath =
+      temporary.filePath("convolution-ui/config.txt");
+  const QString impulsePath =
+      temporary.filePath("convolution-ui/ir/room response.wav");
+  if (!QDir().mkpath(QFileInfo(impulsePath).absolutePath()) ||
+      !writeTestImpulseResponse(impulsePath)) {
+    std::cerr << "could not create convolution impulse-response fixture\n";
+    return 1;
+  }
+  QFile convolutionConfig(convolutionConfigPath);
+  if (!convolutionConfig.open(QIODevice::WriteOnly) ||
+      convolutionConfig.write("Convolution: ir/room response.wav\n") < 0) {
+    std::cerr << "could not create convolution config fixture\n";
+    return 1;
+  }
+  convolutionConfig.close();
+  ConvolutionEditor convolutionEditor("ir/room response.wav",
+                                      convolutionConfigPath);
+  auto *convolutionPath =
+      convolutionEditor.findChild<QLineEdit *>("convolutionPathEdit");
+  auto *convolutionStatus =
+      convolutionEditor.findChild<QLabel *>("convolutionStatus");
+  if (!convolutionPath || !convolutionStatus ||
+      !convolutionStatus->text().contains("File found")) {
+    std::cerr
+        << "Convolution editor did not resolve its config-relative path\n";
+    return 1;
+  }
+  QString convolutionCommand, convolutionParameters;
+  convolutionEditor.store(convolutionCommand, convolutionParameters);
+  if (convolutionCommand != "Convolution" ||
+      convolutionParameters != "ir/room response.wav") {
+    std::cerr
+        << "Convolution editor changed the directive path on serialization\n";
+    return 1;
+  }
+  convolutionPath->setText("missing response.wav");
+  convolutionEditor.update();
+  QMetaObject::invokeMethod(convolutionPath, "editingFinished",
+                            Qt::DirectConnection);
+  if (!convolutionStatus->text().contains("not found or unreadable")) {
+    std::cerr
+        << "Convolution editor did not report a missing impulse response\n";
+    return 1;
+  }
+#ifdef SKYAPO_UI_HAVE_CONVOLUTION_VALIDATION
+  MainWindow convolutionWindow(convolutionConfigPath,
+                               QString::fromLocal8Bit(argv[1]));
+  auto *integratedConvolution =
+      convolutionWindow.findChild<ConvolutionEditor *>();
+  auto *integratedConvolutionPath =
+      integratedConvolution
+          ? integratedConvolution->findChild<QLineEdit *>("convolutionPathEdit")
+          : nullptr;
+  auto *integratedConvolutionStatus =
+      integratedConvolution
+          ? integratedConvolution->findChild<QLabel *>("convolutionStatus")
+          : nullptr;
+  if (!integratedConvolutionPath || !integratedConvolutionStatus ||
+      integratedConvolutionPath->text() != "ir/room response.wav") {
+    std::cerr << "MainWindow did not create the Convolution directive row\n";
+    return 1;
+  }
+  QString diagnostic;
+  if (!configIsValid(QString::fromLocal8Bit(argv[2]), convolutionConfigPath,
+                     &diagnostic)) {
+    std::cerr << "config checker rejected the valid Convolution fixture: "
+              << diagnostic.toStdString() << '\n';
+    return 1;
+  }
+  integratedConvolutionPath->setText("missing response.wav");
+  QMetaObject::invokeMethod(integratedConvolutionPath, "editingFinished",
+                            Qt::DirectConnection);
+  if (!integratedConvolutionStatus->text().contains(
+          "not found or unreadable")) {
+    std::cerr
+        << "integrated Convolution row did not surface missing file state\n";
+    return 1;
+  }
+  bool savedConvolution = false;
+  for (auto *button : convolutionWindow.findChildren<QPushButton *>()) {
+    if (button->text() == "Save") {
+      button->click();
+      savedConvolution = true;
+      break;
+    }
+  }
+  QFile savedConvolutionConfig(convolutionConfigPath);
+  if (!savedConvolution || !savedConvolutionConfig.open(QIODevice::ReadOnly) ||
+      savedConvolutionConfig.readAll() !=
+          "Convolution: missing response.wav\n") {
+    std::cerr
+        << "Convolution editor did not round-trip an edited path to config\n";
+    return 1;
+  }
+  if (configIsValid(QString::fromLocal8Bit(argv[2]), convolutionConfigPath,
+                    &diagnostic) ||
+      !diagnostic.contains("cannot open convolution impulse response")) {
+    std::cerr << "config checker did not reject a missing Convolution file\n";
+    return 1;
+  }
+#endif
   QFile config(configPath);
   if (!config.open(QIODevice::WriteOnly) ||
       config.write(
@@ -365,11 +516,22 @@ int main(int argc, char **argv) {
     return 1;
   }
   const auto addActions = rowMenu->actions();
+  bool hasConvolutionTemplate = false;
+  for (const auto *action : addActions) {
+    if (action->data().canConvert<FilterTemplate>() &&
+        action->data().value<FilterTemplate>().getLine() ==
+            "Convolution: impulse-response.wav") {
+      hasConvolutionTemplate = true;
+      break;
+    }
+  }
   if (addActions.isEmpty() ||
       !addActions.first()->data().canConvert<FilterTemplate>() ||
       addActions.first()->data().value<FilterTemplate>().getLine() !=
-          "Preamp: 0 dB") {
-    std::cerr << "upstream row add-menu did not preserve filter templates\n";
+          "Preamp: 0 dB" ||
+      !hasConvolutionTemplate) {
+    std::cerr
+        << "row add-menu did not preserve upstream and Convolution templates\n";
     return 1;
   }
   if (construction.elapsed() >= 1000) {

@@ -401,6 +401,7 @@ if(SKYAPO_BUILD_UI)
     add_executable(skyapo-ui src/ui/main.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/ConfigFile.h
       src/ui/IncludeEditor.cpp src/ui/IncludeEditor.h
+      src/ui/ConvolutionEditor.cpp src/ui/ConvolutionEditor.h
       src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h
       src/ui/IIRFilterEditor.cpp src/ui/IIRFilterEditor.h)
     set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
@@ -411,16 +412,21 @@ if(SKYAPO_BUILD_UI)
     add_executable(skyapo-ui-test-cli tests/ui_cli_stub.cpp)
     add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/IncludeEditor.cpp
-      src/ui/IncludeEditor.h src/ui/ChannelCopyEditor.cpp
+      src/ui/IncludeEditor.h src/ui/ConvolutionEditor.cpp
+      src/ui/ConvolutionEditor.h src/ui/ChannelCopyEditor.cpp
       src/ui/ChannelCopyEditor.h src/ui/IIRFilterEditor.cpp
       src/ui/IIRFilterEditor.h)
     set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui-tests PRIVATE __forceinline=inline)
+    if(FFTW3F_FOUND)
+      target_compile_definitions(skyapo-ui-tests PRIVATE
+        SKYAPO_UI_HAVE_CONVOLUTION_VALIDATION=1)
+    endif()
     target_link_libraries(skyapo-ui-tests PRIVATE skyapo-eapo-editor)
     add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests
-      $<TARGET_FILE:skyapo-ui-test-cli>)
+      $<TARGET_FILE:skyapo-ui-test-cli> $<TARGET_FILE:skyapo>)
     set_tests_properties(skyapo-ui-editor PROPERTIES
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

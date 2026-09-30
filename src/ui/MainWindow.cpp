@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "ChannelCopyEditor.h"
+#include "ConvolutionEditor.h"
 #include "IncludeEditor.h"
 #include "IIRFilterEditor.h"
 
@@ -298,6 +299,8 @@ void MainWindow::rebuildRows() {
     if (colon >= 0) {
       QString command = raw.left(colon).trimmed();
       QString parameters = raw.mid(colon + 1).trimmed();
+      if (command == "Convolution")
+        editor = new ConvolutionEditor(parameters, configPath, rowTable);
       if (command == "Include")
         editor = new IncludeEditor(parameters, configPath, rowTable);
       if (!editor)
@@ -391,6 +394,10 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
   menu->addSeparator();
   append(delay.createFilterTemplates());
   append(stage.createFilterTemplates());
+  menu->addAction(tr("Convolution (impulse response)"))
+      ->setData(QVariant::fromValue(FilterTemplate(
+          tr("Convolution (impulse response)"),
+          "Convolution: impulse-response.wav", {tr("Advanced filters")})));
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   menu->addSeparator();
   append(graphicEQ.createFilterTemplates());
