@@ -139,7 +139,8 @@ def main():
         "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
-        "vst3-live-param", "vst2-live-param", "plugin-bypass"
+        "vst3-live-param", "vst2-live-param", "plugin-bypass",
+        "renegotiate"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
@@ -147,7 +148,7 @@ def main():
             "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
-            "vst2-live-param|plugin-bypass")
+            "vst2-live-param|plugin-bypass|renegotiate")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
@@ -163,6 +164,7 @@ def main():
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
     plugin_bypass = mode == "plugin-bypass"
+    renegotiate = mode == "renegotiate"
     plugin_chain = plugin_live or plugin_bypass or latency_plugin
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
@@ -187,6 +189,14 @@ def main():
         state_home.mkdir(mode=0o700)
         rate_config = make_rate_config(
             pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
+        if renegotiate:
+            text = rate_config.read_text()
+            text = text.replace(
+                "default.clock.allowed-rates = [ 48000 ]",
+                "default.clock.allowed-rates = [ 44100 48000 96000 ]")
+            if "default.clock.allowed-rates = [ 44100 48000 96000 ]" not in text:
+                raise RuntimeError("could not enable runtime test sample rates")
+            rate_config.write_text(text)
         included_config = config_home / "include-reload-root.txt"
         include_directory = config_home / "includes"
         include_child = include_directory / "include-reload-child.txt"
@@ -272,6 +282,54 @@ def main():
             old_virtual_id = virtual_source_id(status)
             assert_virtual_source(pw_dump, env, old_virtual_id)
 
+            if renegotiate:
+                metadata = shutil.which("pw-metadata")
+                if not metadata:
+                    raise RuntimeError("pw-metadata is required for renegotiate E2E")
+
+                def force_clock(rate, quantum):
+                    for key, value in (("clock.force-quantum", quantum),
+                                       ("clock.force-rate", rate)):
+                        run([metadata, "-n", "settings", "0", key,
+                             str(value), "Spa:Int"], env, timeout=5)
+                    deadline = time.monotonic() + 12
+                    current_status = ""
+                    while time.monotonic() < deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        current_status = result.stdout
+                        if (result.returncode == 0 and
+                                f"Sample rate: {rate} Hz" in current_status and
+                                f"Quantum: {quantum}" in current_status and
+                                "Active capture links: " +
+                                f"{channel_count}/{channel_count}" in
+                                current_status):
+                            return current_status
+                        time.sleep(0.05)
+                    raise RuntimeError(
+                        f"runtime format did not renegotiate to {rate} Hz / "
+                        f"{quantum}:\n{current_status}")
+
+                for new_rate, new_quantum in ((48000, 512),
+                                              (44100, 512), (96000, 2048)):
+                    changed_status = force_clock(new_rate, new_quantum)
+                    status = changed_status
+                    output = run(
+                        [str(consumer), "--expected-rate", str(new_rate),
+                         "--expected-db", "-6"], env, timeout=12)
+                    ratio = re.search(r"RMS ratio to expected: ([0-9.]+)",
+                                      output.stdout)
+                    if (not ratio or
+                            abs(float(ratio.group(1)) - 1.0) >= 0.03):
+                        raise RuntimeError(
+                            "format renegotiation did not preserve processed "
+                            f"audio at {new_rate}/{new_quantum}:\n"
+                            f"{changed_status}\n{output.stdout}")
+                    print(f"Live graph reconfigured to {new_rate} Hz / "
+                          f"{new_quantum}; independent capture ratio "
+                          f"{float(ratio.group(1)):.6f}.")
+                    sample_rate = new_rate
+
             link_id = destroy_capture_link(pw_cli, pw_dump, env, status)
             deadline = time.monotonic() + 8
             recovered_status = ""
@@ -287,6 +345,7 @@ def main():
             else:
                 raise RuntimeError(
                     f"capture link {link_id} was not restored:\n{recovered_status}")
+            status = recovered_status
 
             if source_replug or server_restart:
                 print("Stopping selected deterministic source…", flush=True)

@@ -825,6 +825,21 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       include-reload)
   set_tests_properties(skyapo-pipewire-e2e-include-reload
     PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
+  add_test(NAME skyapo-pipewire-e2e-renegotiate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      renegotiate)
+  set_tests_properties(skyapo-pipewire-e2e-renegotiate
+    PROPERTIES TIMEOUT 100 LABELS "pipewire;integration;recovery")
   if(SKYAPO_TEST_CLAP_DIR)
     add_test(NAME skyapo-pipewire-e2e-plugin-bypass
       COMMAND ${Python3_EXECUTABLE}
