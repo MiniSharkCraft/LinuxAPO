@@ -22,6 +22,9 @@
 #include "LoudnessCorrectionFilterFactory.h"
 #include "LoudnessCorrectionFilter.h"
 #include "LoudnessVolumeProvider.h"
+#ifdef SKYAPO_HAVE_MUPARSERX
+#include "UpstreamRegexFunctions.h"
+#endif
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
@@ -213,6 +216,8 @@ void Engine::loadConfig(const std::string &path) {
                                static_cast<mup::float_type>(channelCount));
   expressionParser.DefineConst(L"outputChannelCount",
                                static_cast<mup::float_type>(channelCount));
+  expressionParser.DefineFun(new skyapo::config::RegexSearchFunction());
+  expressionParser.DefineFun(new skyapo::config::RegexReplaceFunction());
   auto *expressionParserPtr = &expressionParser;
 #else
   mup::ParserX *expressionParserPtr = nullptr;

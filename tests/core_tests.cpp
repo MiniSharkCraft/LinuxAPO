@@ -809,6 +809,20 @@ int main() {
     return 1;
   }
 
+  if (!write(expressionRoot,
+             "Preamp: `(sizeof(regexSearch(\"freq ([0-9]+)\", \"freq 43\")) "
+             "> 1) && (regexReplace(\"a\", \"a-b\", \"x\") == \"x-b\") "
+             "? -6 : 0` dB\n"))
+    return 1;
+  expressionEngine.loadConfig(expressionRoot.string());
+  float regexSamples[2] = {1.0f, -1.0f};
+  expressionEngine.process(regexSamples, 1);
+  if (std::abs(regexSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(regexSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "upstream regexSearch/regexReplace functions mismatched\n";
+    return 1;
+  }
+
   if (!write(expressionRoot, "Preamp: `1 +` dB\n"))
     return 1;
   bool inlineExpressionErrorHasLocation = false;
