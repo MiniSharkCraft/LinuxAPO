@@ -134,7 +134,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Attach live root-config validation diagnostics to their corresponding filter row (red line number, hover/accessibility text), and clear stale row markers on edits/revalidation; Qt coverage verifies invalid→valid transitions.
 - [x] Carry parser-owned Include ancestry into JSON diagnostics; map nested-file errors back to the root Include row and provide an action that opens/selects the actual source line.
 - [x] Add `File → Save Configuration As…` with atomic `QSaveFile` writing, editor/recent-file rebinding, live validation restart, and preservation of relative `Include:` targets across destination directories. Refuse Include forms that cannot be rebased safely; Qt integration tests run the real `skyapo config check` on nested quoted/commented Includes and a symlinked root before/after.
-- [ ] Finish remaining GUI device/status/config workflows.
+- [x] Finish GUI device/status/config workflows: stable device selection/refresh, daemon start/stop serialization, actual status refresh, save-before-check/reload, success/failure diagnostics and reload status refresh are covered by `skyapo-ui-editor`.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
 ## 0.9.x — distribution and release hardening
@@ -150,7 +150,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] AppStream metadata, branded icon and man pages. No MIME association is declared: current EAPO configs are ordinary `.txt` files, and claiming that broad MIME type would hijack unrelated text documents.
 - [x] Install the original Equalizer APO GPL text and pinned CLAP/VST3 MIT license texts with the package; staged CMake install test verifies each file and the third-party notice inventory.
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
-- [x] Add opt-in isolated PipeWire E2E CTest: launch private server + deterministic capture source + `skyapod` + independent virtual-mic consumer; verify runtime status and -6 dB output. The matrix forces and independently checks mono/stereo at 44.1/48/96 kHz; current local full PipeWire-enabled regression passed 47/47 on 2026-10-01. All six rate/layout cases recorded expected -6 dB audio with 0 audited callback allocations/deallocations and 0 overruns. Enabled in the normal hosted Linux CI job; hosted result still pending.
+- [x] Add opt-in isolated PipeWire E2E CTest: launch private server + deterministic capture source + `skyapod` + independent virtual-mic consumer; verify runtime status and -6 dB output. The matrix forces and independently checks mono/stereo at 44.1/48/96 kHz; current local full PipeWire-enabled regression passed 50/50 on 2026-10-01. All six rate/layout cases recorded expected -6 dB audio with 0 audited callback allocations/deallocations and 0 overruns. Enabled in the normal hosted Linux CI job; hosted result still pending.
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
 - [x] Add an incremental `clang-format` CI check for changed SkyAPO-owned C++ files, excluding upstream and generated code; verify hosted workflow runs after publishing/connecting the repository.
 - [x] Document Windows Equalizer APO → Linux SkyAPO config migration and compatibility gaps.
