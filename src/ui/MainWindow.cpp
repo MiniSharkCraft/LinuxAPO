@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "ChannelCopyEditor.h"
 #include "IncludeEditor.h"
+#include "IIRFilterEditor.h"
 
 #include "Editor/FilterTableRow.h"
 #include "Editor/FilterTemplate.h"
@@ -300,6 +301,8 @@ void MainWindow::rebuildRows() {
       if (command == "Include")
         editor = new IncludeEditor(parameters, configPath, rowTable);
       if (!editor)
+        editor = IIRFilterEditor::create(command, parameters, rowTable);
+      if (!editor)
         editor = ChannelCopyEditor::create(command, parameters, rowTable);
       if (!editor)
         editor = preampFactory.createFilterGUI(command, parameters);
@@ -380,6 +383,11 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
                                          "Copy: L=L", {tr("Basic filters")})));
   menu->addSection(tr("Parametric filters"));
   append(biquad.createFilterTemplates());
+  menu->addAction(tr("Custom IIR filter"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Custom IIR filter"),
+                         "Filter: ON IIR Order 2 Coefficients 1 0 0 1 0 0",
+                         {tr("Parametric filters")})));
   menu->addSeparator();
   append(delay.createFilterTemplates());
   append(stage.createFilterTemplates());

@@ -1,6 +1,7 @@
 #include "ConfigFile.h"
 #include "ChannelCopyEditor.h"
 #include "IncludeEditor.h"
+#include "IIRFilterEditor.h"
 #include "MainWindow.h"
 
 #include "Editor/FilterTable.h"
@@ -27,6 +28,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
@@ -246,6 +248,61 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  auto *iirEditor = IIRFilterEditor::create(
+      "Filter 2", "ON IIR Order 2 Coefficients 0.0380602 0.0761205 "
+                  "0.0380602 1.2706 -1.84776 0.729402");
+  if (!iirEditor || iirEditor->orderControl()->value() != 2 ||
+      iirEditor->coefficientTable()->rowCount() != 3) {
+    std::cerr << "IIR visual editor did not load upstream coefficient order\n";
+    delete iirEditor;
+    return 1;
+  }
+  auto *iirNumerator = iirEditor->findChild<QLineEdit *>("iirCoefficient_b_0");
+  if (!iirNumerator || iirNumerator->text() != "0.0380602") {
+    std::cerr << "IIR visual editor did not expose the b0 coefficient\n";
+    delete iirEditor;
+    return 1;
+  }
+  int iirModelUpdates = 0;
+  QObject::connect(iirEditor, &IFilterGUI::updateModel,
+                   [&iirModelUpdates] { ++iirModelUpdates; });
+  iirNumerator->setText("not-a-number");
+  if (iirModelUpdates != 0) {
+    std::cerr << "IIR editor propagated a non-numeric intermediate value\n";
+    delete iirEditor;
+    return 1;
+  }
+  iirNumerator->setText("0.05");
+  if (iirModelUpdates != 1) {
+    std::cerr << "IIR editor did not propagate a valid coefficient edit\n";
+    delete iirEditor;
+    return 1;
+  }
+  iirEditor->orderControl()->setValue(3);
+  iirEditor->store(storedCommand, storedParameters);
+  delete iirEditor;
+  if (storedCommand != "Filter" ||
+      storedParameters != "ON IIR Order 3 Coefficients 0.05 0.0761205 "
+                          "0.0380602 0 1.2706 -1.84776 0.729402 0") {
+    std::cerr << "IIR visual editor failed coefficient/order serialization\n";
+    return 1;
+  }
+  if (IIRFilterEditor::create("Filter", "ON IIR Order 1 Coefficients 1 0 1") ||
+      IIRFilterEditor::create("Filter",
+                              "ON IIR Order 1 Coefficients 1 0 1 0 extra") ||
+      IIRFilterEditor::create("Filter",
+                              "ON IIR Order 1 Coefficients ${b0} 0 1 0") ||
+      IIRFilterEditor::create("filter",
+                              "ON IIR Order 1 Coefficients 1 0 1 0") ||
+      IIRFilterEditor::create("Filter",
+                              "on iir Order 1 Coefficients 1 0 1 0") ||
+      IIRFilterEditor::create("Filter",
+                              "ON IIR Order 257 Coefficients 1 0 1 0") ||
+      IIRFilterEditor::create("Copy", "ON IIR Order 1 Coefficients 1 0 1 0")) {
+    std::cerr << "IIR visual editor accepted unsupported raw syntax\n";
+    return 1;
+  }
+
   if (argc != 2) {
     std::cerr << "UI integration test needs the delayed CLI fixture path\n";
     return 1;
@@ -282,8 +339,9 @@ int main(int argc, char **argv) {
   if (!config.open(QIODevice::WriteOnly) ||
       config.write(
           "Preamp: 0 dB\n; keep order\nPreamp: -6 dB\nInclude: child.txt\n"
-          "Channel: L R\nCopy: L=R R=L\n") <
-          0) {
+          "Channel: L R\nCopy: L=R R=L\n"
+          "Filter: ON IIR Order 1 Coefficients 1 0 1 0\n"
+          "Filter: ON IIR Order 1 Coefficients ${b0} 0 1 0\n") < 0) {
     std::cerr << "could not create temporary UI config\n";
     return 1;
   }
@@ -294,9 +352,10 @@ int main(int argc, char **argv) {
   QElapsedTimer construction;
   construction.start();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.findChildren<FilterTableRow *>().size() != 6 ||
+  if (window.findChildren<FilterTableRow *>().size() != 8 ||
       window.findChildren<IncludeEditor *>().size() != 1 ||
-      window.findChildren<ChannelCopyEditor *>().size() != 2) {
+      window.findChildren<ChannelCopyEditor *>().size() != 2 ||
+      window.findChildren<IIRFilterEditor *>().size() != 1) {
     std::cerr << "upstream FilterTableRow was not used by the Linux editor\n";
     return 1;
   }
@@ -322,6 +381,16 @@ int main(int argc, char **argv) {
     std::cerr << "Linux FilterTable adapter did not expose ordered rows\n";
     return 1;
   }
+  auto *integratedIir = window.findChild<IIRFilterEditor *>();
+  auto *integratedCoefficient =
+      integratedIir
+          ? integratedIir->findChild<QLineEdit *>("iirCoefficient_b_0")
+          : nullptr;
+  if (!integratedCoefficient) {
+    std::cerr << "MainWindow did not build the IIR visual row\n";
+    return 1;
+  }
+  integratedCoefficient->setText("0.5");
   table->setSelection(table->itemAt(0));
   if (table->getFocusedItem() != table->itemAt(0) ||
       !table->getSelectedItems().contains(table->itemAt(0))) {
@@ -354,7 +423,9 @@ int main(int argc, char **argv) {
   if (!reordered.open(QIODevice::ReadOnly) ||
       reordered.readAll() !=
           "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\nInclude: child.txt\n"
-          "Channel: L R\nCopy: L=R R=L\n") {
+          "Channel: L R\nCopy: L=R R=L\n"
+          "Filter: ON IIR Order 1 Coefficients 0.5 0 1 0\n"
+          "Filter: ON IIR Order 1 Coefficients ${b0} 0 1 0\n") {
     std::cerr << "Alt+Down did not reorder and save the selected config row\n";
     return 1;
   }
