@@ -285,8 +285,8 @@ void Engine::loadConfig(const std::string &path) {
   } catch (const std::exception &error) {
     const std::string message = error.what();
     for (const auto &parsed : candidate) {
-      const std::string prefix = parsed.source.string() + ":" +
-                                 std::to_string(parsed.line) + ":";
+      const std::string prefix =
+          parsed.source.string() + ":" + std::to_string(parsed.line) + ":";
       if (message.rfind(prefix, 0) == 0 && !parsed.includeChain.empty())
         throw ConfigError(message, parsed.includeChain);
     }
@@ -304,6 +304,13 @@ void Engine::loadConfig(const std::string &path) {
 
   std::vector<FilterInfo *> infos;
   infos.reserve(newGraph.size());
+  unsigned allChannelCount = static_cast<unsigned>(channelNames.size());
+  for (const auto &node : newGraph) {
+    for (const unsigned channel : node.inputs)
+      allChannelCount = std::max(allChannelCount, channel + 1);
+    for (const unsigned channel : node.outputs)
+      allChannelCount = std::max(allChannelCount, channel + 1);
+  }
   auto freeInfos = [&infos] {
     for (auto *info : infos) {
       MemoryHelper::free(info->inChannels);
@@ -350,8 +357,7 @@ void Engine::loadConfig(const std::string &path) {
   void *memory = MemoryHelper::alloc(sizeof(FilterConfiguration));
   FilterConfiguration *built = nullptr;
   try {
-    built =
-        new (memory) FilterConfiguration(&context, infos, channelNames.size());
+    built = new (memory) FilterConfiguration(&context, infos, allChannelCount);
   } catch (...) {
     MemoryHelper::free(memory);
     freeInfos();
@@ -377,8 +383,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 
   for (auto &parsed : candidate) {
     IFilter *filter = parsed.filter.get();
-    const auto location = parsed.source.string() + ":" +
-                          std::to_string(parsed.line) + ": ";
+    const auto location =
+        parsed.source.string() + ":" + std::to_string(parsed.line) + ": ";
     if (dynamic_cast<LoudnessCorrectionFilter *>(filter) &&
         !allowPendingEndpointVolume &&
         !skyapo::platform::LoudnessVolumeProvider::available())
@@ -400,8 +406,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
       const double gain = biquad->getDbGain();
       const bool isShelf = biquad->getType() == BiQuad::LOW_SHELF ||
                            biquad->getType() == BiQuad::HIGH_SHELF;
-      const bool gainIsUsed =
-          biquad->getType() == BiQuad::PEAKING || isShelf;
+      const bool gainIsUsed = biquad->getType() == BiQuad::PEAKING || isShelf;
       const double linearGain = std::pow(10.0, gain / 40.0);
       bool shapeValid = std::isfinite(shape) && shape > 0.0;
       if (isShelf && biquad->getIsBandwidthOrS())
@@ -413,9 +418,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
                                  "below the Nyquist frequency (" +
                                  std::to_string(rate / 2.0) + " Hz)");
       if (!std::isfinite(gain) ||
-          (gainIsUsed &&
-           (!std::isfinite(linearGain) ||
-            linearGain > std::numeric_limits<float>::max())) ||
+          (gainIsUsed && (!std::isfinite(linearGain) ||
+                          linearGain > std::numeric_limits<float>::max())) ||
           !shapeValid)
         throw std::runtime_error(
             location +
@@ -484,12 +488,6 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
     for (const auto &name : outputNames) {
       auto it = std::find(allNames.begin(), allNames.end(), name);
       if (it == allNames.end()) {
-        if (std::find(channelNames.begin(), channelNames.end(), name) ==
-            channelNames.end())
-          throw std::runtime_error(
-              parsed.source.string() + ":" + std::to_string(parsed.line) +
-              ": Copy creates channel '" + StringHelper::toString(name, 65001) +
-              "' beyond the fixed PipeWire output layout");
         node.outputs.push_back(static_cast<unsigned>(allNames.size()));
         allNames.push_back(name);
       } else {
@@ -541,7 +539,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   includeStack.push_back(normalizedPath);
   struct PopPath {
     std::vector<std::filesystem::path> &stack;
-    ~PopPath() { stack.pop_back(); }
+    ~PopPath() {
+      stack.pop_back();
+    }
   } popPath{includeStack};
 
   const auto widePath = StringHelper::toWString(normalizedPath.string(), 65001);
@@ -628,8 +628,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     std::wstring command = StringHelper::trim(line.substr(0, colon));
     std::wstring params = StringHelper::trim(line.substr(colon + 1));
 
-    const bool parentActive =
-        conditions.empty() || conditions.back().active;
+    const bool parentActive = conditions.empty() || conditions.back().active;
     if (command == L"If") {
       const bool condition = parentActive && evaluateCondition(params, lineNo);
       conditions.push_back(
@@ -683,8 +682,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       conditions.pop_back();
       continue;
     }
-    const bool conditionActive =
-        conditions.empty() || conditions.back().active;
+    const bool conditionActive = conditions.empty() || conditions.back().active;
     if (!conditionActive)
       continue;
 
@@ -786,7 +784,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
 #if !defined(SKYAPO_HAVE_LV2) && !defined(SKYAPO_HAVE_CLAP)
       if (originalCommand == L"Plugin")
         throw std::runtime_error(normalizedPath.string() + ":" +
-                                 std::to_string(lineNo) + ": Plugin requires "
+                                 std::to_string(lineNo) +
+                                 ": Plugin requires "
                                  "native plugin host support");
 #endif
       throw std::runtime_error(normalizedPath.string() + ":" +

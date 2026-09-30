@@ -1100,6 +1100,26 @@ int main() {
                 << routedExpected[sample] << '\n';
       return 1;
     }
+  if (!write(path, "Copy: L2=L R2=R\n"
+                   "Channel: L2 R2\n"
+                   "Preamp: -6 dB\n"
+                   "Copy: L=0.5*L+0.5*L2 R=0.5*R+0.5*R2\n"))
+    return 1;
+  Engine intermediate(48000, 2, 128, {L"L", L"R"});
+  intermediate.loadConfig(path);
+  float intermediateSamples[4] = {1.0f, 10.0f, -0.5f, -5.0f};
+  intermediate.process(intermediateSamples, 2);
+  const float mixedGain = 0.5f * (1.0f + gain);
+  const float intermediateExpected[4] = {mixedGain, 10.0f * mixedGain,
+                                         -0.5f * mixedGain, -5.0f * mixedGain};
+  for (size_t sample = 0; sample < 4; ++sample)
+    if (std::abs(intermediateSamples[sample] - intermediateExpected[sample]) >
+        1e-4f) {
+      std::cerr << "upstream Copy intermediate-channel processing mismatch at "
+                << sample << ": got " << intermediateSamples[sample]
+                << ", expected " << intermediateExpected[sample] << '\n';
+      return 1;
+    }
   if (!write(path, "Copy: L=unknown\n"))
     return 1;
   bool badCopyRejected = false;

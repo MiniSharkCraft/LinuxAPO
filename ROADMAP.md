@@ -27,7 +27,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
 - [x] Map `Stage: capture` to the Linux processing path and skip Windows pre/post-mix sections with Include-local stage scope.
 - Acceptance: Include trees, Channel selection, Copy remapping and error paths have deterministic offline expected-sample tests; realtime allocation test still passes; -6 dB capture probe still passes.
-- [x] Core and allocation tests exercise actual upstream Channel/Copy implementations; new Copy output channels are rejected with file/line because the current virtual source layout is fixed.
+- [x] Core and allocation tests exercise actual upstream Channel/Copy implementations, including EAPO intermediate `L2`/`R2` channels that are processed in `FilterConfiguration` scratch planes and mixed back into the fixed physical output layout.
 - Acceptance: hot reload also passes a live valid→valid and valid→invalid daemon check without changing the active audio chain on failure.
 - [x] Live acceptance: an independent PipeWire client measured −3 dB after valid reload, then still measured −3 dB after an invalid replacement; status remained streaming and showed the parse error.
 
