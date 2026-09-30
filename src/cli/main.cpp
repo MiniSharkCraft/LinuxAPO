@@ -15,11 +15,333 @@
 #endif
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <fcntl.h>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <locale>
+#include <optional>
+#include <sstream>
 #include <thread>
 #include <unistd.h>
 namespace {
+std::string jsonString(const std::string &value) {
+  std::ostringstream out;
+  out << '"';
+  constexpr char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < value.size(); ++i) {
+    const auto ch = static_cast<unsigned char>(value[i]);
+    switch (ch) {
+    case '"':
+      out << "\\\"";
+      break;
+    case '\\':
+      out << "\\\\";
+      break;
+    case '\b':
+      out << "\\b";
+      break;
+    case '\f':
+      out << "\\f";
+      break;
+    case '\n':
+      out << "\\n";
+      break;
+    case '\r':
+      out << "\\r";
+      break;
+    case '\t':
+      out << "\\t";
+      break;
+    default:
+      if (ch < 0x20) {
+        out << "\\u00" << hex[ch >> 4] << hex[ch & 0x0f];
+      } else if (ch >= 0x80) {
+        size_t length = 0;
+        if (ch >= 0xc2 && ch <= 0xdf)
+          length = 2;
+        else if (ch >= 0xe0 && ch <= 0xef)
+          length = 3;
+        else if (ch >= 0xf0 && ch <= 0xf4)
+          length = 4;
+        bool valid = length && i + length <= value.size();
+        for (size_t j = 1; valid && j < length; ++j) {
+          const auto continuation =
+              static_cast<unsigned char>(value[i + j]);
+          valid = continuation >= 0x80 && continuation <= 0xbf;
+          if (j == 1) {
+            if (ch == 0xe0)
+              valid = continuation >= 0xa0 && continuation <= 0xbf;
+            else if (ch == 0xed)
+              valid = continuation >= 0x80 && continuation <= 0x9f;
+            else if (ch == 0xf0)
+              valid = continuation >= 0x90 && continuation <= 0xbf;
+            else if (ch == 0xf4)
+              valid = continuation >= 0x80 && continuation <= 0x8f;
+          }
+        }
+        if (valid) {
+          out.write(value.data() + i, static_cast<std::streamsize>(length));
+          i += length - 1;
+        } else {
+          out << "\\ufffd";
+        }
+      } else {
+        out << static_cast<char>(ch);
+      }
+    }
+  }
+  out << '"';
+  return out.str();
+}
+
+std::optional<std::string> statusValue(const std::string &status,
+                                       const std::string &label) {
+  const std::string prefix = label + ": ";
+  size_t begin = 0;
+  while (begin < status.size()) {
+    const size_t end = status.find('\n', begin);
+    const auto line = status.substr(begin, end == std::string::npos
+                                               ? std::string::npos
+                                               : end - begin);
+    if (line.rfind(prefix, 0) == 0)
+      return line.substr(prefix.size());
+    if (end == std::string::npos)
+      break;
+    begin = end + 1;
+  }
+  return std::nullopt;
+}
+
+std::optional<unsigned long long> unsignedValue(const std::string &value) {
+  if (value.empty())
+    return std::nullopt;
+  char *end = nullptr;
+  const auto number = std::strtoull(value.c_str(), &end, 10);
+  if (end == value.c_str() || (*end && *end != ' '))
+    return std::nullopt;
+  return number;
+}
+
+std::optional<double> decimalValue(const std::string &value) {
+  if (value.empty())
+    return std::nullopt;
+  char *end = nullptr;
+  const auto number = std::strtod(value.c_str(), &end);
+  if (end == value.c_str() || !std::isfinite(number))
+    return std::nullopt;
+  return number;
+}
+
+std::optional<double> statusNumber(const std::string &status,
+                                   const std::string &label) {
+  const auto value = statusValue(status, label);
+  return value ? decimalValue(*value) : std::nullopt;
+}
+
+std::optional<unsigned long long> statusUnsigned(const std::string &status,
+                                                 const std::string &label) {
+  const auto value = statusValue(status, label);
+  return value ? unsignedValue(*value) : std::nullopt;
+}
+
+void writeJsonNumber(std::ostream &out, const std::optional<double> &value) {
+  if (value)
+    out << std::setprecision(17) << *value;
+  else
+    out << "null";
+}
+
+void writeJsonUnsigned(std::ostream &out,
+                       const std::optional<unsigned long long> &value) {
+  if (value)
+    out << *value;
+  else
+    out << "null";
+}
+
+void writeDiagnosticsJson(const std::string &status) {
+  const auto daemon = statusValue(status, "Daemon");
+  const auto configuredDevice = settings::device();
+  const auto selectedDevice = statusValue(status, "Selected device");
+  const auto capture = statusValue(status, "Capture node");
+  const auto virtualMic = statusValue(status, "Virtual microphone");
+  const auto virtualNode = statusValue(status, "Virtual node");
+  const auto format = statusValue(status, "Format");
+  const auto channelPositions = statusValue(status, "Channel positions");
+  const auto channels = statusUnsigned(status, "Channels");
+  const auto sampleRate = statusUnsigned(status, "Sample rate");
+  const auto quantum = statusUnsigned(status, "Quantum");
+  const auto filters = statusUnsigned(status, "Filters");
+  const auto blocks = statusUnsigned(status, "Processed blocks");
+  const auto overruns = statusUnsigned(status, "Overruns");
+  const auto activeLinks = statusValue(status, "Active capture links");
+  const auto average = statusNumber(status, "Process average");
+  const auto maximum = statusNumber(status, "Process maximum");
+  const auto inputRms = statusNumber(status, "Input RMS");
+  const auto outputRms = statusNumber(status, "Output RMS");
+  const auto amplitudeRatio = statusNumber(status, "DSP amplitude ratio");
+  const auto config = statusValue(status, "Config");
+  const auto state = daemon ? *daemon : "unresponsive";
+
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << "{\n  \"skyapo_version\": " << jsonString(SKYAPO_VERSION)
+      << ",\n  \"equalizer_apo_upstream\": "
+      << jsonString(SKYAPO_UPSTREAM_REVISION) << ",\n  \"pipewire_library\": ";
+#ifdef SKYAPO_HAVE_PIPEWIRE
+  out << jsonString(pw_get_library_version());
+#else
+  out << "null";
+#endif
+  out << ",\n  \"daemon_state\": " << jsonString(state)
+      << ",\n  \"selected_device\": {\n    \"configured_identifier\": ";
+  if (configuredDevice.empty())
+    out << "null";
+  else
+    out << jsonString(configuredDevice);
+  out << ",\n    \"runtime_name\": ";
+  if (selectedDevice)
+    out << jsonString(*selectedDevice);
+  else
+    out << "null";
+  out << "\n  },\n  \"capture_node\": ";
+  if (capture) {
+    const auto open = capture->find(" (");
+    const auto id = unsignedValue(capture->substr(0, open));
+    const auto description =
+        open != std::string::npos && capture->size() > open + 3 &&
+                capture->back() == ')'
+            ? std::optional<std::string>(
+                  capture->substr(open + 2, capture->size() - open - 3))
+            : std::nullopt;
+    out << "{\"id\": ";
+    writeJsonUnsigned(out, id);
+    out << ", \"description\": ";
+    if (description)
+      out << jsonString(*description);
+    else
+      out << "null";
+    out << '}';
+  } else {
+    out << "null";
+  }
+  out << ",\n  \"virtual_microphone\": ";
+  if (virtualMic || virtualNode) {
+    out << "{\"name\": ";
+    if (virtualMic)
+      out << jsonString(*virtualMic);
+    else
+      out << "null";
+    out << ", \"node\": ";
+    if (virtualNode) {
+      const auto open = virtualNode->find(" (");
+      const auto id = unsignedValue(virtualNode->substr(0, open));
+      out << "{\"id\": ";
+      writeJsonUnsigned(out, id);
+      out << ", \"name\": ";
+      if (open != std::string::npos && virtualNode->back() == ')')
+        out << jsonString(virtualNode->substr(open + 2,
+                                              virtualNode->size() - open - 3));
+      else
+        out << "null";
+      out << '}';
+    } else {
+      out << "null";
+    }
+    out << '}';
+  } else {
+    out << "null";
+  }
+  out << ",\n  \"format\": ";
+  if (format)
+    out << jsonString(*format);
+  else
+    out << "null";
+  out << ",\n  \"channels\": ";
+  writeJsonUnsigned(out, channels);
+  out << ",\n  \"channel_positions\": ";
+  if (channelPositions) {
+    out << '[';
+    std::istringstream positions(*channelPositions);
+    std::string position;
+    bool first = true;
+    while (positions >> position) {
+      if (!first)
+        out << ", ";
+      out << jsonString(position);
+      first = false;
+    }
+    out << ']';
+  } else {
+    out << "null";
+  }
+  out << ",\n  \"sample_rate_hz\": ";
+  writeJsonUnsigned(out, sampleRate);
+  out << ",\n  \"quantum_frames\": ";
+  writeJsonUnsigned(out, quantum);
+  out << ",\n  \"filter_count\": ";
+  writeJsonUnsigned(out, filters);
+  out << ",\n  \"filter_chain\": ";
+  if (filters) {
+    out << '[';
+    bool first = true;
+    size_t begin = status.find("\nFilter chain:");
+    if (begin != std::string::npos) {
+      begin += std::string("\nFilter chain:").size();
+      while (begin < status.size()) {
+        const auto end = status.find('\n', begin);
+        const auto line = status.substr(begin, end == std::string::npos
+                                                   ? std::string::npos
+                                                   : end - begin);
+        if (line.rfind("Config: ", 0) == 0)
+          break;
+        const auto firstText = line.find_first_not_of(" \t");
+        if (firstText != std::string::npos && line.substr(firstText) != "(none)") {
+          if (!first)
+            out << ", ";
+          out << jsonString(line.substr(firstText));
+          first = false;
+        }
+        if (end == std::string::npos)
+          break;
+        begin = end + 1;
+      }
+    }
+    out << ']';
+  } else {
+    out << "null";
+  }
+  out << ",\n  \"config_path\": ";
+  if (config)
+    out << jsonString(*config);
+  else
+    out << "null";
+  out << ",\n  \"processed_blocks\": ";
+  writeJsonUnsigned(out, blocks);
+  out << ",\n  \"overruns\": ";
+  writeJsonUnsigned(out, overruns);
+  out << ",\n  \"active_capture_links\": ";
+  if (activeLinks)
+    out << jsonString(*activeLinks);
+  else
+    out << "null";
+  out << ",\n  \"process_average_us\": ";
+  writeJsonNumber(out, average);
+  out << ",\n  \"process_maximum_us\": ";
+  writeJsonNumber(out, maximum);
+  out << ",\n  \"input_rms\": ";
+  writeJsonNumber(out, inputRms);
+  out << ",\n  \"output_rms\": ";
+  writeJsonNumber(out, outputRms);
+  out << ",\n  \"dsp_amplitude_ratio\": ";
+  writeJsonNumber(out, amplitudeRatio);
+  out << "\n}\n";
+  std::cout << out.str();
+}
+
 bool daemonReachable() {
   const auto status = settings::queryStatus();
   return !status.empty() &&
@@ -104,7 +426,7 @@ void stopDaemon() {
 int main(int argc, char **argv) {
   try {
     if (argc < 2)
-      throw std::runtime_error("usage: skyapo status | start | stop | restart "
+      throw std::runtime_error("usage: skyapo status | diagnostics [--json] | start | stop | restart "
                                "| device list/set/current | config show/reload "
                                "| config check <file> | plugin list/scan "
                                "| plugin info <URI>");
@@ -131,6 +453,12 @@ int main(int argc, char **argv) {
         std::cout << "Daemon: unresponsive (status request timed out)\n";
       else
         std::cout << status;
+      return 0;
+    }
+    if (cmd == "diagnostics" && argc == 3 &&
+        std::string(argv[2]) == "--json") {
+      const auto status = settings::queryStatus();
+      writeDiagnosticsJson(status);
       return 0;
     }
     if (cmd == "filters" && argc == 2) {
