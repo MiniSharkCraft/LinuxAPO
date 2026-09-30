@@ -3,6 +3,46 @@
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
 file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
 set(EAPO_SOURCES)
+set(EAPO_EXPRESSION_SOURCES)
+# Preserve the parser semantics installed by upstream ExpressionFilterFactory
+# without including its Windows-only FilterEngine/registry integration. These
+# upstream operators are adapted as generated build-tree copies only.
+if(SKYAPO_HAVE_MUPARSERX)
+  file(MAKE_DIRECTORY ${EAPO_PORT}/parser)
+  foreach(operator LogicalOperators StringOperators)
+    set(operator_source ${EAPO}/parser/${operator}.cpp)
+    set(operator_header ${EAPO}/parser/${operator}.h)
+    set(ported_source ${EAPO_PORT}/parser/${operator}.cpp)
+    set(ported_header ${EAPO_PORT}/parser/${operator}.h)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${operator_source}" "${operator_header}")
+    file(READ "${operator_source}" operator_content)
+    string(REPLACE "\r\n" "\n" operator_content "${operator_content}")
+    string(FIND "${operator_content}" "#include \"stdafx.h\""
+      stdafx_include)
+    if(stdafx_include EQUAL -1)
+      message(FATAL_ERROR
+        "Upstream ${operator}.cpp changed; review its Linux build adapter")
+    endif()
+    string(REPLACE "#include \"stdafx.h\"\n" "" operator_content
+      "${operator_content}")
+    string(FIND "${operator_content}" "stdafx.h" remaining_stdafx)
+    if(NOT remaining_stdafx EQUAL -1)
+      message(FATAL_ERROR
+        "Windows precompiled header remains in upstream ${operator}.cpp")
+    endif()
+    if(EXISTS "${ported_source}")
+      file(READ "${ported_source}" old_source)
+    else()
+      set(old_source "")
+    endif()
+    if(NOT "${old_source}" STREQUAL "${operator_content}")
+      file(WRITE "${ported_source}" "${operator_content}")
+    endif()
+    configure_file("${operator_header}" "${ported_header}" COPYONLY)
+    list(APPEND EAPO_EXPRESSION_SOURCES "${ported_source}")
+  endforeach()
+endif()
 # FilterConfiguration and IFilterFactory consume only immutable sizing values
 # at construction/configuration time. Adapt generated copies to a narrow
 # context interface instead of retaining a global-name FilterEngine shim.

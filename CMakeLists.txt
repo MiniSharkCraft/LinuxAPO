@@ -168,11 +168,12 @@ if(FFTW3F_FOUND)
   target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::FFTW3F)
 endif()
 
-add_library(skyapo-core STATIC src/core/Engine.cpp)
+add_library(skyapo-core STATIC src/core/Engine.cpp ${EAPO_EXPRESSION_SOURCES})
 target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
 target_include_directories(skyapo-core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin src/core ${EAPO_PORT}
-         ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
+         ${EAPO_PORT}/filters ${EAPO_PORT}/parser ${EAPO}/filters ${EAPO}
+         ${EAPO}/helpers)
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_compile_definitions(skyapo-core PRIVATE SKYAPO_VERSION="${PROJECT_VERSION}")
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)

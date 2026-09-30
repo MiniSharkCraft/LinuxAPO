@@ -1174,6 +1174,19 @@ int main() {
     return 1;
   }
 
+  if (!write(expressionRoot,
+             "If: not ((\"sky\" + \"apo\") != \"skyapo\") && not false\n"
+             "Preamp: -6 dB\nElse:\nPreamp: 0 dB\nEndIf:\n"))
+    return 1;
+  expressionEngine.loadConfig(expressionRoot.string());
+  float upstreamOperators[2] = {1.0f, -1.0f};
+  expressionEngine.process(upstreamOperators, 1);
+  if (std::abs(upstreamOperators[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(upstreamOperators[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "upstream string concatenation/not operators mismatched\n";
+    return 1;
+  }
+
   if (!write(expressionRoot, "Preamp: `1 +` dB\n"))
     return 1;
   bool inlineExpressionErrorHasLocation = false;

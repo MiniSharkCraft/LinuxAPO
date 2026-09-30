@@ -28,6 +28,8 @@
 #include "LoudnessVolumeProvider.h"
 #ifdef SKYAPO_HAVE_MUPARSERX
 #include "UpstreamRegexFunctions.h"
+#include "LogicalOperators.h"
+#include "StringOperators.h"
 #endif
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
@@ -236,6 +238,12 @@ void Engine::loadConfig(const std::string &path) {
                                static_cast<mup::float_type>(channelCount));
   expressionParser.DefineFun(new skyapo::config::RegexSearchFunction());
   expressionParser.DefineFun(new skyapo::config::RegexReplaceFunction());
+  // These are the actual Equalizer APO operators used by its
+  // ExpressionFilterFactory: '+' concatenates when either side is a string,
+  // and 'not' supplies the EAPO boolean prefix operator.
+  expressionParser.RemoveOprt(L"+");
+  expressionParser.DefineOprt(new AddOperator());
+  expressionParser.DefineInfixOprt(new NotOperator());
   auto *expressionParserPtr = &expressionParser;
 #else
   mup::ParserX *expressionParserPtr = nullptr;
