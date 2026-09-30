@@ -186,6 +186,10 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics_json_test.py
       $<TARGET_FILE:skyapo>)
+  add_test(NAME skyapo-config-check-json
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_check_json_test.py
+      $<TARGET_FILE:skyapo>)
 endif()
 if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
