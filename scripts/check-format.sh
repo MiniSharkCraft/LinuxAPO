@@ -23,6 +23,24 @@ if ! command -v "$formatter" >/dev/null 2>&1; then
   exit 2
 fi
 
+formatter_diff=${CLANG_FORMAT_DIFF:-}
+if [[ -z "$formatter_diff" ]]; then
+  for candidate in clang-format-diff clang-format-diff.py \
+    /usr/share/clang/clang-format-diff.py; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      formatter_diff=$(command -v "$candidate")
+      break
+    elif [[ -x "$candidate" ]]; then
+      formatter_diff=$candidate
+      break
+    fi
+  done
+fi
+if [[ -z "$formatter_diff" ]]; then
+  printf 'check-format: clang-format-diff not found\n' >&2
+  exit 2
+fi
+
 merge_base=$(git merge-base "$base_revision" HEAD)
 mapfile -t files < <(
   git diff --name-only --diff-filter=ACMR "$merge_base" HEAD -- src tests |
@@ -36,5 +54,13 @@ if ((${#files[@]} == 0)); then
   exit 0
 fi
 
-printf 'Checking %d changed SkyAPO C++ file(s) with %s\n' "${#files[@]}" "$formatter"
-"$formatter" --dry-run --Werror "${files[@]}"
+printf 'Checking changed lines in %d SkyAPO C++ file(s) with %s\n' \
+  "${#files[@]}" "$formatter"
+diff_output=$(git diff --no-color --unified=0 "$merge_base" HEAD -- src tests |
+  python3 "$formatter_diff" -p1 -style=file -fallback-style=none \
+    -binary "$formatter")
+if [[ -n "$diff_output" ]]; then
+  printf '%s\n' "$diff_output"
+  printf 'clang-format check failed; format the changed lines above.\n' >&2
+  exit 1
+fi

@@ -5,7 +5,7 @@ ColumnLimit: 80
 SortIncludes: Never
 IncludeBlocks: Preserve
 DerivePointerAlignment: false
-PointerAlignment: Left
+PointerAlignment: Right
 BreakBeforeBraces: Attach
 AllowShortFunctionsOnASingleLine: Empty
 AllowShortIfStatementsOnASingleLine: Never
