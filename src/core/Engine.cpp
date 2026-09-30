@@ -256,9 +256,20 @@ void Engine::loadConfig(const std::string &path) {
   const auto addReturnedFilters =
       [&](std::vector<IFilter *> produced, const std::filesystem::path &source,
           unsigned line, const std::string &directive) {
-        for (auto *filter : produced)
-          candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                               source, line, directive, includeChain});
+        struct Guard {
+          std::vector<IFilter *> &filters;
+          FilterDeleter deleter;
+          ~Guard() {
+            for (auto *filter : filters)
+              deleter(filter);
+          }
+        } guard{produced, {}};
+        for (auto &filter : produced) {
+          std::unique_ptr<IFilter, FilterDeleter> owned(filter);
+          filter = nullptr;
+          candidate.push_back(
+              {std::move(owned), source, line, directive, includeChain});
+        }
       };
   for (auto &factory : factories) {
     factory->initialize(&context);
@@ -538,13 +549,25 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   } popPath{includeStack};
 
   const auto widePath = StringHelper::toWString(normalizedPath.string(), 65001);
-  for (auto &factory : factories) {
-    auto produced = factory->startOfFile(widePath);
-    for (auto *filter : produced)
-      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, 0, "file initialization",
-                           includeChain});
-  }
+  const auto addFileFilters = [&](std::vector<IFilter *> produced,
+                                  unsigned line, const std::string &directive) {
+    struct Guard {
+      std::vector<IFilter *> &filters;
+      FilterDeleter deleter;
+      ~Guard() {
+        for (auto *filter : filters)
+          deleter(filter);
+      }
+    } guard{produced, {}};
+    for (auto &filter : produced) {
+      std::unique_ptr<IFilter, FilterDeleter> owned(filter);
+      filter = nullptr;
+      candidate.push_back(
+          {std::move(owned), normalizedPath, line, directive, includeChain});
+    }
+  };
+  for (auto &factory : factories)
+    addFileFilters(factory->startOfFile(widePath), 0, "file initialization");
   std::string raw;
   unsigned lineNo = 0;
   struct ConditionalFrame {
@@ -752,8 +775,11 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       if (!made.empty() || command.empty())
         break;
     }
-    if (command.empty())
+    if (command.empty()) {
+      for (auto *filter : made)
+        FilterDeleter{}(filter);
       continue;
+    }
     if (made.empty()) {
       const auto name = StringHelper::toString(originalCommand, 65001);
       const bool known =
@@ -784,11 +810,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                std::to_string(lineNo) + ": invalid " + name +
                                " parameters");
     }
-    for (auto *filter : made)
-      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, lineNo,
-                           StringHelper::toString(originalCommand, 65001),
-                           includeChain});
+    addFileFilters(std::move(made), lineNo,
+                   StringHelper::toString(originalCommand, 65001));
   }
   if (!conditions.empty())
     throw std::runtime_error(normalizedPath.string() + ":" +
@@ -797,13 +820,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   if (in.failed())
     throw std::runtime_error("error reading config: " +
                              normalizedPath.string());
-  for (auto &factory : factories) {
-    auto produced = factory->endOfFile(widePath);
-    for (auto *filter : produced)
-      candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, lineNo, "file finalization",
-                           includeChain});
-  }
+  for (auto &factory : factories)
+    addFileFilters(factory->endOfFile(widePath), lineNo, "file finalization");
 }
 
 void Engine::process(float *samples, unsigned frames) {
