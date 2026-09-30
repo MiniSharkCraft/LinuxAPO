@@ -35,6 +35,12 @@ int main(int argc, char **argv) {
   if (argc >= 3 && std::string(argv[1]) == "device" &&
       std::string(argv[2]) == "list") {
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    if (const char *fixture = std::getenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE")) {
+      std::ifstream input(fixture);
+      std::cout << std::string((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+      return input.bad() ? 1 : 0;
+    }
     std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
                  "41\tfixture.capture\tDelayed Test Input\t\t2\t48000\n"
                  "42\tfixture.usb-mic\tSelected USB Microphone\tyes\t1\t44100\n";

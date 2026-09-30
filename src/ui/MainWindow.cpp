@@ -419,6 +419,11 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   auto *timer = new QTimer(this);
   connect(timer, &QTimer::timeout, this, &MainWindow::refreshStatus);
   timer->start(2000);
+  auto *deviceTimer = new QTimer(this);
+  deviceTimer->setObjectName(QStringLiteral("deviceRefreshTimer"));
+  deviceTimer->setInterval(5000);
+  connect(deviceTimer, &QTimer::timeout, this, &MainWindow::refreshDevices);
+  deviceTimer->start();
 }
 
 MainWindow::~MainWindow() {
@@ -1060,7 +1065,14 @@ void MainWindow::refreshDevices() {
              return;
            }
            const QSignalBlocker blocker(deviceCombo);
+           QString previousNode = deviceCombo->currentData().toString();
+           if (previousNode.isEmpty() && deviceCombo->currentIndex() >= 0)
+             previousNode =
+                 deviceCombo
+                     ->itemData(deviceCombo->currentIndex(), Qt::UserRole + 1)
+                     .toString();
            deviceCombo->clear();
+           bool selectedByDaemon = false;
            const auto lines =
                QString::fromUtf8(output).split('\n', Qt::SkipEmptyParts);
            for (qsizetype i = 1; i < lines.size(); ++i) {
@@ -1077,14 +1089,36 @@ void MainWindow::refreshDevices() {
                  label += tr("  (%1 ch, %2 Hz)").arg(channelCount, sampleRate);
              }
              deviceCombo->addItem(label, nodeName);
-             if (columns[3] == "yes")
+             if (columns[3] == "yes") {
                deviceCombo->setCurrentIndex(deviceCombo->count() - 1);
+               selectedByDaemon = true;
+             }
+           }
+           if (!selectedByDaemon && !previousNode.isEmpty()) {
+             int previousIndex = -1;
+             for (int index = 0; index < deviceCombo->count(); ++index)
+               if (deviceCombo->itemData(index).toString() == previousNode) {
+                 previousIndex = index;
+                 break;
+               }
+             if (previousIndex >= 0) {
+               deviceCombo->setCurrentIndex(previousIndex);
+             } else {
+               deviceCombo->insertItem(
+                   0, tr("Selected input unavailable — %1").arg(previousNode),
+                   QString{});
+               deviceCombo->setItemData(0, previousNode, Qt::UserRole + 1);
+               deviceCombo->setCurrentIndex(0);
+             }
            }
            if (deviceCombo->count() == 0)
              deviceCombo->addItem(tr("No PipeWire input devices"));
-           deviceCombo->setEnabled(!deviceSetPending &&
-                                   deviceCombo->count() > 0 &&
-                                   !deviceCombo->itemData(0).toString().isEmpty());
+           bool hasSelectableDevice = false;
+           for (int index = 0; index < deviceCombo->count(); ++index)
+             hasSelectableDevice =
+                 hasSelectableDevice ||
+                 !deviceCombo->itemData(index).toString().isEmpty();
+           deviceCombo->setEnabled(!deviceSetPending && hasSelectableDevice);
          });
 }
 

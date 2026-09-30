@@ -1117,6 +1117,82 @@ int main(int argc, char **argv) {
     std::cerr << "device selector did not persist exactly one stable node name\n";
     return 1;
   }
+  const QString dynamicDeviceListPath =
+      temporary.filePath("dynamic-device-list.tsv");
+  const auto writeDynamicDeviceList = [&](const QByteArray &contents) {
+    QFile list(dynamicDeviceListPath);
+    if (!list.open(QIODevice::WriteOnly | QIODevice::Truncate))
+      return false;
+    return list.write(contents) == contents.size();
+  };
+  const QByteArray selectedDeviceList =
+      "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
+      "41\tfixture.capture\tBuilt-in capture\t\t2\t48000\n"
+      "42\tfixture.usb-mic\tSelected USB microphone\tyes\t1\t44100\n";
+  if (!writeDynamicDeviceList(selectedDeviceList)) {
+    std::cerr << "could not create changing device-list fixture\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE",
+          dynamicDeviceListPath.toLocal8Bit());
+  MainWindow dynamicDeviceWindow(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *dynamicDeviceCombo = dynamicDeviceWindow.findChild<QComboBox *>();
+  auto *deviceRefreshTimer =
+      dynamicDeviceWindow.findChild<QTimer *>("deviceRefreshTimer");
+  QElapsedTimer dynamicDeviceWait;
+  dynamicDeviceWait.start();
+  while (dynamicDeviceWait.elapsed() < 2000 &&
+         (!dynamicDeviceCombo ||
+          dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic")) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!dynamicDeviceCombo || !deviceRefreshTimer ||
+      dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic" ||
+      !writeDynamicDeviceList(
+          "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
+          "41\tfixture.capture\tBuilt-in capture\t\t2\t48000\n")) {
+    std::cerr << "dynamic device fixture did not initialize with selection\n";
+    return 1;
+  }
+  deviceRefreshTimer->start(1);
+  dynamicDeviceWait.restart();
+  while (dynamicDeviceWait.elapsed() < 2000 &&
+         !dynamicDeviceCombo->currentText().contains(
+             "Selected input unavailable")) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!dynamicDeviceCombo->currentText().contains(
+          "Selected input unavailable") ||
+      dynamicDeviceCombo->itemData(0, Qt::UserRole + 1).toString() !=
+          "fixture.usb-mic" ||
+      dynamicDeviceCombo->itemData(0).toString() != QString{} ||
+      dynamicDeviceCombo->count() != 2) {
+    std::cerr << "removed selected node was not retained as unavailable by "
+                 "stable name\n";
+    return 1;
+  }
+  dynamicDeviceCombo->setCurrentIndex(0);
+  QMetaObject::invokeMethod(dynamicDeviceCombo, "activated",
+                            Qt::DirectConnection, Q_ARG(int, 0));
+  if (!writeDynamicDeviceList(selectedDeviceList)) {
+    std::cerr << "could not restore dynamic device-list fixture\n";
+    return 1;
+  }
+  deviceRefreshTimer->start(1);
+  dynamicDeviceWait.restart();
+  while (dynamicDeviceWait.elapsed() < 2000 &&
+         dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic") {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic") {
+    std::cerr
+        << "reappearing selected node was not restored by the daemon marker\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
   const QString graphicConfigPath = temporary.filePath("graphic-eq.txt");
   QFile graphicConfig(graphicConfigPath);
   if (!graphicConfig.open(QIODevice::WriteOnly) ||
