@@ -938,6 +938,130 @@ int main(int argc, char **argv) {
     std::cerr << "opening a config did not persist it in Open Recent\n";
     return 1;
   }
+  const QString saveAsSourcePath = temporary.filePath("save-as-source.txt");
+  const QString saveAsDestinationPath =
+      temporary.filePath("save-as-copy/renamed-config.txt");
+  if (!QDir().mkpath(QFileInfo(saveAsDestinationPath).absolutePath())) {
+    std::cerr << "could not create Save As destination directory\n";
+    return 1;
+  }
+  QFile saveAsSource(saveAsSourcePath);
+  if (!saveAsSource.open(QIODevice::WriteOnly) ||
+      saveAsSource.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not create Save As source config\n";
+    return 1;
+  }
+  saveAsSource.close();
+  MainWindow saveAsWindow(saveAsSourcePath, QString::fromLocal8Bit(argv[1]));
+  auto *saveAsAction = saveAsWindow.findChild<QAction *>("saveConfigAs");
+  if (!saveAsAction ||
+      saveAsAction->text() != QStringLiteral("Save Configuration As…")) {
+    std::cerr << "File menu does not expose Save Configuration As\n";
+    return 1;
+  }
+  auto *saveAsPreamp = saveAsWindow.findChild<PreampFilterGUI *>();
+  auto *saveAsGain =
+      saveAsPreamp ? saveAsPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!saveAsGain) {
+    std::cerr << "Save As workflow did not load an editable config row\n";
+    return 1;
+  }
+  saveAsGain->setValue(-9.0);
+  bool saveAsSucceeded = false;
+  if (!QMetaObject::invokeMethod(&saveAsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, saveAsSucceeded),
+                                 Q_ARG(QString, saveAsDestinationPath)) ||
+      !saveAsSucceeded) {
+    std::cerr << "GUI Save As did not save to the selected destination\n";
+    return 1;
+  }
+  QFile saveAsCopy(saveAsDestinationPath);
+  QFile unchangedSaveAsSource(saveAsSourcePath);
+  auto *saveAsPathEdit = saveAsWindow.findChild<QLineEdit *>("configPath");
+  const auto saveAsRecent =
+      uiSettings.value(QStringLiteral("ui/recentFiles")).toStringList();
+  if (!saveAsCopy.open(QIODevice::ReadOnly) ||
+      saveAsCopy.readAll() != "Preamp: -9 dB\n" ||
+      !unchangedSaveAsSource.open(QIODevice::ReadOnly) ||
+      unchangedSaveAsSource.readAll() != "Preamp: -6 dB\n" || !saveAsPathEdit ||
+      saveAsPathEdit->text() !=
+          QFileInfo(saveAsDestinationPath).absoluteFilePath() ||
+      saveAsWindow.windowTitle().startsWith('*') || saveAsRecent.isEmpty() ||
+      saveAsRecent.first() !=
+          QFileInfo(saveAsDestinationPath).absoluteFilePath()) {
+    std::cerr << "Save As did not atomically switch editor path/state or "
+                 "update recents\n";
+    return 1;
+  }
+  const QString includeSourceDirectory =
+      temporary.filePath("save-include-source");
+  const QString includeDestinationDirectory =
+      temporary.filePath("save-include-destination");
+  const QString nestedIncludeDirectory =
+      includeSourceDirectory + QStringLiteral("/nested");
+  if (!QDir().mkpath(nestedIncludeDirectory) ||
+      !QDir().mkpath(includeDestinationDirectory)) {
+    std::cerr << "could not create Save As Include fixture directories\n";
+    return 1;
+  }
+  const QString includeRootPath =
+      includeSourceDirectory + QStringLiteral("/root.txt");
+  const QString includeChildPath =
+      nestedIncludeDirectory + QStringLiteral("/child#one.txt");
+  const QString includeLeafPath =
+      includeSourceDirectory + QStringLiteral("/leaf config.txt");
+  const QString includeDestinationPath =
+      includeDestinationDirectory + QStringLiteral("/copied.txt");
+  const QString includeAliasDirectory =
+      temporary.filePath("save-include-alias");
+  const QString includeAliasPath =
+      includeAliasDirectory + QStringLiteral("/root-link.txt");
+  const auto writeFixture = [](const QString &path,
+                               const QByteArray &contents) {
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) &&
+           file.write(contents) == contents.size();
+  };
+  const QByteArray rootIncludeContents =
+      "Preamp: -3 dB\nInclude: \"nested/child#one.txt\" # root comment\n";
+  if (!writeFixture(includeRootPath, rootIncludeContents) ||
+      !writeFixture(includeChildPath,
+                    "Preamp: 0 dB\nInclude: \"../leaf config.txt\" "
+                    "# nested comment\n") ||
+      !writeFixture(includeLeafPath, "Preamp: 0 dB\n") ||
+      !QDir().mkpath(includeAliasDirectory) ||
+      !QFile::link(includeRootPath, includeAliasPath) ||
+      !configIsValid(QString::fromLocal8Bit(argv[2]), includeAliasPath)) {
+    std::cerr
+        << "nested quoted/comment Include fixture is not initially valid\n";
+    return 1;
+  }
+  MainWindow includeSaveAsWindow(includeAliasPath,
+                                 QString::fromLocal8Bit(argv[1]));
+  bool includeSaveAsSucceeded = false;
+  if (!QMetaObject::invokeMethod(&includeSaveAsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, includeSaveAsSucceeded),
+                                 Q_ARG(QString, includeDestinationPath)) ||
+      !includeSaveAsSucceeded ||
+      !configIsValid(QString::fromLocal8Bit(argv[2]), includeDestinationPath)) {
+    std::cerr << "Save As changed the target of a nested quoted Include\n";
+    return 1;
+  }
+  QFile rebasedIncludeRoot(includeDestinationPath);
+  const QString rebasedChildPath =
+      QDir(includeDestinationDirectory).relativeFilePath(includeChildPath);
+  const QByteArray expectedRebasedRoot = "Preamp: -3 dB\nInclude: \"" +
+                                         rebasedChildPath.toUtf8() +
+                                         "\" # root comment\n";
+  if (!rebasedIncludeRoot.open(QIODevice::ReadOnly) ||
+      rebasedIncludeRoot.readAll() != expectedRebasedRoot) {
+    std::cerr << "Save As did not preserve quoted path/comment text while "
+                 "rebasing the Include\n";
+    return 1;
+  }
   if (window.findChildren<FilterTableRow *>().size() != 8 ||
       window.findChildren<IncludeEditor *>().size() != 1 ||
       window.findChildren<ChannelCopyEditor *>().size() != 2 ||

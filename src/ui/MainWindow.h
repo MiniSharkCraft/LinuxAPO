@@ -33,6 +33,8 @@ private:
   void addFilter(const QString &line);
   void markModified();
   bool saveConfig();
+  Q_INVOKABLE bool saveConfigAsPath(const QString &path);
+  void saveConfigAs();
   void checkConfig();
   void reloadConfig();
   void refreshStatus();
@@ -78,4 +80,5 @@ private:
   bool deviceSetPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};
+  QString saveAsError;
 };

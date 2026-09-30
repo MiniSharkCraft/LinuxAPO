@@ -50,8 +50,10 @@
 #include <QTimer>
 #include <QThread>
 #include <algorithm>
+#include <filesystem>
 #include <QVBoxLayout>
 #include <memory>
+#include <system_error>
 #include <utility>
 
 namespace {
@@ -103,6 +105,121 @@ QString runtimeStatusText(int result, const QByteArray &output,
   else
     summary += QObject::tr("\nRuntime details unavailable");
   return summary;
+}
+
+QString withoutInlineComment(const QString &line) {
+  bool quoted = false;
+  bool escaped = false;
+  for (qsizetype i = 0; i < line.size(); ++i) {
+    const QChar ch = line[i];
+    if (ch == QLatin1Char('#') && !quoted)
+      return line.left(i);
+    if (ch == QLatin1Char('"') && !escaped)
+      quoted = !quoted;
+    if (quoted && ch == QLatin1Char('\\') && !escaped)
+      escaped = true;
+    else
+      escaped = false;
+  }
+  return line;
+}
+
+bool rebaseRelativeIncludes(ConfigFile &config, const QString &sourcePath,
+                            const QString &destinationPath, QString &error) {
+  const auto canonicalConfigPath = [](const QString &path, QString &canonical) {
+    const QByteArray encoded = path.toUtf8();
+    std::error_code code;
+    const auto normalized = std::filesystem::weakly_canonical(
+        std::filesystem::u8path(encoded.constData()), code);
+    if (code)
+      return false;
+    const auto utf8 = normalized.u8string();
+    canonical =
+        QString::fromUtf8(utf8.data(), static_cast<qsizetype>(utf8.size()));
+    return true;
+  };
+  QString canonicalSource;
+  QString canonicalDestination;
+  if (!canonicalConfigPath(sourcePath, canonicalSource) ||
+      !canonicalConfigPath(destinationPath, canonicalDestination)) {
+    error = QObject::tr("Could not canonicalize the source or destination "
+                        "config path to preserve Include semantics");
+    return false;
+  }
+  const QDir sourceDirectory = QFileInfo(canonicalSource).absoluteDir();
+  const QDir destinationDirectory =
+      QFileInfo(canonicalDestination).absoluteDir();
+  for (qsizetype index = 0; index < config.lineCount(); ++index) {
+    const auto &line = config.line(index);
+    const QByteArray bytes = line.changed ? line.text : line.originalText;
+    const QString raw = QString::fromUtf8(bytes);
+    if (raw.toUtf8() != bytes) {
+      error = QObject::tr("Cannot safely preserve Include paths in a config "
+                          "that is not valid UTF-8");
+      return false;
+    }
+    const QString active = withoutInlineComment(raw);
+    const qsizetype colon = active.indexOf(QLatin1Char(':'));
+    if (colon < 0 || active.left(colon).trimmed() != QStringLiteral("Include"))
+      continue;
+
+    qsizetype pathBegin = colon + 1;
+    while (pathBegin < active.size() && active[pathBegin].isSpace())
+      ++pathBegin;
+    qsizetype pathEnd = active.size();
+    while (pathEnd > pathBegin && active[pathEnd - 1].isSpace())
+      --pathEnd;
+    if (pathBegin == pathEnd)
+      continue;
+
+    QString includePath = active.mid(pathBegin, pathEnd - pathBegin);
+    const bool startsQuoted = includePath.startsWith(QLatin1Char('"'));
+    const bool endsQuoted = includePath.endsWith(QLatin1Char('"'));
+    if (startsQuoted != endsQuoted) {
+      error = QObject::tr("Cannot safely preserve malformed quoted Include "
+                          "at line %1")
+                  .arg(index + 1);
+      return false;
+    }
+    if (startsQuoted)
+      includePath = includePath.mid(1, includePath.size() - 2);
+    if (includePath.isEmpty() || includePath.contains(QLatin1Char('"'))) {
+      error = QObject::tr("Cannot safely preserve empty or escaped-quote "
+                          "Include at line %1")
+                  .arg(index + 1);
+      return false;
+    }
+    if (includePath.contains(QLatin1Char('`'))) {
+      error = QObject::tr("Cannot safely rebase expression-based Include at "
+                          "line %1; keep the config in its current directory")
+                  .arg(index + 1);
+      return false;
+    }
+    const QFileInfo includeInfo(includePath);
+    if (includeInfo.isAbsolute())
+      continue;
+
+    const QString originalTarget =
+        QDir::cleanPath(sourceDirectory.absoluteFilePath(includePath));
+    QString rebased = destinationDirectory.relativeFilePath(originalTarget);
+    if (rebased.isEmpty() || rebased == QStringLiteral("."))
+      rebased = QFileInfo(originalTarget).fileName();
+    if (rebased.contains(QLatin1Char('"'))) {
+      error = QObject::tr("Cannot safely preserve Include target containing "
+                          "a quote at line %1")
+                  .arg(index + 1);
+      return false;
+    }
+    if (!startsQuoted && rebased.contains(QLatin1Char('#')))
+      rebased = QLatin1Char('"') + rebased + QLatin1Char('"');
+    else if (startsQuoted)
+      rebased = QLatin1Char('"') + rebased + QLatin1Char('"');
+
+    const QString updated = raw.left(pathBegin) + rebased + raw.mid(pathEnd);
+    if (updated != raw)
+      config.replace(index, updated);
+  }
+  return true;
 }
 
 } // namespace
@@ -289,6 +406,9 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   connect(diagnosticSourceButton, &QPushButton::clicked, this,
           &MainWindow::openDiagnosticSource);
   auto *fileMenu = menuBar()->addMenu(tr("File"));
+  auto *saveAsAction = fileMenu->addAction(tr("Save Configuration As…"));
+  saveAsAction->setObjectName(QStringLiteral("saveConfigAs"));
+  connect(saveAsAction, &QAction::triggered, this, &MainWindow::saveConfigAs);
   recentFilesMenu = fileMenu->addMenu(tr("Open Recent"));
   recentFilesMenu->setObjectName(QStringLiteral("recentFilesMenu"));
   refreshRecentFilesMenu();
@@ -1006,6 +1126,50 @@ bool MainWindow::saveConfig() {
   }
   modified = false;
   updateTitle();
+  return true;
+}
+
+void MainWindow::saveConfigAs() {
+  if (configPath.isEmpty())
+    return;
+  const QString destination = QFileDialog::getSaveFileName(
+      this, tr("Save configuration as"), configPath,
+      tr("Configuration files (*.txt);;All files (*)"));
+  if (destination.isEmpty())
+    return;
+  if (!saveConfigAsPath(destination))
+    QMessageBox::critical(this, tr("Save As failed"),
+                          tr("Could not save configuration to %1:\n%2")
+                              .arg(destination, saveAsError));
+}
+
+bool MainWindow::saveConfigAsPath(const QString &path) {
+  saveAsError.clear();
+  if (path.trimmed().isEmpty())
+    return false;
+  const QString destination = QFileInfo(path).absoluteFilePath();
+  ConfigFile savedDocument = document;
+  if (!rebaseRelativeIncludes(savedDocument, configPath, destination,
+                              saveAsError))
+    return false;
+  QSaveFile file(destination);
+  const QByteArray contents = savedDocument.serialize();
+  if (!file.open(QIODevice::WriteOnly) ||
+      file.write(contents) != contents.size() || !file.commit()) {
+    saveAsError = file.errorString();
+    return false;
+  }
+
+  document = std::move(savedDocument);
+  configPath = destination;
+  modified = false;
+  ++configRevision;
+  pathEdit->setText(configPath);
+  rebuildRows();
+  rememberConfig(configPath);
+  updateTitle();
+  validationLabel->setText(tr("Checking configuration…"));
+  scheduleLiveValidation();
   return true;
 }
 
