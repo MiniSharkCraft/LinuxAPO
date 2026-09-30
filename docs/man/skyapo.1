@@ -1,0 +1,93 @@
+.TH SKYAPO 1 "2026-09-30" "SkyAPO 0.1.0" "User Commands"
+.SH NAME
+skyapo \- control the SkyAPO audio processing daemon
+.SH SYNOPSIS
+.B skyapo
+.I command
+[\fIarguments\fR]
+.br
+.B skyapo --help
+.br
+.B skyapo --version
+.SH DESCRIPTION
+.B skyapo
+is the command-line client for SkyAPO. The daemon and the audio graph run as
+the current user; no root service is required. Commands that query or control
+the running graph communicate with the per-user daemon.
+.SH COMMANDS
+.TP
+.B status
+Print the daemon and audio graph status. If the daemon is unavailable, the
+status output says so.
+.TP
+.B diagnostics [--json]
+Print build/runtime diagnostics. With \fB--json\fR, emit machine-readable
+JSON; unavailable runtime fields are represented as \fBnull\fR.
+.TP
+.B start | stop | restart
+Start, stop, or restart the per-user daemon. Start waits for PipeWire format
+negotiation and requires a selected capture device.
+.TP
+.B device list
+List PipeWire capture devices, including stable node names and available
+channel/sample-rate metadata.
+.TP
+.B device set \fIid-or-name\fR
+Select a capture device. The selection is persisted by stable node name;
+numeric PipeWire IDs are accepted for the current selection operation only.
+.TP
+.B device current
+Print the selected capture device.
+.TP
+.B config show
+Print the daemon's active configuration file.
+.TP
+.B config check \fIfile\fR
+Validate a configuration using the current CLI validation format.
+.TP
+.B config check --json \fIfile\fR
+Validate a configuration and print a JSON result to standard output. Exit
+status is zero for a valid configuration and nonzero for an invalid one.
+.TP
+.B config reload
+Ask the daemon to validate and transactionally reload its active configuration.
+.TP
+.B filters
+Print the active filter chain. Requires a running daemon.
+.TP
+.B plugin list
+List plugins discoverable by the plugin hosts built into this package.
+.TP
+.B plugin info \fIURI\fR
+Print metadata for a discovered plugin.
+.TP
+.B help, --help, -h
+Print command help.
+.TP
+.B --version
+Print the SkyAPO version and pinned Equalizer APO upstream revision.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/skyapo
+Per-user configuration directory. If \fBXDG_CONFIG_HOME\fR is unset,
+SkyAPO uses \fI~/.config/skyapo\fR.
+.TP
+.I $XDG_RUNTIME_DIR/skyapo.sock
+Mode-0600 per-user daemon control socket.
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Selects the per-user configuration root.
+.TP
+.B XDG_RUNTIME_DIR
+Selects the per-user runtime directory containing the daemon socket.
+.SH SEE ALSO
+.BR skyapod (1),
+.BR pw-cli (1),
+.BR wpctl (1)
+.SH REPORTING BUGS
+See the project README and issue tracker associated with the SkyAPO source
+checkout.
+.SH COPYRIGHT
+SkyAPO includes GPL-licensed Equalizer APO source. See the installed
+EqualizerAPO-License.txt and project documentation for license details.

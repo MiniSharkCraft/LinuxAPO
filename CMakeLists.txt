@@ -487,6 +487,8 @@ install(TARGETS skyapo skyapod skyapo-render
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
+install(FILES docs/man/skyapo.1 docs/man/skyapod.1
+  DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 install(FILES README.md ROADMAP.md CHANGELOG.md
   DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES upstream/equalizerapo/License.txt

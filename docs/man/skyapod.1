@@ -1,0 +1,55 @@
+.TH SKYAPOD 1 "2026-09-30" "SkyAPO 0.1.0" "User Commands"
+.SH NAME
+skyapod \- process a selected PipeWire capture stream with SkyAPO
+.SH SYNOPSIS
+.B skyapod
+[\fB--config\fR \fIfile\fR]
+.SH DESCRIPTION
+.B skyapod
+is the per-user SkyAPO daemon. It connects to PipeWire, captures from the
+selected source, runs the configured Equalizer APO-compatible DSP chain, and
+publishes the processed stream as \fBSkyAPO Virtual Mic\fR.
+.PP
+The daemon can run directly in a terminal or through the installed systemd
+user service. It does not require root. The realtime audio callback does not
+parse configuration files or perform filesystem operations.
+.SH OPTIONS
+.TP
+.BI --config " file"
+Load \fIfile\fR instead of the per-user default configuration. If omitted,
+the daemon uses \fB$XDG_CONFIG_HOME/skyapo/config.txt\fR, falling back to
+\fB~/.config/skyapo/config.txt\fR when \fBXDG_CONFIG_HOME\fR is unset.
+.SH OPERATION
+Select a PipeWire capture device with \fBskyapo device set\fR before starting
+the daemon. The selected stable PipeWire node name is persisted in the
+per-user configuration directory. Configuration changes are validated
+outside the audio callback; a rejected reload keeps the last valid processing
+chain active.
+.PP
+The daemon creates the virtual source \fBSkyAPO Virtual Mic\fR for normal
+PipeWire clients. Status, control, and filter information are available from
+the \fBskyapo\fR command.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/skyapo/skyapod.log
+Log for a daemon started by \fBskyapo start\fR.
+.TP
+.I $XDG_RUNTIME_DIR/skyapo.sock
+Mode-0600 per-user control socket.
+.TP
+.I /usr/lib/systemd/user/skyapod.service
+Installed systemd user service (installation prefix may change this path).
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Selects the per-user configuration root.
+.TP
+.B XDG_RUNTIME_DIR
+Selects the per-user runtime directory containing the control socket.
+.SH SEE ALSO
+.BR skyapo (1),
+.BR pipewire (1),
+.BR wpctl (1)
+.SH COPYRIGHT
+SkyAPO includes GPL-licensed Equalizer APO source. See the installed
+EqualizerAPO-License.txt and project documentation for license details.
