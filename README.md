@@ -4,7 +4,7 @@ SkyAPO is an early Linux port effort for Equalizer APO. It compiles and invokes 
 
 ## Build
 
-Dependencies: CMake, C++17 compiler, pkg-config, libsndfile, PipeWire development headers/library, and a running user PipeWire/WirePlumber session. Pinned CLAP and Steinberg VST3 API/hosting sources are in `upstream/clap` and `upstream/vst3`; Lilv optionally enables LV2 hosting, and Qt 6 Widgets optionally builds the editor. VST3 supports basic single-bus mono/stereo processing and config-time normalized parameter overrides by numeric ID. On Arch Linux: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber lilv qt6-base`.
+Dependencies: CMake, C++17 compiler, pkg-config, libsndfile, PipeWire development headers/library, and a running user PipeWire/WirePlumber session. FFTW3f is optional; when available it enables the core `GraphicEQ:`/Convolution processing and the editor's upstream GraphicEQ visual controls. Without FFTW3f, the editor preserves `GraphicEQ:` directives as raw text and does not present them as a working visual editor. Pinned CLAP and Steinberg VST3 API/hosting sources are in `upstream/clap` and `upstream/vst3`; Lilv optionally enables LV2 hosting, and Qt 6 Widgets optionally builds the editor. VST3 supports basic single-bus mono/stereo processing and config-time normalized parameter overrides by numeric ID. On Arch Linux: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber lilv qt6-base`; install `fftw` as an optional package to enable FFTW3f features.
 
 Upstream is a pinned official SourceForge Git submodule. After cloning SkyAPO, run `git submodule update --init --recursive`. Its checkout remains unmodified: CMake generates a small build-directory compatibility copy of the compiled filters. See [porting notes](docs/PORTING.md). SkyAPO uses GPL-licensed Equalizer APO code; upstream copyright notices and `upstream/equalizerapo/License.txt` are preserved.
 
@@ -14,7 +14,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-When Qt 6 Widgets is installed, launch the upstream-based configuration editor with `build/skyapo-ui [config-file]`. It provides daemon/device controls and visual upstream Preamp/parametric-filter rows while preserving untouched config lines. See [UI status](docs/UI.md) for the current scope and remaining gaps.
+When Qt 6 Widgets is installed, launch the upstream-based configuration editor with `build/skyapo-ui [config-file]`. It provides daemon/device controls and visual upstream Preamp, parametric-filter and (with FFTW3f) GraphicEQ rows while preserving untouched config lines. GraphicEQ band/table edits update the upstream plot model and are written back to the `GraphicEQ:` line when saved. See [UI status](docs/UI.md) for dependency behavior and remaining gaps.
 
 For AddressSanitizer and UBSan: configure with `-DSKYAPO_SANITIZERS=ON`.
 
