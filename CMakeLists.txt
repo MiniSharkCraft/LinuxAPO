@@ -185,6 +185,7 @@ if(FFTW3F_FOUND)
 endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp
+  src/platform/linux/ConfigSource.cpp
   ${SKYAPO_UPSTREAM_PROCESS_SOURCE} ${EAPO_EXPRESSION_SOURCES})
 target_include_directories(skyapo-core BEFORE PRIVATE src/platform/linux)
 target_include_directories(skyapo-core
@@ -544,6 +545,10 @@ if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
 endif()
 add_test(NAME skyapo-core COMMAND skyapo-tests)
+
+add_executable(skyapo-config-source-tests
+  tests/config_source_tests.cpp src/platform/linux/ConfigSource.cpp)
+add_test(NAME skyapo-config-source COMMAND skyapo-config-source-tests)
 
 add_executable(skyapo-upstream-process-tests
   tests/upstream_filter_engine_process_test.cpp)

@@ -9,6 +9,7 @@
 #include "FilterConfiguration.h"
 #include "FilterConfigurationContext.h"
 #include "UpstreamFilterEngineProcess.h"
+#include "ConfigSource.h"
 
 #include "BiQuadFilterFactory.h"
 #include "BiQuadFilter.h"
@@ -53,7 +54,6 @@
 #include <atomic>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -512,14 +512,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              std::vector<IncludeSite> &includeChain,
                              bool &stageActive,
                              mup::ParserX *expressionParser) {
-  std::error_code ec;
-  auto absolutePath = std::filesystem::absolute(configPath, ec);
-  if (ec)
-    throw std::runtime_error("cannot resolve config path '" +
-                             configPath.string() + "': " + ec.message());
-  auto normalizedPath = std::filesystem::weakly_canonical(absolutePath, ec);
-  if (ec)
-    normalizedPath = absolutePath.lexically_normal();
+  const auto normalizedPath =
+      skyapo::platform::ConfigSource::canonicalize(configPath);
   if (std::find(attemptedFiles.begin(), attemptedFiles.end(), normalizedPath) ==
       attemptedFiles.end())
     attemptedFiles.push_back(normalizedPath);
@@ -531,9 +525,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     throw std::runtime_error("include cycle detected at " +
                              normalizedPath.string());
 
-  std::ifstream in(normalizedPath);
-  if (!in)
-    throw std::runtime_error("cannot open config: " + normalizedPath.string());
+  auto in = skyapo::platform::ConfigSource::open(normalizedPath);
   if (std::find(configFiles.begin(), configFiles.end(), normalizedPath) ==
       configFiles.end())
     configFiles.push_back(normalizedPath);
@@ -616,7 +608,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              "rebuild SkyAPO");
 #endif
   };
-  while (std::getline(in, raw)) {
+  while (in.readLine(raw)) {
     ++lineNo;
     stripInlineComment(raw);
     auto line = StringHelper::trim(StringHelper::toWString(raw, 65001));
@@ -737,9 +729,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
         throw std::runtime_error(normalizedPath.string() + ":" +
                                  std::to_string(lineNo) +
                                  ": Include requires a path");
-      std::filesystem::path included(StringHelper::toString(params, 65001));
-      if (included.is_relative())
-        included = normalizedPath.parent_path() / included;
+      const auto included = skyapo::platform::ConfigSource::resolveInclude(
+          normalizedPath, StringHelper::toString(params, 65001));
       bool includedStage = stageActive;
       includeChain.push_back({normalizedPath, lineNo});
       // Keep the chain intact when recursion fails; loadConfig reports it as
@@ -803,7 +794,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     throw std::runtime_error(normalizedPath.string() + ":" +
                              std::to_string(conditions.back().openingLine) +
                              ": If was not closed by EndIf");
-  if (in.bad())
+  if (in.failed())
     throw std::runtime_error("error reading config: " +
                              normalizedPath.string());
   for (auto &factory : factories) {

@@ -42,7 +42,12 @@ factories must not retain it. This is an incremental seam, not a port of
 upstream `FilterEngine.cpp`, which still requires replacement of Win32
 threading, file I/O, registry and APO services. The Linux daemon owns config
 lifecycle and uses a separate `ConfigWatcher` for inotify-based root/Include
-tracking.
+tracking. `src/platform/linux/ConfigSource` now owns Linux path canonicalization,
+relative Include resolution and streaming line reads; directive semantics,
+factory lifecycle and candidate-graph transactions remain in `Engine`. Its
+focused tests preserve absolute/relative path behavior, line boundaries, EOF
+and missing-file diagnostics. This is a filesystem boundary, not yet a complete
+replacement for upstream `FilterEngine` configuration orchestration.
 
 ## Current Linux adapter scope
 
