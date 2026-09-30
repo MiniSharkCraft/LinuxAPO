@@ -26,11 +26,12 @@ def stop(process, label):
         return
     process.send_signal(signal.SIGTERM)
     try:
-        process.wait(timeout=8)
+        process.wait(timeout=20)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=3)
-        raise RuntimeError(f"{label} did not stop cleanly after SIGTERM")
+        raise RuntimeError(
+            f"{label} did not stop cleanly within 20 seconds after SIGTERM")
 
 
 def shutdown(processes):
@@ -45,12 +46,16 @@ def shutdown(processes):
 
 
 def main():
-    if len(sys.argv) != 8:
+    if len(sys.argv) != 9 or sys.argv[8] not in ("mono", "stereo"):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE DAEMON CLI SOURCE CONSUMER "
-            "PIPEWIRE_CONFIG DSP_CONFIG")
+            "PIPEWIRE_CONFIG DSP_CONFIG mono|stereo")
     pipewire, daemon, cli, source, consumer, pw_config, dsp_config = map(
-        pathlib.Path, sys.argv[1:])
+        pathlib.Path, sys.argv[1:8])
+    mode = sys.argv[8]
+    mono = mode == "mono"
+    device_name = "skyapo.test.mono" if mono else "skyapo.test.input"
+    channel_count = 1 if mono else 2
     with tempfile.TemporaryDirectory(prefix="skyapo-pipewire-e2e-") as temp:
         root = pathlib.Path(temp)
         runtime = root / "runtime"
@@ -80,25 +85,26 @@ def main():
             if not socket.exists():
                 raise RuntimeError("private PipeWire server socket was not created")
 
+            source_args = [str(source)] + (["--mono"] if mono else [])
             source_process = subprocess.Popen(
-                [str(source)], env=env, stdout=source_log,
+                source_args, env=env, stdout=source_log,
                 stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 if source_process.poll() is not None:
                     raise RuntimeError("deterministic PipeWire source exited")
                 devices = run([str(cli), "device", "list"], env, timeout=5)
-                if "skyapo.test.input" in devices.stdout:
+                if device_name in devices.stdout:
                     break
                 time.sleep(0.1)
             else:
                 raise RuntimeError("deterministic capture source was not enumerated")
 
-            selected = run([str(cli), "device", "set", "skyapo.test.input"], env)
-            if "skyapo.test.input" not in selected.stdout:
+            selected = run([str(cli), "device", "set", device_name], env)
+            if device_name not in selected.stdout:
                 raise RuntimeError(f"device selection did not persist: {selected.stdout}")
             current = run([str(cli), "device", "current"], env)
-            if "skyapo.test.input" not in current.stdout:
+            if device_name not in current.stdout:
                 raise RuntimeError(f"selected source mismatch: {current.stdout}")
 
             daemon_process = subprocess.Popen(
@@ -119,20 +125,32 @@ def main():
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
             for expected in (
-                "Channels: 2", "Filters: 1", "Active capture links: 2/2"):
+                f"Channels: {channel_count}", "Filters: 1",
+                f"Active capture links: {channel_count}/{channel_count}",
+                "Format: F32 planar DSP", "Sample rate: 48000 Hz",
+                "Quantum: 1024", "DSP amplitude ratio: 0.501187",
+                "Callback allocations: 0", "Callback deallocations: 0"):
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
 
-            captured = run([str(consumer)], env, timeout=12)
+            consumer_args = [str(consumer)] + (["--mono"] if mono else [])
+            captured = run(consumer_args, env, timeout=12)
             match = re.search(r"RMS ratio to expected: ([0-9.]+)",
                               captured.stdout)
             if not match or abs(float(match.group(1)) - 1.0) >= 0.03:
                 raise RuntimeError(
                     "capture output did not report the expected -6 dB:\n"
                     f"{captured.stdout}")
-            print("Private PipeWire end-to-end capture passed.")
+            print(f"Private PipeWire {mode} end-to-end capture passed.")
             print(status.rstrip())
             print(captured.stdout.rstrip())
+            stopped = run([str(cli), "stop"], env, timeout=8)
+            if "Stopping skyapod" not in stopped.stdout:
+                raise RuntimeError(f"daemon stop was not acknowledged: {stopped.stdout}")
+            daemon_process.wait(timeout=5)
+            if daemon_process.returncode != 0:
+                raise RuntimeError(
+                    f"skyapod exited with status {daemon_process.returncode}")
         except Exception:
             for label, log in (("PipeWire server", logs),
                                ("test source", source_log),

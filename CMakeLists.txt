@@ -545,17 +545,21 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   find_program(SKYAPO_PIPEWIRE_EXECUTABLE pipewire REQUIRED)
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
     PATHS /usr/share/pipewire /usr/local/share/pipewire REQUIRED)
-  add_test(NAME skyapo-pipewire-e2e
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
-      ${SKYAPO_PIPEWIRE_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
-      $<TARGET_FILE:skyapo>
-      $<TARGET_FILE:skyapo-pipewire-test-source>
-      $<TARGET_FILE:skyapo-pipewire-test-consumer>
-      ${SKYAPO_PIPEWIRE_CONFIG}
-      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt)
-  set_tests_properties(skyapo-pipewire-e2e PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
+  foreach(channel_mode IN ITEMS stereo mono)
+    add_test(NAME skyapo-pipewire-e2e-${channel_mode}
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        ${channel_mode})
+    set_tests_properties(skyapo-pipewire-e2e-${channel_mode}
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
+  endforeach()
 endif()
 
 configure_file(packaging/skyapod.service.in
