@@ -65,6 +65,16 @@ int main(int argc, char **argv) {
     std::cerr << "moving a config line did not preserve CRLF endings\n";
     return 1;
   }
+  const auto movedBytes = moved.serialize();
+  moved.replace(-1, "invalid");
+  moved.replace(moved.lineCount(), "invalid");
+  moved.remove(-1);
+  moved.remove(moved.lineCount());
+  moved.insert(-1, "invalid");
+  if (moved.serialize() != movedBytes) {
+    std::cerr << "out-of-range config edits changed the document\n";
+    return 1;
+  }
 
   PreampFilterGUIFactory preampFactory;
   QString command = "Preamp";

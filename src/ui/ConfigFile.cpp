@@ -43,12 +43,16 @@ QByteArray ConfigFile::serialize() const {
 }
 
 void ConfigFile::replace(qsizetype index, const QString &text) {
+  if (index < 0 || index >= lines.size())
+    return;
   auto &line = lines[index];
   line.text = text.toUtf8();
   line.changed = true;
 }
 
 void ConfigFile::insert(qsizetype index, const QString &text) {
+  if (index < 0)
+    return;
   Line line;
   line.text = text.toUtf8();
   line.changed = true;
@@ -63,7 +67,11 @@ void ConfigFile::insert(qsizetype index, const QString &text) {
   }
 }
 
-void ConfigFile::remove(qsizetype index) { lines.removeAt(index); }
+void ConfigFile::remove(qsizetype index) {
+  if (index < 0 || index >= lines.size())
+    return;
+  lines.removeAt(index);
+}
 
 void ConfigFile::move(qsizetype from, qsizetype to) {
   if (from < 0 || from >= lines.size() || to < 0 || to >= lines.size() ||
