@@ -19,7 +19,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Implement actual upstream `ChannelFilter` and `CopyFilter` behavior with ordered channel routing and fixed physical output mapping.
 - [x] Implement relative/nested `Include`, cycle/depth detection, source/line diagnostics, and last-valid graph preservation during parse failure.
 - [x] Add inotify config hot reload with debouncing, control-thread graph creation, atomic pointer swap and deferred retirement after callback quiescence.
-- [ ] Expand parser to preserve comments/quoting, validate numeric ranges, and return structured diagnostics.
+- [x] Preserve quoted Include/comment semantics in the parser; preserve untouched config comments/quoting/newlines in the GUI editor; validate numeric ranges and return structured JSON diagnostics with root/include locations. Covered by core/UI/config-check JSON fixtures.
 - [x] Reject out-of-domain Preamp/BiQuad gains, frequencies, and Q/slope values with file/line diagnostics; tests cover extreme gain, above-Nyquist frequency, and negative Q.
 - [x] Preserve `#` inside double-quoted values (including relative Include filenames) while retaining unquoted trailing-comment behavior.
 - [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
