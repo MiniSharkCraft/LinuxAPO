@@ -45,7 +45,8 @@ public:
               float sampleRate, unsigned maxFrames,
               const std::vector<std::wstring> &channels,
               const std::vector<PluginParameterValue> &overrides)
-      : pluginUri(std::move(uri)), maxFrameCount(maxFrames) {
+      : pluginUri(std::move(uri)), maxFrameCount(maxFrames),
+        channelCount(static_cast<unsigned>(channels.size())) {
     if (!std::isfinite(sampleRate) || sampleRate < 8000.0f || !maxFrames ||
         channels.empty())
       throw std::runtime_error("invalid LV2 instance audio configuration");
@@ -222,8 +223,13 @@ public:
 
   void process(float **output, float **input,
                unsigned frames) noexcept override {
-    if (!instance || frames > maxFrameCount)
+    if (!instance || frames > maxFrameCount) {
+      // Never expose stale samples when the host violates the negotiated
+      // block bound. The CLAP and VST3 backends fail closed the same way.
+      for (unsigned channel = 0; channel < channelCount; ++channel)
+        std::fill_n(output[channel], frames, 0.0f);
       return;
+    }
     for (const auto &port : ports) {
       if (port.kind == PortKind::AudioInput)
         lilv_instance_connect_port(instance, port.index, input[port.channel]);
@@ -245,6 +251,7 @@ private:
 
   std::string pluginUri;
   unsigned maxFrameCount;
+  unsigned channelCount;
   std::vector<Port> ports;
   LilvInstance *instance{};
   bool active = false;
