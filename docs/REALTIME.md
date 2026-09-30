@@ -1,5 +1,19 @@
 # Realtime milestone verification
 
+Current workstation revalidation on 2026-10-01: the selected physical source
+was `alsa_input.pci-0000_00_1f.3.analog-stereo` (Built-in Audio Analog
+Stereo, PipeWire node 88). SkyAPO created `SkyAPO Virtual Mic`
+(`skyapo.virtual_mic`, node 118) with F32 planar, 48000 Hz, stereo FL/FR,
+quantum 1024 and two active capture links. An independent two-stream recorder
+captured 192000 frames from the physical and virtual sources: correlation 1,
+alignment −1024 frames and RMS ratio 0.501187 (−6 dB), matching
+`10^(-6/20)`. `skyapo status` reported one upstream Preamp filter, zero
+callback allocations/deallocations and zero overruns. The daemon was stopped,
+the temporary XDG device selection was isolated from the user's config, and
+the raw/processed microphone WAV files were deleted after measurement. Node
+IDs are specific to this PipeWire session; the persisted selection is the
+stable `node.name`.
+
 Verified 2026-09-30 on the existing Arch user PipeWire 1.6.8 / WirePlumber session. No GUI/plugin work was undertaken.
 
 ## Actual chain
