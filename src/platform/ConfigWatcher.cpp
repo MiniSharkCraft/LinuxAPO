@@ -94,6 +94,30 @@ void ConfigWatcher::update(
   directories.swap(next);
 }
 
+void ConfigWatcher::processEvent(int watch, uint32_t mask, const char *name,
+                                 bool &relevant) {
+  if (mask & IN_Q_OVERFLOW) {
+    // Queue overflow means events were lost, not that inotify watches were
+    // removed. Keep the last-good dependency map so a failed config reload
+    // cannot leave the watcher blind until a later successful update().
+    relevant = true;
+    return;
+  }
+
+  auto found = directories.find(watch);
+  if (found == directories.end())
+    return;
+  if (mask & (IN_DELETE_SELF | IN_MOVE_SELF))
+    relevant = true;
+  if (name && found->second.files.count(name))
+    relevant = true;
+  if (name && found->second.directories.count(name) &&
+      (mask & (IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE)))
+    relevant = true;
+  if (mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
+    directories.erase(found);
+}
+
 bool ConfigWatcher::consumeEvents() {
   alignas(inotify_event) char buffer[4096];
   bool relevant = false;
@@ -106,26 +130,8 @@ bool ConfigWatcher::consumeEvents() {
     for (size_t offset = 0; offset < static_cast<size_t>(length);) {
       const auto *event =
           reinterpret_cast<const inotify_event *>(buffer + offset);
-      if (event->mask & IN_Q_OVERFLOW) {
-        relevant = true;
-        for (const auto &[watch, ignored] : directories) {
-          (void)ignored;
-          inotify_rm_watch(descriptor, watch);
-        }
-        directories.clear();
-      } else if (auto found = directories.find(event->wd);
-                 found != directories.end()) {
-        if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF))
-          relevant = true;
-        if (event->len && found->second.files.count(event->name))
-          relevant = true;
-        if (event->len && found->second.directories.count(event->name) &&
-            (event->mask &
-             (IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE)))
-          relevant = true;
-        if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED))
-          directories.erase(found);
-      }
+      processEvent(event->wd, event->mask,
+                   event->len ? event->name : nullptr, relevant);
       offset += sizeof(inotify_event) + event->len;
     }
   }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,6 +21,8 @@ public:
   bool consumeEvents();
 
 private:
+  friend class ConfigWatcherTestAccess;
+
   struct DirectoryWatch {
     std::filesystem::path path;
     std::unordered_set<std::string> files;
@@ -30,6 +33,9 @@ private:
   std::filesystem::path root;
   int descriptor = -1;
   std::unordered_map<int, DirectoryWatch> directories;
+
+  void processEvent(int watch, uint32_t mask, const char *name,
+                    bool &relevant);
 };
 
 } // namespace skyapo::platform

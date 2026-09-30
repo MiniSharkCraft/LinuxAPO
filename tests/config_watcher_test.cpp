@@ -6,9 +6,21 @@
 #include <poll.h>
 #include <cstdlib>
 #include <string>
+#include <sys/inotify.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+
+namespace skyapo::platform {
+class ConfigWatcherTestAccess {
+public:
+  static bool injectQueueOverflow(ConfigWatcher &watcher) {
+    bool relevant = false;
+    watcher.processEvent(-1, IN_Q_OVERFLOW, nullptr, relevant);
+    return relevant;
+  }
+};
+} // namespace skyapo::platform
 
 bool write(const fs::path &path, const std::string &contents) {
   std::ofstream output(path);
@@ -78,6 +90,19 @@ int main() {
     watcher.update({root, included});
     if (!write(included, "Preamp: -4 dB\n") || !hasEvent(watcher)) {
       std::cerr << "watcher did not reattach after Include recreation\n";
+      result = 1;
+    }
+
+    // Kernel queue overflow is not deterministic to trigger on demand. Route
+    // the synthetic overflow through the same event handler, then verify the
+    // last-good Include watch still works without calling update().
+    if (!skyapo::platform::ConfigWatcherTestAccess::injectQueueOverflow(
+            watcher)) {
+      std::cerr << "watcher did not request reload after queue overflow\n";
+      result = 1;
+    }
+    if (!write(included, "Preamp: -5 dB\n") || !hasEvent(watcher)) {
+      std::cerr << "watcher lost a last-good Include after queue overflow\n";
       result = 1;
     }
 
