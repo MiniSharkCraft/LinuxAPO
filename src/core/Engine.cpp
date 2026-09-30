@@ -452,7 +452,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
           originalCommand == L"Channel" || originalCommand == L"Copy" ||
           originalCommand.rfind(L"Filter", 0) == 0 ||
           originalCommand == L"GraphicEQ" ||
-          originalCommand == L"Convolution" || originalCommand == L"Plugin";
+          originalCommand == L"Convolution" || originalCommand == L"Plugin" ||
+          originalCommand == L"LoudnessCorrection";
       if (!known)
         throw std::runtime_error(normalizedPath.string() + ":" +
                                  std::to_string(lineNo) +
@@ -469,6 +470,13 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                  std::to_string(lineNo) + ": Plugin requires "
                                  "native plugin host support");
 #endif
+      if (originalCommand == L"LoudnessCorrection")
+        throw std::runtime_error(
+            normalizedPath.string() + ":" + std::to_string(lineNo) +
+            ": LoudnessCorrection requires the current render endpoint's "
+            "master volume; Windows EAPO reads it through "
+            "IAudioEndpointVolume, and SkyAPO has no equivalent endpoint "
+            "volume provider yet");
       throw std::runtime_error(normalizedPath.string() + ":" +
                                std::to_string(lineNo) + ": invalid " + name +
                                " parameters");

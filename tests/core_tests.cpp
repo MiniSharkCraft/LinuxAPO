@@ -67,6 +67,30 @@ int main() {
     }
   }
 
+  if (!write(path,
+             "# Windows endpoint-volume dependent upstream filter\n"
+             "LoudnessCorrection: State 1 ReferenceLevel 0 "
+             "ReferenceOffset 0 Attenuation 1.0\n"))
+    return 1;
+  bool loudnessSemanticsDiagnosed = false;
+  try {
+    Engine unsupportedLoudness(48000, 2, 128);
+    unsupportedLoudness.loadConfig(path);
+  } catch (const std::exception &ex) {
+    const std::string message = ex.what();
+    loudnessSemanticsDiagnosed =
+        message.find(path + ":2:") != std::string::npos &&
+        message.find("LoudnessCorrection") != std::string::npos &&
+        message.find("IAudioEndpointVolume") != std::string::npos &&
+        message.find("no equivalent endpoint volume provider") !=
+            std::string::npos;
+  }
+  if (!loudnessSemanticsDiagnosed) {
+    std::cerr << "LoudnessCorrection did not explain its missing Linux "
+                 "endpoint-volume semantics\n";
+    return 1;
+  }
+
 #ifdef SKYAPO_TEST_LV2
   if (!write(path, "Plugin: LV2 https://skyapo.example/plugins/test-gain\n"))
     return 1;
