@@ -399,6 +399,8 @@ add_executable(skyapo-realtime-probe tests/realtime_probe.cpp)
 target_link_libraries(skyapo-realtime-probe PRIVATE PkgConfig::PIPEWIRE PkgConfig::SNDFILE)
 add_executable(skyapo-pipewire-lifetime tests/pipewire_lifetime.cpp)
 target_link_libraries(skyapo-pipewire-lifetime PRIVATE PkgConfig::PIPEWIRE)
+add_executable(skyapo-pipewire-test-source tests/pipewire_test_source.cpp)
+target_link_libraries(skyapo-pipewire-test-source PRIVATE PkgConfig::PIPEWIRE)
 
 configure_file(packaging/skyapod.service.in
   ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)

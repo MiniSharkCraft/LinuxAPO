@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Verified virtual-source-loss recovery on the live PipeWire graph: after destroying the SkyAPO source, the daemon recreated it, relinked the selected physical microphone and an independent recorder measured the configured −6 dB DSP output (192000 frames, correlation 1, ratio 0.501187). PipeWire-server restart and physical-device hotplug remain untested.
+- Added the opt-in `skyapo-pipewire-test-source` fixture and verified daemon recovery across a private PipeWire-server restart: the stable test source and virtual mic returned, stereo links were restored, and status measured the expected −6 dB with zero overruns/callback allocations. The private restart graph had no session manager, so independent recording was not claimed for that run.
+- Verified virtual-source-loss recovery on the live PipeWire graph: after destroying the SkyAPO source, the daemon recreated it, relinked the selected physical microphone and an independent recorder measured the configured −6 dB DSP output (192000 frames, correlation 1, ratio 0.501187). Physical-device hotplug remains untested.
 - Added an Arch Linux container job to CI for PKGBUILD build and package CTest validation; locally rebuilt `skyapo` and `skyapo-debug` from a fresh source clone, with 12/12 tests passing. Hosted CI remains unverified without a configured remote.
 - Added GitHub Actions jobs for native Linux configure/build/CTest and ASan/UBSan; physical-device testing remains manual.
 - Added pinned official Steinberg VST3 SDK components, a Linux hosting subset, cached bundle discovery through standard paths and `VST3_PATH`, and CLI inspection.
