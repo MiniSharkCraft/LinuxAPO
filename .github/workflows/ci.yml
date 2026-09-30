@@ -22,13 +22,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
-            libsndfile1-dev libpipewire-0.3-dev libfftw3-dev \
+            libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
             liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
 
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
+          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
 
       - name: Build
         run: cmake --build build --parallel 2

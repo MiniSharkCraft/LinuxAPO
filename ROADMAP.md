@@ -118,6 +118,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Desktop launcher for the Qt editor.
 - [x] AppStream metadata, branded icon and man pages. No MIME association is declared: current EAPO configs are ordinary `.txt` files, and claiming that broad MIME type would hijack unrelated text documents.
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
+- [x] Add opt-in isolated PipeWire E2E CTest: launch private server + deterministic capture source + `skyapod` + independent virtual-mic consumer; verify runtime status and -6 dB output. Enabled in the normal hosted Linux CI job; hosted result still pending.
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
 - [ ] Add formatting checks and verify hosted workflow runs after publishing/connecting the repository.
 - [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.

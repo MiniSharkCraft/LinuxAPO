@@ -10,6 +10,8 @@ option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
 option(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS
   "Build tests for the experimental FST-based VST2-compatible host" OFF)
+option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
+  "Run an isolated PipeWire server and verify captured SkyAPO DSP output" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
@@ -536,6 +538,25 @@ add_executable(skyapo-pipewire-test-source tests/pipewire_test_source.cpp)
 target_link_libraries(skyapo-pipewire-test-source PRIVATE PkgConfig::PIPEWIRE)
 add_executable(skyapo-pipewire-test-consumer tests/pipewire_test_consumer.cpp)
 target_link_libraries(skyapo-pipewire-test-consumer PRIVATE PkgConfig::PIPEWIRE)
+if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  if(NOT Python3_Interpreter_FOUND)
+    message(FATAL_ERROR "PipeWire E2E tests require Python 3")
+  endif()
+  find_program(SKYAPO_PIPEWIRE_EXECUTABLE pipewire REQUIRED)
+  find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
+    PATHS /usr/share/pipewire /usr/local/share/pipewire REQUIRED)
+  add_test(NAME skyapo-pipewire-e2e
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt)
+  set_tests_properties(skyapo-pipewire-e2e PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
+endif()
 
 configure_file(packaging/skyapod.service.in
   ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)
