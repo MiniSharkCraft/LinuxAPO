@@ -60,6 +60,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [ ] Port Channel/Copy/Include conditional details and LoudnessCorrection only where Linux equivalents preserve behavior; document endpoint-volume semantics.
 - [x] Explicitly reject `LoudnessCorrection:` with source/line diagnostics until Linux endpoint volume is wired into a semantically equivalent correction path; document why a fixed-gain approximation would change semantics.
 - [x] Monitor the default PipeWire render sink's effective per-channel `Props` volume and mute state, with live CLI status, metadata/Pod tests, and desktop cross-check against `wpctl`; unrelated ALSA device `Props` must not overwrite the valid volume snapshot.
+- [x] Distinguish the diagnostic RMS channel level from a uniform positive per-channel gain candidate; mark asymmetric/zero values unavailable and keep mute separate. Do not treat either candidate as Windows endpoint master-volume semantics without further validation.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
 - Acceptance: every claimed directive has golden reference tests and sanitizer coverage; known latency only is reported.
 
@@ -124,8 +125,9 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
 - [x] Add opt-in isolated PipeWire E2E CTest: launch private server + deterministic capture source + `skyapod` + independent virtual-mic consumer; verify runtime status and -6 dB output. Enabled in the normal hosted Linux CI job; hosted result still pending.
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
-- [ ] Add formatting checks and verify hosted workflow runs after publishing/connecting the repository.
-- [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.
+- [x] Add an incremental `clang-format` CI check for changed SkyAPO-owned C++ files, excluding upstream and generated code; verify hosted workflow runs after publishing/connecting the repository.
+- [x] Document Windows Equalizer APO → Linux SkyAPO config migration and compatibility gaps.
+- [ ] Fresh-install test, licensing/dependency audit, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.
 
 ## 1.0.0 — release

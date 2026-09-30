@@ -27,6 +27,11 @@ struct DefaultSinkVolumeSnapshot {
   bool muted = false;
   float effectiveGain = 0.0f;
   float effectiveDb = -std::numeric_limits<float>::infinity();
+  // Candidate scalar derived from effective per-channel volume. It is only
+  // available for equal positive channel gains. This is not asserted to be
+  // equivalent to a platform endpoint's user-facing master-volume control.
+  bool uniformChannelGainAvailable = false;
+  float uniformChannelGainDb = -std::numeric_limits<float>::infinity();
   std::uint64_t generation = 0;
 };
 
@@ -48,14 +53,14 @@ public:
   ~DefaultSinkVolumeMonitor();
 
   DefaultSinkVolumeMonitor(const DefaultSinkVolumeMonitor &) = delete;
-  DefaultSinkVolumeMonitor &operator=(const DefaultSinkVolumeMonitor &) =
-      delete;
+  DefaultSinkVolumeMonitor &
+  operator=(const DefaultSinkVolumeMonitor &) = delete;
 
   const DefaultSinkVolumeSnapshot &snapshot() const noexcept;
 
   /** Parse an SPA_PARAM_Props pod. Public for isolated native-pod tests. */
   static bool parseProps(const spa_pod *pod,
-                        DefaultSinkVolumeSnapshot &snapshot) noexcept;
+                         DefaultSinkVolumeSnapshot &snapshot) noexcept;
 
   /** Extract stable node.name from standard PipeWire default metadata JSON. */
   static bool parseDefaultSinkMetadata(const char *value,

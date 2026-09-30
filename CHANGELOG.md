@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a tested Windows Equalizer APO → SkyAPO migration guide, an incremental clang-format CI gate, and a conservative uniform-channel gain value kept separate from effective RMS diagnostics for future LoudnessCorrection work.
 - Detect removal of an individual physical-capture link by its PipeWire global ID and recreate it on the control loop without restarting the daemon; private mono/stereo E2E tests destroy a live link, wait for recovery, and verify recorded -6 dB output.
 - Install the preserved Equalizer APO GPL text plus the pinned CLAP and VST3 MIT texts and a third-party inventory; a staged-install CTest checks the packaged notices instead of relying on the source tree alone.
 - Keep the default render endpoint volume snapshot when PipeWire also enumerates unrelated ALSA device `Props`; desktop status now reports effective gain/mute from actual sink channel volumes instead of incorrectly showing unavailable.

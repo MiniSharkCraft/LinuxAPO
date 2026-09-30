@@ -11,8 +11,8 @@
 #define CHECK(condition)                                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \
-      std::cerr << "CHECK failed at " << __FILE__ << ':' << __LINE__ << ": " \
-                << #condition << '\n';                                       \
+      std::cerr << "CHECK failed at " << __FILE__ << ':' << __LINE__ << ": "   \
+                << #condition << '\n';                                         \
       return 1;                                                                \
     }                                                                          \
   } while (false)
@@ -49,19 +49,30 @@ int main() {
   CHECK(Monitor::parseProps(pod, snapshot));
   const float expected = std::sqrt((0.25f + 1.0f) / 2.0f);
   CHECK(std::abs(snapshot.effectiveGain - expected) < 1e-6f);
-  CHECK(std::abs(snapshot.effectiveDb - 20.0f * std::log10(expected)) <
-        1e-5f);
+  CHECK(std::abs(snapshot.effectiveDb - 20.0f * std::log10(expected)) < 1e-5f);
   CHECK(!snapshot.muted);
+  CHECK(!snapshot.uniformChannelGainAvailable);
 
-  pod = makeProps(storage, sizeof(storage), stereo, 2, true);
+  const float equalStereo[] = {0.5f, 0.5f};
+  pod = makeProps(storage, sizeof(storage), equalStereo, 2, false);
+  CHECK(Monitor::parseProps(pod, snapshot));
+  CHECK(snapshot.uniformChannelGainAvailable);
+  CHECK(std::abs(snapshot.uniformChannelGainDb - 20.0f * std::log10(0.5f)) <
+        1e-5f);
+
+  pod = makeProps(storage, sizeof(storage), equalStereo, 2, true);
   CHECK(Monitor::parseProps(pod, snapshot));
   CHECK(snapshot.muted);
+  CHECK(snapshot.uniformChannelGainAvailable);
+  CHECK(std::abs(snapshot.uniformChannelGainDb - 20.0f * std::log10(0.5f)) <
+        1e-5f);
 
   const float silent[] = {0.0f, 0.0f};
   pod = makeProps(storage, sizeof(storage), silent, 2, false);
   CHECK(Monitor::parseProps(pod, snapshot));
   CHECK(snapshot.muted && snapshot.effectiveGain == 0.0f);
   CHECK(std::isinf(snapshot.effectiveDb) && snapshot.effectiveDb < 0);
+  CHECK(!snapshot.uniformChannelGainAvailable);
 
   const float invalid[] = {1.0f, std::numeric_limits<float>::quiet_NaN()};
   pod = makeProps(storage, sizeof(storage), invalid, 2, false);

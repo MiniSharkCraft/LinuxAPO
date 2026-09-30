@@ -23,6 +23,8 @@ bool sameState(const DefaultSinkVolumeSnapshot &a,
                const DefaultSinkVolumeSnapshot &b) {
   return a.stableName == b.stableName && a.available == b.available &&
          a.muted == b.muted && a.effectiveGain == b.effectiveGain &&
+         a.uniformChannelGainAvailable == b.uniformChannelGainAvailable &&
+         a.uniformChannelGainDb == b.uniformChannelGainDb &&
          (a.effectiveDb == b.effectiveDb ||
           (std::isinf(a.effectiveDb) && std::isinf(b.effectiveDb)));
 }
@@ -65,6 +67,8 @@ struct DefaultSinkVolumeMonitor::Impl {
     next.muted = false;
     next.effectiveGain = 0.0f;
     next.effectiveDb = -std::numeric_limits<float>::infinity();
+    next.uniformChannelGainAvailable = false;
+    next.uniformChannelGainDb = -std::numeric_limits<float>::infinity();
     publish(std::move(next));
   }
 
@@ -79,6 +83,8 @@ struct DefaultSinkVolumeMonitor::Impl {
     next.muted = false;
     next.effectiveGain = 0.0f;
     next.effectiveDb = -std::numeric_limits<float>::infinity();
+    next.uniformChannelGainAvailable = false;
+    next.uniformChannelGainDb = -std::numeric_limits<float>::infinity();
     publish(std::move(next));
     if (!wantedName.empty())
       findNode();
@@ -114,8 +120,8 @@ struct DefaultSinkVolumeMonitor::Impl {
         pw_node_enum_params(node, 0, SPA_PARAM_Props, 0, UINT32_MAX, nullptr);
     if (subscribeResult < 0 || enumResult < 0)
       std::cerr << "skyapod: cannot query default render endpoint Props ("
-                << "subscribe=" << subscribeResult
-                << ", enum=" << enumResult << ")\n";
+                << "subscribe=" << subscribeResult << ", enum=" << enumResult
+                << ")\n";
   }
 
   static void onNodeInfo(void *data, const pw_node_info *) {
@@ -162,10 +168,9 @@ struct DefaultSinkVolumeMonitor::Impl {
 
   static void onRegistryRemove(void *data, uint32_t id) {
     auto &self = *static_cast<Impl *>(data);
-    auto it = std::find_if(self.sinks.begin(), self.sinks.end(),
-                           [id](const auto &item) {
-                             return item.second.first == id;
-                           });
+    auto it = std::find_if(
+        self.sinks.begin(), self.sinks.end(),
+        [id](const auto &item) { return item.second.first == id; });
     if (it != self.sinks.end()) {
       const bool wasSelected = it->first == self.wantedName;
       self.sinks.erase(it);
@@ -191,15 +196,16 @@ struct DefaultSinkVolumeMonitor::Impl {
     if (subject != 0 || !key || std::strcmp(key, DefaultSinkKey) != 0)
       return 0;
     std::string name;
-    if (!value || !DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(value, name))
+    if (!value ||
+        !DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(value, name))
       self.select({});
     else
       self.select(name);
     return 0;
   }
 
-  static void onNodeParam(void *data, int, uint32_t id, uint32_t,
-                         uint32_t, const spa_pod *param) {
+  static void onNodeParam(void *data, int, uint32_t id, uint32_t, uint32_t,
+                          const spa_pod *param) {
     auto &self = *static_cast<Impl *>(data);
     if (!self.node || id != SPA_PARAM_Props || !param)
       return;
@@ -213,6 +219,8 @@ struct DefaultSinkVolumeMonitor::Impl {
       next.muted = false;
       next.effectiveGain = 0.0f;
       next.effectiveDb = -std::numeric_limits<float>::infinity();
+      next.uniformChannelGainAvailable = false;
+      next.uniformChannelGainDb = -std::numeric_limits<float>::infinity();
     } else {
       next.available = true;
     }
@@ -242,6 +250,7 @@ DefaultSinkVolumeMonitor::DefaultSinkVolumeMonitor(pw_core *core,
   impl_->callback = callback;
   impl_->userData = userData;
   impl_->current.effectiveDb = -std::numeric_limits<float>::infinity();
+  impl_->current.uniformChannelGainDb = -std::numeric_limits<float>::infinity();
   pw_registry_add_listener(registry, &impl_->registryHook,
                            &Impl::registryEvents, impl_);
 }
@@ -259,7 +268,8 @@ DefaultSinkVolumeMonitor::~DefaultSinkVolumeMonitor() {
   delete impl_;
 }
 
-const DefaultSinkVolumeSnapshot &DefaultSinkVolumeMonitor::snapshot() const noexcept {
+const DefaultSinkVolumeSnapshot &
+DefaultSinkVolumeMonitor::snapshot() const noexcept {
   return impl_->current;
 }
 
@@ -269,7 +279,8 @@ bool DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(
     return false;
   char name[1024]{};
   if (spa_json_str_object_find(value, std::strlen(value), "name", name,
-                               sizeof(name)) <= 0 || name[0] == '\0')
+                               sizeof(name)) <= 0 ||
+      name[0] == '\0')
     return false;
   stableName.assign(name);
   return true;
@@ -280,33 +291,43 @@ bool DefaultSinkVolumeMonitor::parseProps(
   if (!pod || !spa_pod_is_object(pod))
     return false;
   const auto *muteProp = spa_pod_find_prop(pod, nullptr, SPA_PROP_mute);
-  const auto *volProp = spa_pod_find_prop(pod, nullptr, SPA_PROP_channelVolumes);
+  const auto *volProp =
+      spa_pod_find_prop(pod, nullptr, SPA_PROP_channelVolumes);
   if (!volProp)
     return false;
   bool muted = false;
   if (muteProp && spa_pod_get_bool(&muteProp->value, &muted) < 0)
     return false;
   uint32_t count = 0, size = 0, type = 0;
-  const auto *values = static_cast<const uint8_t *>(spa_pod_get_array_full(
-      &volProp->value, &count, &size, &type));
-  if (!values || count == 0 || type != SPA_TYPE_Float ||
-      size != sizeof(float))
+  const auto *values = static_cast<const uint8_t *>(
+      spa_pod_get_array_full(&volProp->value, &count, &size, &type));
+  if (!values || count == 0 || type != SPA_TYPE_Float || size != sizeof(float))
     return false;
   double power = 0.0;
+  float firstVolume = 0.0f;
+  bool channelsMatch = true;
   for (uint32_t i = 0; i < count; ++i) {
     float volume;
     std::memcpy(&volume, values + static_cast<size_t>(i) * size,
                 sizeof(volume));
     if (!std::isfinite(volume) || volume < 0.0f)
       return false;
+    if (i == 0)
+      firstVolume = volume;
+    else if (std::abs(volume - firstVolume) >
+             1e-5f * std::max(1.0f, std::abs(firstVolume)))
+      channelsMatch = false;
     power += static_cast<double>(volume) * volume;
   }
   const float gain = static_cast<float>(std::sqrt(power / count));
   snapshot.effectiveGain = gain;
   snapshot.muted = muted || gain == 0.0f;
-  snapshot.effectiveDb = gain == 0.0f
-                             ? -std::numeric_limits<float>::infinity()
-                             : 20.0f * std::log10(gain);
+  snapshot.effectiveDb = gain == 0.0f ? -std::numeric_limits<float>::infinity()
+                                      : 20.0f * std::log10(gain);
+  snapshot.uniformChannelGainAvailable = channelsMatch && firstVolume > 0.0f;
+  snapshot.uniformChannelGainDb = snapshot.uniformChannelGainAvailable
+                                      ? 20.0f * std::log10(firstVolume)
+                                      : -std::numeric_limits<float>::infinity();
   return true;
 }
 
