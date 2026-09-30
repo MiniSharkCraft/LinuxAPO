@@ -150,7 +150,8 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Document Windows Equalizer APO → Linux SkyAPO config migration and compatibility gaps.
 - [x] Audit Arch package license placement with `namcap`; install all license texts under `/usr/share/licenses/skyapo/` and verify an isolated package archive.
 - [x] Run a clean staged Release build/install smoke; installed CLI/config-check/render, service, desktop metadata, man pages and license notices were inspected. Correct stale LoudnessCorrection docs and avoid linking source-only docs from the installed README.
-- [ ] Fresh-install test, licensing/dependency audit, release candidate checklist.
+- [x] Build `skyapo-0.1.0-13` from the clean current Git source with `makepkg --check`; its Release CTest suite passed 30/30, package staging smoke passed, and the generated archive passed extracted-payload/offline-render smoke. `namcap` reported only implicitly satisfied compiler/runtime libraries and a possibly redundant `pipewire` metadata warning.
+- [ ] Install/remove that package with Pacman in a disposable Arch root, complete the dependency/licensing audit, and finish the release-candidate checklist. The current environment has no Docker daemon or `sudo`; no host package installation was attempted.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.
 
 ## 1.0.0 — release
