@@ -81,7 +81,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             cmake git libsndfile pipewire fftw lilv muparser lv2 \
-            qt6-base pkgconf hicolor-icon-theme wireplumber
+            qt6-base pkgconf hicolor-icon-theme wireplumber namcap
 
       - name: Build and test Arch packages
         run: |
@@ -99,5 +99,7 @@ jobs:
             printf 'Built WAV render verification harness is missing: %s\n' "$render_test" >&2
             exit 1
           fi
+          namcap "$GITHUB_WORKSPACE/packaging/PKGBUILD"
+          namcap "$GITHUB_WORKSPACE/packaging/${package[0]}"
           python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
             --render-test-binary "$render_test" "${package[0]}"
