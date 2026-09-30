@@ -96,6 +96,35 @@ int main() {
         throw std::runtime_error(
             "LV2 saved state was not numerically restored");
     }
+    {
+      Engine lastGood(48000, 2, 64);
+      lastGood.loadConfig(config.string());
+      const auto stateDirectory = stateRoot / "skyapo" / "lv2-state";
+      std::filesystem::path stateFile;
+      for (const auto &entry :
+           std::filesystem::directory_iterator(stateDirectory))
+        if (entry.is_regular_file() && entry.path().extension() == ".ttl")
+          stateFile = entry.path();
+      if (stateFile.empty())
+        throw std::runtime_error("LV2 state sidecar was not created");
+      {
+        std::ofstream corrupt(stateFile, std::ios::binary | std::ios::trunc);
+        corrupt << "not a valid LV2 state document";
+      }
+      bool rejected = false;
+      try {
+        lastGood.loadConfig(config.string());
+      } catch (const std::exception &) {
+        rejected = true;
+      }
+      std::array<float, 16> block{};
+      block.fill(1.0f);
+      lastGood.process(block.data(), 8);
+      if (!rejected || std::abs(block.front() - 0.8f) > 1e-6f ||
+          std::abs(block.back() - 0.8f) > 1e-6f)
+        throw std::runtime_error("corrupt LV2 state did not reject reload "
+                                 "while preserving last-good graph");
+    }
     std::filesystem::remove_all(stateRoot);
     std::cout << "LV2 live parameter mailbox passed\n";
     return 0;
