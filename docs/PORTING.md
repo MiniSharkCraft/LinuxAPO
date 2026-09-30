@@ -46,8 +46,19 @@ tracking. `src/platform/linux/ConfigSource` now owns Linux path canonicalization
 relative Include resolution and streaming line reads; directive semantics,
 factory lifecycle and candidate-graph transactions remain in `Engine`. Its
 focused tests preserve absolute/relative path behavior, line boundaries, EOF
-and missing-file diagnostics. This is a filesystem boundary, not yet a complete
-replacement for upstream `FilterEngine` configuration orchestration.
+and missing-file diagnostics. Together with XDG `Settings`, the inotify
+`ConfigWatcher`, and the PipeWire control-loop candidate Engine publication,
+these are the Linux replacements for the upstream engine's Registry config
+discovery, Win32 file reads, directory-notification thread, semaphore and
+critical-section ownership path. The upstream Windows loader is deliberately
+not compiled: its watcher waits on the audio-side transition semaphore and its
+Registry/APO services have no Linux equivalent. The Linux control loop keeps
+the already-tested `Engine` factory lifecycle and graph transaction while the
+audio callback only processes installed Engines and reports transition
+completion. Coverage is split across `skyapo-config-source`,
+`skyapo-config-watcher`, `skyapo-upstream-process`, upstream config fixtures,
+and private PipeWire Include-reload/rollback E2E; this proves the replacement
+services, not source-level portability of upstream `FilterEngine.cpp`.
 
 ## Current Linux adapter scope
 
