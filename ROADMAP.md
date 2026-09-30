@@ -74,6 +74,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Add first native CLAP audio-effect host against official pinned CLAP headers; add ID discovery via CLAP_PATH/standard paths and numeric offline/realtime-audit fixtures.
 - [x] Add CLAP parameter metadata/CLI inspection and static config-time parameter events/overrides with range validation; test numerical offline processing, invalid config rejection, allocation audit and live PipeWire capture.
+- [x] Latch CLAP `CLAP_PROCESS_ERROR` atomically and silence the current/following blocks without recalling the failed plugin; daemon/CLI failure reporting and equivalent VST3 handling remain open.
 - [x] Pin official Steinberg VST3 SDK components and build the Linux module/hosting subset without adding the full SDK/tutorial/UI tree.
 - [x] Add VST3 bundle/class discovery, CLI info, and an initial single-bus mono/stereo audio-effect adapter; manually render a real installed LSP Filter Stereo bundle offline and confirm changed samples.
 - [x] Honor `VST3_PATH` alongside Steinberg standard module paths and cache discovered module metadata per process.
@@ -110,7 +111,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add actual active filter source-line listing and build/upstream revision diagnostics.
 - [x] Include the linked PipeWire library version in `skyapo diagnostics`; it is reported from the runtime library, not hardcoded.
 - [x] Report a connected-but-silent daemon control socket as unresponsive; `skyapo status` now exits with an actionable error instead of printing an empty response.
-- [ ] Version the IPC protocol and add structured/machine-readable diagnostics.
+- [ ] Version the IPC protocol.
+- [x] Add tested structured/machine-readable CLI diagnostics (`skyapo diagnostics --json`).
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
 - [x] Desktop launcher for the Qt editor.
 - [ ] AppStream metadata, branded icon, MIME association and man pages.

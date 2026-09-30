@@ -176,6 +176,13 @@ target_link_libraries(skyapod PRIVATE skyapo-pipewire)
 target_link_options(skyapod PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
 
 enable_testing()
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-diagnostics-json
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics_json_test.py
+      $<TARGET_FILE:skyapo>)
+endif()
 if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
   if(Qt6Widgets_FOUND)
