@@ -1,28 +1,62 @@
-name: Linux build and tests
+name: Linux CI
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        sanitizers: [OFF, ON]
+  build-and-test:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source and pinned upstreams
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ pkg-config libsndfile1-dev libpipewire-0.3-dev qt6-base-dev
+          sudo apt-get install --yes \
+            cmake g++ ninja-build pkg-config \
+            libsndfile1-dev libpipewire-0.3-dev libfftw3-dev \
+            liblilv-dev lv2-dev qt6-base-dev
+
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DSKYAPO_SANITIZERS=${{ matrix.sanitizers }}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
       - name: Build
         run: cmake --build build --parallel 2
+
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source and pinned upstreams
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake g++ ninja-build pkg-config \
+            libsndfile1-dev libpipewire-0.3-dev libfftw3-dev \
+            liblilv-dev lv2-dev qt6-base-dev
+
+      - name: Configure ASan/UBSan
+        run: >-
+          cmake -S . -B build-asan -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug -DSKYAPO_SANITIZERS=ON
+
+      - name: Build ASan/UBSan
+        run: cmake --build build-asan --parallel 2
+
+      - name: Test ASan/UBSan
+        run: ctest --test-dir build-asan --output-on-failure

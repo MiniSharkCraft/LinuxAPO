@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added GitHub Actions jobs for native Linux configure/build/CTest and ASan/UBSan; physical-device testing remains manual.
 - Added pinned official Steinberg VST3 SDK components, a Linux hosting subset, cached bundle discovery through standard paths and `VST3_PATH`, and CLI inspection.
 - Added initial mono/stereo, single-audio-bus VST3 processing; manually rendered the installed LSP Filter Stereo plugin offline (192000 frames at 48 kHz; output samples changed).
 - Added a SkyAPO-authored VST3 half-gain bundle fixture; CTest measures −6.0206 dB offline and audits 1000 variable realtime processing blocks without host/DSP callback allocations.
