@@ -1,4 +1,5 @@
 #include "ConfigWatcher.h"
+#include "ConfigSource.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -9,10 +10,7 @@
 namespace skyapo::platform {
 
 ConfigWatcher::ConfigWatcher(const std::filesystem::path &rootConfig) {
-  std::error_code error;
-  root = std::filesystem::weakly_canonical(rootConfig, error);
-  if (error)
-    root = std::filesystem::absolute(rootConfig).lexically_normal();
+  root = ConfigSource::canonicalize(rootConfig);
   descriptor = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
   if (descriptor < 0)
     throw std::runtime_error("cannot create config file watcher");
@@ -34,10 +32,7 @@ void ConfigWatcher::update(
     const std::vector<std::filesystem::path> &configFiles) {
   std::unordered_map<std::string, DirectoryWatch> desired;
   for (const auto &file : configFiles) {
-    std::error_code error;
-    auto absolute = std::filesystem::weakly_canonical(file, error);
-    if (error)
-      absolute = std::filesystem::absolute(file).lexically_normal();
+    const auto absolute = ConfigSource::canonicalize(file);
     const auto directory = absolute.parent_path();
     desired[directory.string()].path = directory;
     std::error_code directoryError;
@@ -147,8 +142,8 @@ bool ConfigWatcher::consumeEvents() {
     for (size_t offset = 0; offset < static_cast<size_t>(length);) {
       const auto *event =
           reinterpret_cast<const inotify_event *>(buffer + offset);
-      processEvent(event->wd, event->mask,
-                   event->len ? event->name : nullptr, relevant);
+      processEvent(event->wd, event->mask, event->len ? event->name : nullptr,
+                   relevant);
       offset += sizeof(inotify_event) + event->len;
     }
   }

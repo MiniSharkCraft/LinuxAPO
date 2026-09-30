@@ -132,6 +132,22 @@ int main() {
       }
     }
   }
+
+  const fs::path rootAlias = directory / "root-alias.txt";
+  if (symlink(root.c_str(), rootAlias.c_str()) != 0) {
+    std::cerr << "could not create config watcher symlink fixture\n";
+    fs::remove_all(directory);
+    return 1;
+  }
+  {
+    skyapo::platform::ConfigWatcher watcher(rootAlias);
+    watcher.update({rootAlias, included});
+    if (!write(root, "Include: includes/child.txt\n# updated via target\n") ||
+        !hasEvent(watcher)) {
+      std::cerr << "watcher did not canonicalize a symlink config path\n";
+      result = 1;
+    }
+  }
   fs::remove_all(directory);
   return result;
 }

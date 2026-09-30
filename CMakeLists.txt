@@ -349,7 +349,10 @@ endif()
 add_executable(skyapo-ipc-protocol-tests tests/ipc_protocol_test.cpp)
 add_test(NAME skyapo-ipc-protocol COMMAND skyapo-ipc-protocol-tests)
 add_executable(skyapo-config-watcher-tests
-  tests/config_watcher_test.cpp src/platform/ConfigWatcher.cpp)
+  tests/config_watcher_test.cpp src/platform/ConfigWatcher.cpp
+  src/platform/linux/ConfigSource.cpp)
+target_include_directories(skyapo-config-watcher-tests PRIVATE
+  src/platform/linux)
 add_test(NAME skyapo-config-watcher COMMAND skyapo-config-watcher-tests)
 add_test(NAME skyapo-default-sink-volume
   COMMAND skyapo-default-sink-volume-tests)
