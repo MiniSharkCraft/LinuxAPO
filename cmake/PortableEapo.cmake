@@ -44,8 +44,9 @@ if(SKYAPO_HAVE_MUPARSERX)
   endforeach()
 endif()
 # FilterConfiguration and IFilterFactory consume only immutable sizing values
-# at construction/configuration time. Adapt generated copies to a narrow
-# context interface instead of retaining a global-name FilterEngine shim.
+# at construction/configuration time. Adapt generated copies to their shared
+# context interface so both the Linux runtime and a future upstream FilterEngine
+# port can provide the same contract without the global-name shim.
 # Upstream source stays pristine; checked tokens make drift fail at configure.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${EAPO}/FilterConfiguration.h" "${EAPO}/FilterConfiguration.cpp"
@@ -67,16 +68,16 @@ foreach(configuration_file FilterConfiguration.h FilterConfiguration.cpp)
     message(FATAL_ERROR
       "Upstream FilterConfiguration changed; review its Linux context adaptation")
   endif()
-  string(REPLACE "FilterEngine" "FilterConfigurationContext"
+  string(REPLACE "FilterEngine" "IFilterFactoryContext"
     configuration_content "${configuration_content}")
   if(configuration_file STREQUAL "FilterConfiguration.cpp")
-    string(REPLACE "#include \"FilterConfigurationContext.h\""
-      "#include <FilterConfigurationContext.h>" configuration_content
+    string(REPLACE "#include \"IFilterFactoryContext.h\""
+      "#include <IFilterFactoryContext.h>" configuration_content
       "${configuration_content}")
     string(REPLACE "#include <FilterEngine.h>" "" configuration_content
       "${configuration_content}")
   endif()
-  string(FIND "${configuration_content}" "FilterConfigurationContext"
+  string(FIND "${configuration_content}" "IFilterFactoryContext"
     configuration_context_found)
   if(configuration_context_found EQUAL -1)
     message(FATAL_ERROR "Could not decouple upstream FilterConfiguration context")

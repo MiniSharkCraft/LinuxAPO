@@ -29,24 +29,26 @@ The archive is now integrated reproducibly as the default conditional-expression
 ### `FilterConfiguration` constructor boundary
 
 The official submodule remains unchanged. CMake adapts only generated
-build-tree copies: `FilterConfiguration.h/.cpp` accept
-`FilterConfigurationContext`, and the generated `IFilterFactory.h` takes the
-Linux-neutral `IFilterFactoryContext` at initialization. Both expose only
-three sizing values. The old global-name Linux `FilterEngine` shim has been
-removed, avoiding confusion and ODR/API collisions with upstream's Windows
-runtime class. Replacement tokens are checked during CMake configuration so
-upstream drift fails loudly. The context is valid only during factory
-initialization; factories must not retain it. This is an incremental seam,
-not a port of upstream `FilterEngine.cpp`, which still requires replacement
-of Win32 threading, file I/O, registry and APO services. The Linux daemon
-owns config lifecycle and uses a separate `ConfigWatcher` for inotify-based
-root/Include tracking.
+build-tree copies: `FilterConfiguration.h/.cpp` and generated
+`IFilterFactory.h` both consume the Linux-neutral `IFilterFactoryContext`,
+which exposes only real/output channel counts and maximum frame count. The
+Linux runtime supplies a short-lived `FilterConfigurationContext`; a future
+upstream `FilterEngine` adapter can implement the same contract directly.
+The old global-name Linux `FilterEngine` shim has been removed, avoiding
+confusion and ODR/API collisions with upstream's Windows runtime class.
+Replacement tokens are checked during CMake configuration so upstream drift
+fails loudly. The context is valid only during factory initialization;
+factories must not retain it. This is an incremental seam, not a port of
+upstream `FilterEngine.cpp`, which still requires replacement of Win32
+threading, file I/O, registry and APO services. The Linux daemon owns config
+lifecycle and uses a separate `ConfigWatcher` for inotify-based root/Include
+tracking.
 
 ## Current Linux adapter scope
 
 The current build compiles upstream `FilterConfiguration.cpp` and uses its actual `read` → `process` → `write` path with actual `PreampFilter`, `BiQuad`, `BiQuadFilter`, `IIRFilter`, `DelayFilter`, `ChannelFilter`, `CopyFilter`, and their factories. The supported factories are initialized and driven in the same ordered `IFilterFactory` lifecycle as upstream: configuration start/end, recursive file start/end, and command dispatch that stops at the first produced filter. `FilterConfigurationContext` and `IFilterFactoryContext` expose only the three sizing values needed by the upstream buffer owner and selected factory API. With FFTW3f available it also compiles upstream `GraphicEQFilter`, `GainIterator`, `ConvolutionFilter` and `libHybridConv`; Linux overrides convolution IR loading while retaining the upstream partitioned-convolution DSP. The actual upstream `LoudnessCorrectionFilter`/factory are included for daemon processing. Its control worker reads an atomic snapshot of uniform, positive PipeWire default-render channel gain; no PipeWire types enter the filter. Offline processing/config validation reject it when no live provider is active. The outer `Engine` remains a Linux config parser/graph builder and does not claim full EAPO parser compatibility. It accepts `Preamp:`, `Filter:` (BiQuad and IIR forms), `Delay:`, `Channel:`, `Copy:`, `GraphicEQ:`, `Convolution:`, daemon-only `LoudnessCorrection:`, relative/nested `Include:`, and (when Lilv is available) `Plugin: LV2` with validated input-control overrides. Copy-created intermediate channels use preallocated upstream FilterConfiguration scratch planes and can be mixed back into the fixed PipeWire output layout.
 
-The metadata boundary is now separated: selected factories use generated `IFilterFactoryContext`, while `FilterConfiguration` uses `FilterConfigurationContext`; neither is named `FilterEngine`. This removes the direct type-name/ODR collision but does not make upstream `FilterEngine.cpp` portable. `Engine::processTransitionTo()` reuses the real upstream `FilterConfiguration::doTransition()` cosine mix for two prebuilt compatible configurations. For same-format config reloads, `Runtime` publishes a control-owned pending Engine; the PipeWire callback processes both graphs for the upstream 10 ms transition without allocating, publishes completion, and the control loop promotes ownership/retires the old graph only after callback quiescence. `audioMode` gates callbacks during control-thread CLAP state saves; sample-rate/quantum changes are hard rebuilds rather than crossfades between incompatible workspaces. Unit/realtime-allocation tests cover variable blocks crossing the 480-frame 48 kHz boundary, and private PipeWire Include-reload plus CLAP-state tests verify the live path. This still does not make upstream `FilterEngine.cpp` portable: its config discovery, watcher, and Windows semaphore flow need separate Linux adapters, and the upstream publication flow must not be copied into the callback unchanged.
+The metadata boundary now has one shared generated `IFilterFactoryContext` implemented by `FilterConfigurationContext`; both selected factories and upstream `FilterConfiguration` consume it, and a Linux-portable upstream `FilterEngine` can implement it without a second context ABI. This removes the direct type-name/ODR collision but does not make upstream `FilterEngine.cpp` portable. `Engine::processTransitionTo()` reuses the real upstream `FilterConfiguration::doTransition()` cosine mix for two prebuilt compatible configurations. For same-format config reloads, `Runtime` publishes a control-owned pending Engine; the PipeWire callback processes both graphs for the upstream 10 ms transition without allocating, publishes completion, and the control loop promotes ownership/retires the old graph only after callback quiescence. `audioMode` gates callbacks during control-thread CLAP state saves; sample-rate/quantum changes are hard rebuilds rather than crossfades between incompatible workspaces. Unit/realtime-allocation tests cover variable blocks crossing the 480-frame 48 kHz boundary, and private PipeWire Include-reload plus CLAP-state tests verify the live path. This still does not make upstream `FilterEngine.cpp` portable: its config discovery, watcher, and Windows semaphore flow need separate Linux adapters, and the upstream publication flow must not be copied into the callback unchanged.
 
 Conditional flow supports nested upstream-style `If:`, `ElseIf:`, `Else:` and `EndIf:` with MuParserX 3.0.1 by default and classic muParser as an optional fallback. In the MuParserX build, the same parser instance spans the root config and nested Includes, defines `sampleRate`, `inputChannelCount` and `outputChannelCount`, evaluates `Eval:` expressions, and expands inline backtick expressions in active commands. Portable upstream `regexSearch` and `regexReplace` callbacks are adapted from `parser/RegexFunctions.cpp` and run outside realtime processing. The production parser now also compiles upstream `LogicalOperators` and `StringOperators` build-tree adaptations, including `not` and string-aware `+`; upstream files in the SourceForge submodule remain unchanged. Tests cover semicolon sequencing, a variable assigned by `Eval:` and consumed in an included file, numeric inline gain expansion, both regex functions, upstream string concatenation/`not`, source locations on invalid expressions, and last-valid-graph preservation. The unmodified upstream `Setup/config/iir_lowpass.txt` also passes the production parser/factory/DSP path with measured passband and stopband attenuation. Classic muParser builds explicitly reject `Eval:` and inline expressions. This is still a subset: Windows registry functions, other upstream operator overrides, and full string/matrix expression semantics are not implemented.
 
