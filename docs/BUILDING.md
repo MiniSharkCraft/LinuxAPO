@@ -4,6 +4,8 @@ Requirements: CMake 3.20+, C++17 compiler, pkg-config, libsndfile and PipeWire d
 
 The Arch `packaging/PKGBUILD` uses a local `git+file://` source. Git exports the committed revision, not modified or untracked working-tree files; therefore `makepkg` refuses to run when the SkyAPO source worktree is dirty. Commit or stash changes first so the package contents match the tested revision.
 
+The Arch build defaults to two CMake jobs so GCC LTO does not fan out across every target and exhaust memory on builder hosts. Override with `SKYAPO_BUILD_JOBS=<positive-integer>` when more build capacity is available; invalid values fail before compilation.
+
 For deterministic end-to-end runtime tests, install the PipeWire daemon binary and use `-DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON`. CTest starts isolated servers in temporary XDG runtime/config directories, processes deterministic mono and stereo sources with `Preamp: -6 dB`, and checks samples recorded by independent clients from `SkyAPO Virtual Mic`. The tests do not touch the desktop PipeWire server or require physical hardware. The option is off by default; ordinary builds retain unit/offline tests only.
 
 ```sh

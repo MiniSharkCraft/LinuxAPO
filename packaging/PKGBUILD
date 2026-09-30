@@ -33,12 +33,18 @@ prepare() {
 }
 
 build() {
+  local jobs="${SKYAPO_BUILD_JOBS:-2}"
+  if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+    printf '==> ERROR: SKYAPO_BUILD_JOBS must be a positive integer (got %q).\n' "$jobs" >&2
+    return 1
+  fi
+
   cmake -S "$srcdir/skyapo" -B "$srcdir/skyapo-build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DSKYAPO_MUPARSERX_ARCHIVE="$srcdir/muparserx_v3_0_1.zip"
-  cmake --build "$srcdir/skyapo-build" --parallel
+  cmake --build "$srcdir/skyapo-build" --parallel "$jobs"
 }
 
 check() {
