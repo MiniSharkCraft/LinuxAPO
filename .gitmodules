@@ -13,3 +13,6 @@
 [submodule "upstream/vst3/public.sdk"]
 	path = upstream/vst3/public.sdk
 	url = https://github.com/steinbergmedia/vst3_public_sdk.git
+[submodule "upstream/fst"]
+	path = upstream/fst
+	url = https://git.iem.at/zmoelnig/FST.git
