@@ -340,6 +340,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   auto *refreshButton = new QPushButton(tr("Refresh devices"), root);
   auto *startButton = new QPushButton(tr("Start daemon"), root);
   auto *stopButton = new QPushButton(tr("Stop daemon"), root);
+  startButton->setObjectName(QStringLiteral("startDaemon"));
+  stopButton->setObjectName(QStringLiteral("stopDaemon"));
   deviceRow->addWidget(new QLabel(tr("Input device:"), root));
   deviceRow->addWidget(deviceCombo, 1);
   deviceRow->addWidget(refreshButton);
@@ -503,24 +505,29 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
           &MainWindow::refreshDevices);
   connect(deviceCombo, qOverload<int>(&QComboBox::activated), this,
           &MainWindow::selectDevice);
-  connect(startButton, &QPushButton::clicked, this, [this] {
-    runCli({"start"}, [this](int result, QByteArray output, QByteArray error) {
+  const auto runDaemonControl = [this, startButton,
+                                 stopButton](const QString &command) {
+    if (daemonControlPending)
+      return;
+    daemonControlPending = true;
+    startButton->setEnabled(false);
+    stopButton->setEnabled(false);
+    runCli({command}, [this, startButton, stopButton](
+                          int result, QByteArray output, QByteArray error) {
+      daemonControlPending = false;
+      startButton->setEnabled(true);
+      stopButton->setEnabled(true);
       if (result != 0)
         QMessageBox::warning(
             this, tr("SkyAPO"),
             QString::fromUtf8(error.isEmpty() ? output : error));
       refreshStatus();
     });
-  });
-  connect(stopButton, &QPushButton::clicked, this, [this] {
-    runCli({"stop"}, [this](int result, QByteArray output, QByteArray error) {
-      if (result != 0)
-        QMessageBox::warning(
-            this, tr("SkyAPO"),
-            QString::fromUtf8(error.isEmpty() ? output : error));
-      refreshStatus();
-    });
-  });
+  };
+  connect(startButton, &QPushButton::clicked, this,
+          [runDaemonControl] { runDaemonControl(QStringLiteral("start")); });
+  connect(stopButton, &QPushButton::clicked, this,
+          [runDaemonControl] { runDaemonControl(QStringLiteral("stop")); });
 
   if (path.isEmpty()) {
     path = defaultConfigPath();

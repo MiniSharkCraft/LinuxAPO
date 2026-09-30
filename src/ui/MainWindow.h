@@ -78,6 +78,7 @@ private:
   bool statusRequestPending{};
   bool deviceRequestPending{};
   bool deviceSetPending{};
+  bool daemonControlPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};
   QString saveAsError;

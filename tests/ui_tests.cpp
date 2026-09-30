@@ -125,6 +125,27 @@ bool writeDeviceQueryFailureCliFixture(const QString &path) {
                              QFileDevice::ExeOwner);
 }
 
+bool writeDaemonControlCliFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "case \"$1\" in\n"
+      "  status) printf '%s\\n' 'Daemon: streaming'; exit 0 ;;\n"
+      "  device) printf '%s\\n' 'ID\\tNODE "
+      "NAME\\tDESCRIPTION\\tSELECTED\\tCHANNELS\\tSAMPLE RATE'; exit 0 ;;\n"
+      "  start|stop)\n"
+      "    printf '%s\\n' \"$1\" >> \"$SKYAPO_UI_TEST_CONTROL_LOG\"\n"
+      "    while [ ! -e \"$SKYAPO_UI_TEST_CONTROL_GATE_DIR/$1\" ]; do sleep "
+      "0.01; done\n"
+      "    exit 0 ;;\n"
+      "esac\n"
+      "exit 0\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
 bool configIsValid(const QString &cli, const QString &path,
                    QString *diagnostic = nullptr) {
   QProcess process;
@@ -1454,6 +1475,101 @@ int main(int argc, char **argv) {
               << '\n';
     return 1;
   }
+  const QString daemonControlScript =
+      temporary.filePath(QStringLiteral("daemon-control-cli.sh"));
+  const QString daemonControlLog =
+      temporary.filePath(QStringLiteral("daemon-control.log"));
+  const QString daemonControlGateDir =
+      temporary.filePath(QStringLiteral("daemon-control-gates"));
+  if (!QDir().mkpath(daemonControlGateDir) ||
+      !writeDaemonControlCliFixture(daemonControlScript)) {
+    std::cerr << "could not create daemon control CLI fixture\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_CONTROL_LOG", daemonControlLog.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_CONTROL_GATE_DIR",
+          daemonControlGateDir.toLocal8Bit());
+  MainWindow daemonControlWindow(configPath, daemonControlScript);
+  auto *startDaemon =
+      daemonControlWindow.findChild<QPushButton *>("startDaemon");
+  auto *stopDaemon = daemonControlWindow.findChild<QPushButton *>("stopDaemon");
+  if (!startDaemon || !stopDaemon) {
+    std::cerr << "daemon control buttons are missing stable test identifiers\n";
+    return 1;
+  }
+  startDaemon->click();
+  if (startDaemon->isEnabled() || stopDaemon->isEnabled()) {
+    std::cerr << "Start did not serialize daemon control actions\n";
+    return 1;
+  }
+  stopDaemon->click();
+  const auto waitForControlLog = [&](const QByteArray &expected) {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 2000) {
+      QFile log(daemonControlLog);
+      if (log.open(QIODevice::ReadOnly) && log.readAll().contains(expected))
+        return true;
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return false;
+  };
+  const auto releaseDaemonControl = [&](const QString &command) {
+    QFile gate(daemonControlGateDir + QLatin1Char('/') + command);
+    return gate.open(QIODevice::WriteOnly);
+  };
+  if (!waitForControlLog("start\n")) {
+    std::cerr << "Start request did not reach the delayed CLI fixture\n";
+    return 1;
+  }
+  {
+    QFile log(daemonControlLog);
+    if (!log.open(QIODevice::ReadOnly) || log.readAll() != "start\n") {
+      std::cerr << "Stop overlapped the still-pending Start request\n";
+      return 1;
+    }
+  }
+  if (!releaseDaemonControl(QStringLiteral("start"))) {
+    std::cerr << "could not release delayed Start fixture\n";
+    return 1;
+  }
+  QElapsedTimer controlCompletionWait;
+  controlCompletionWait.start();
+  while (controlCompletionWait.elapsed() < 2000 &&
+         (!startDaemon->isEnabled() || !stopDaemon->isEnabled())) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!startDaemon->isEnabled() || !stopDaemon->isEnabled()) {
+    std::cerr << "daemon controls did not unlock after Start completed\n";
+    return 1;
+  }
+  stopDaemon->click();
+  if (startDaemon->isEnabled() || stopDaemon->isEnabled() ||
+      !waitForControlLog("stop\n")) {
+    std::cerr << "Stop did not start after the prior control completed\n";
+    return 1;
+  }
+  if (!releaseDaemonControl(QStringLiteral("stop"))) {
+    std::cerr << "could not release delayed Stop fixture\n";
+    return 1;
+  }
+  controlCompletionWait.restart();
+  while (controlCompletionWait.elapsed() < 2000 &&
+         (!startDaemon->isEnabled() || !stopDaemon->isEnabled())) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  QFile daemonControlResults(daemonControlLog);
+  if (!startDaemon->isEnabled() || !stopDaemon->isEnabled() ||
+      !daemonControlResults.open(QIODevice::ReadOnly) ||
+      daemonControlResults.readAll() != "start\nstop\n") {
+    std::cerr << "Start/Stop requests were not serialized in user order\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_CONTROL_LOG");
+  qunsetenv("SKYAPO_UI_TEST_CONTROL_GATE_DIR");
   std::cout << "upstream editor widgets, selection/reordering, config "
                "preservation, async UI, stable device selection, and "
                "bounded CLI failure handling, and GraphicEQ serialization "
