@@ -304,6 +304,17 @@ if(LILV_FOUND AND LV2_FOUND)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_LV2=1)
   add_dependencies(skyapo-tests skyapo-test-lv2)
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-lv2)
+  add_executable(skyapo-lv2-oversize-test tests/plugin_oversize_test.cpp)
+  target_include_directories(skyapo-lv2-oversize-test PRIVATE src/plugin)
+  target_link_libraries(skyapo-lv2-oversize-test PRIVATE skyapo-core)
+  add_dependencies(skyapo-lv2-oversize-test skyapo-test-lv2)
+  add_test(NAME skyapo-lv2-oversize-block COMMAND skyapo-lv2-oversize-test)
+  set_tests_properties(skyapo-lv2-oversize-block PROPERTIES
+    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+  if(SKYAPO_SANITIZERS)
+    set_property(TEST skyapo-lv2-oversize-block APPEND PROPERTY ENVIRONMENT
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+  endif()
   set_tests_properties(skyapo-core skyapo-realtime-safety PROPERTIES
     ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
   if(SKYAPO_SANITIZERS)
