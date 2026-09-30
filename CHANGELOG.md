@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an Arch Linux container job to CI for PKGBUILD build and package CTest validation; locally rebuilt `skyapo` and `skyapo-debug` from a fresh source clone, with 12/12 tests passing. Hosted CI remains unverified without a configured remote.
 - Added GitHub Actions jobs for native Linux configure/build/CTest and ASan/UBSan; physical-device testing remains manual.
 - Added pinned official Steinberg VST3 SDK components, a Linux hosting subset, cached bundle discovery through standard paths and `VST3_PATH`, and CLI inspection.
 - Added initial mono/stereo, single-audio-bus VST3 processing; manually rendered the installed LSP Filter Stereo plugin offline (192000 frames at 48 kHz; output samples changed).

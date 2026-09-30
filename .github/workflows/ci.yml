@@ -60,3 +60,24 @@ jobs:
 
       - name: Test ASan/UBSan
         run: ctest --test-dir build-asan --output-on-failure
+
+  arch-package:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Check out source and pinned upstreams
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            cmake git libsndfile pipewire fftw lilv lv2 qt6-base pkgconf
+
+      - name: Build and test Arch packages
+        run: |
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/packaging"
+          su builder -s /bin/bash -c 'makepkg --noconfirm --nodeps --clean'

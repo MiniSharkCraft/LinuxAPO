@@ -102,7 +102,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Desktop launcher for the Qt editor.
 - [ ] AppStream metadata, branded icon, MIME association and man pages.
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
-- [ ] Extend CI with formatting and Arch package sanity checks, then verify hosted workflow runs after publishing/connecting the repository.
+- [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
+- [ ] Add formatting checks and verify hosted workflow runs after publishing/connecting the repository.
 - [ ] Fresh-install test, licensing/dependency audit, migration docs, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.
 
