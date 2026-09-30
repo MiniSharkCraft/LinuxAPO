@@ -1,0 +1,3 @@
+# LSP Filter Stereo: bypass enabled for a predictable unity-gain PipeWire test.
+# Discover/confirm IDs with: skyapo plugin info 64737020666C747320202020666C7473
+Plugin: VST3 64737020666C747320202020666C7473 490312032=1

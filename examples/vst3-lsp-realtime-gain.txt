@@ -1,0 +1,3 @@
+# LSP Filter Stereo active audio path; Input gain normalized away from default.
+# Run with VST3_PATH=/usr/lib/vst3/lsp-plugins.vst3.
+Plugin: VST3 64737020666C747320202020666C7473 536350147=0.82
