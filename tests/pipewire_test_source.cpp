@@ -10,12 +10,14 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 struct Source {
   pw_main_loop* loop{};
   pw_filter* filter{};
   unsigned channels{2};
+  std::string nodeName;
   std::array<void*, 2> ports{};
   double phase{};
   bool failed{};
@@ -61,7 +63,8 @@ struct Source {
     }
   }
 
-  explicit Source(unsigned channelCount) : channels(channelCount) {}
+  explicit Source(unsigned channelCount, std::string name)
+      : channels(channelCount), nodeName(std::move(name)) {}
 
   int run() {
     pw_init(nullptr, nullptr);
@@ -77,15 +80,16 @@ struct Source {
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGINT, signal, this);
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGTERM, signal, this);
     const bool mono = channels == 1;
-    const char* nodeName = mono ? "skyapo.test.mono" : "skyapo.test.input";
-    const char* description = mono ? "SkyAPO Deterministic Mono Input"
-                                   : "SkyAPO Deterministic Test Input";
+    const char* description = nodeName == "skyapo.test.mono"
+                                  ? "SkyAPO Deterministic Mono Input"
+                                  : "SkyAPO Deterministic Test Input";
     const char* positions = mono ? "[ MONO ]" : "[ FL FR ]";
     auto* properties =
-        pw_properties_new(PW_KEY_NODE_NAME, nodeName, PW_KEY_NODE_DESCRIPTION,
-                          description, PW_KEY_MEDIA_CLASS, "Audio/Source",
-                          PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER,
-                          "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
+        pw_properties_new(PW_KEY_NODE_NAME, nodeName.c_str(),
+                          PW_KEY_NODE_DESCRIPTION, description,
+                          PW_KEY_MEDIA_CLASS, "Audio/Source", PW_KEY_NODE_VIRTUAL,
+                          "true", PW_KEY_NODE_WANT_DRIVER, "true",
+                          PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     pw_properties_set(properties, SPA_KEY_AUDIO_POSITION, positions);
     filter = pw_filter_new(core, "SkyAPO Test Input", properties);
@@ -134,11 +138,22 @@ struct Source {
 
 int main(int argc, char** argv) {
   try {
-    if (argc > 2 || (argc == 2 && std::string(argv[1]) != "--mono")) {
-      fprintf(stderr, "usage: skyapo-pipewire-test-source [--mono]\n");
-      return 2;
+    unsigned channels = 2;
+    std::string name = "skyapo.test.input";
+    for (int i = 1; i < argc; ++i) {
+      const std::string arg = argv[i];
+      if (arg == "--mono") {
+        channels = 1;
+        name = "skyapo.test.mono";
+      } else if (arg == "--name" && i + 1 < argc) {
+        name = argv[++i];
+      } else {
+        fprintf(stderr, "usage: skyapo-pipewire-test-source [--mono] "
+                        "[--name NODE_NAME]\n");
+        return 2;
+      }
     }
-    Source source(argc == 2 ? 1 : 2);
+    Source source(channels, std::move(name));
     return source.run();
   } catch (const std::exception& error) {
     fprintf(stderr, "test source: %s\n", error.what());

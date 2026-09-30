@@ -140,7 +140,8 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "renegotiate", "transition-format", "device-filter"
+        "renegotiate", "transition-format", "device-filter",
+        "device-switch"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
@@ -149,7 +150,7 @@ def main():
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
             "vst2-live-param|plugin-bypass|renegotiate|transition-format|"
-            "device-filter")
+            "device-filter|device-switch")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
@@ -168,6 +169,7 @@ def main():
     renegotiate = mode == "renegotiate"
     transition_format = mode == "transition-format"
     device_filter = mode == "device-filter"
+    device_switch = mode == "device-switch"
     plugin_chain = plugin_live or plugin_bypass or latency_plugin
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
@@ -231,7 +233,7 @@ def main():
         logs = (root / "pipewire.log").open("w+")
         source_log = (root / "source.log").open("w+")
         daemon_log = (root / "daemon.log").open("w+")
-        server = source_process = daemon_process = None
+        server = source_process = second_source_process = daemon_process = None
         try:
             server = start_private_pipewire(
                 pipewire, rate_config, env, logs, runtime)
@@ -295,7 +297,60 @@ def main():
                     f"unexpected DSP amplitude ratio:\n{status}")
 
             old_virtual_id = virtual_source_id(status)
+            old_capture_id = re.search(r"^Capture node: (\d+)", status,
+                                       re.MULTILINE)
+            if not old_capture_id:
+                raise RuntimeError("daemon status lacks initial capture node ID")
             assert_virtual_source(pw_dump, env, old_virtual_id)
+
+            if device_switch:
+                second_name = "skyapo.test.alternate"
+                second_source_process = subprocess.Popen(
+                    [str(source), "--name", second_name], env=env,
+                    stdout=source_log, stderr=subprocess.STDOUT)
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    if second_source_process.poll() is not None:
+                        raise RuntimeError("alternate test source exited")
+                    devices = run([str(cli), "device", "list"], env)
+                    if second_name in devices.stdout:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "alternate capture source was not enumerated")
+                selected = run([str(cli), "device", "set", second_name], env)
+                if second_name not in selected.stdout:
+                    raise RuntimeError(
+                        f"live device switch was not persisted: {selected.stdout}")
+                deadline = time.monotonic() + 20
+                switched_status = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, check=False)
+                    switched_status = result.stdout
+                    switched_capture = re.search(
+                        r"^Capture node: (\d+)", switched_status, re.MULTILINE)
+                    if (result.returncode == 0 and
+                            "Daemon: streaming" in switched_status and
+                            f"Selected device: {second_name}" in
+                            switched_status and
+                            switched_capture and
+                            switched_capture.group(1) !=
+                            old_capture_id.group(1) and
+                            f"Active capture links: {channel_count}/{channel_count}"
+                            in switched_status):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "daemon did not rebuild the live graph on the newly "
+                        f"selected stable node name:\n{switched_status}")
+                status = switched_status
+                assert_virtual_source(pw_dump, env, virtual_source_id(status))
+                print("Live device selection rebuilt capture from "
+                      f"{device_name} to {second_name}; capture node "
+                      f"{old_capture_id.group(1)} -> {switched_capture.group(1)}, "
+                      "with the virtual source streaming.")
 
             if transition_format:
                 transition_config.write_text("Preamp: -3 dB\n")
@@ -812,6 +867,7 @@ def main():
             try:
                 shutdown(((daemon_process, "skyapod"),
                           (source_process, "test source"),
+                          (second_source_process, "alternate test source"),
                           (server, "PipeWire server")))
             except Exception as cleanup_error:
                 print(f"E2E cleanup warning: {cleanup_error}", file=sys.stderr)
