@@ -11,6 +11,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Independent client records `SkyAPO Virtual Mic`; -6 dB numerical regression.
 - [x] Reconnect after virtual node loss; callback allocator audit.
 - [x] Show enumerated source channel count and any published sample-rate metadata in CLI and GUI device selectors; unknown rates remain explicit.
+- [x] GUI device selector refreshes devices/status through CLI, selects by stable node name, serializes selection while requests run, and safely cancels child work when the window closes.
 - [x] Linux portability adaptation generated at build time.
 
 ## 0.2.x — config compatibility and graph routing
@@ -19,6 +20,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Implement relative/nested `Include`, cycle/depth detection, source/line diagnostics, and last-valid graph preservation during parse failure.
 - [x] Add inotify config hot reload with debouncing, control-thread graph creation, atomic pointer swap and deferred retirement after callback quiescence.
 - [ ] Expand parser to preserve comments/quoting, validate numeric ranges, and return structured diagnostics.
+- [x] Reject out-of-domain Preamp/BiQuad gains, frequencies, and Q/slope values with file/line diagnostics; tests cover extreme gain, above-Nyquist frequency, and negative Q.
 - [x] Preserve `#` inside double-quoted values (including relative Include filenames) while retaining unquoted trailing-comment behavior.
 - [x] Add mono/stereo directive tests and offline expected-sample checks for routing.
 - [x] Map `Stage: capture` to the Linux processing path and skip Windows pre/post-mix sections with Include-local stage scope.
@@ -45,8 +47,9 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
 - [x] Attach, stop, and reattach a native PipeWire consumer; verify stereo and mono virtual-source samples numerically, including after private server restart.
 - [x] Change graph quantum and sample rate while the daemon is live; verify DSP reinitialization and consumer output at 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048.
+- [x] Exercise `skyapo restart` against the live desktop PipeWire server with an isolated XDG config; the daemon returned to `streaming`, recreated 2/2 physical links at 48 kHz stereo/1024, and the process PID changed.
 - [ ] Test physical device unplug/replug and automatic consumer selection on real desktop clients.
-- [ ] Test explicit daemon process restart and overrun reporting under sustained load.
+- [ ] Verify an independent deterministic consumer after explicit daemon process restart, and exercise overrun reporting under sustained DSP load.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 
 ## 0.5.x — remaining core DSP
