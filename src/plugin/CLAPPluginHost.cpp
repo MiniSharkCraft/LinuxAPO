@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <atomic>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,8 @@
 #endif
 
 namespace fs = std::filesystem;
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "CLAP failure latch must be lock-free on the audio thread");
 
 namespace {
 struct ClapLibrary {
@@ -323,7 +326,8 @@ public:
     return channels;
   }
   void process(float **output, float **input, unsigned frames) noexcept override {
-    if (!plugin || frames > maxFrameCount) {
+    if (!plugin || frames > maxFrameCount ||
+        processingError.load(std::memory_order_acquire)) {
       for (size_t c = 0; c < outputChannels.size(); ++c)
         std::fill_n(output[c], frames, 0.0f);
       return;
@@ -336,9 +340,15 @@ public:
     currentClapAudioHost = &host;
     const auto result = plugin->process(plugin, &clapProcess);
     currentClapAudioHost = nullptr;
-    if (result == CLAP_PROCESS_ERROR)
+    if (result == CLAP_PROCESS_ERROR) {
+      processingError.store(true, std::memory_order_release);
       for (size_t c = 0; c < outputChannels.size(); ++c)
         std::fill_n(output[c], frames, 0.0f);
+    }
+  }
+
+  bool processingFailed() const noexcept override {
+    return processingError.load(std::memory_order_acquire);
   }
 
 private:
@@ -366,6 +376,7 @@ private:
   std::vector<clap_event_param_value_t> parameterEvents;
   clap_audio_port_info_t inputInfo{}, outputInfo{};
   bool active = false, processing = false;
+  std::atomic<bool> processingError{false};
   std::vector<float *> inputChannels, outputChannels;
   clap_audio_buffer_t inputBuffer{}, outputBuffer{};
   clap_input_events_t emptyInputEvents{};

@@ -6,6 +6,8 @@
 typedef struct gain_data {
   const clap_host_t *host;
   double gain;
+  bool failFirstProcess;
+  unsigned processCalls;
 } gain_data;
 
 static bool CLAP_ABI plugin_init(const clap_plugin_t *plugin) {
@@ -37,6 +39,8 @@ static void CLAP_ABI plugin_reset(const clap_plugin_t *plugin) { (void)plugin; }
 static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
                                                   const clap_process_t *process) {
   gain_data *data = plugin->plugin_data;
+  if (data->failFirstProcess && data->processCalls++ == 0)
+    return CLAP_PROCESS_ERROR;
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   if (!process || process->audio_inputs_count != 1 ||
@@ -163,11 +167,25 @@ static const clap_plugin_descriptor_t descriptor = {
     .description = "Test-only stereo half-gain effect",
     .features = NULL};
 
+static const clap_plugin_descriptor_t error_descriptor = {
+    .clap_version = CLAP_VERSION,
+    .id = "org.skyapo.test.error-once",
+    .name = "SkyAPO CLAP Test Error Once",
+    .vendor = "SkyAPO tests",
+    .url = "https://example.invalid/skyapo-test-error-once",
+    .manual_url = "",
+    .support_url = "",
+    .version = "1.0.0",
+    .description = "Test-only CLAP effect that errors on its first process call",
+    .features = NULL};
+
 static const clap_plugin_t *CLAP_ABI create_plugin(
     const clap_plugin_factory_t *factory, const clap_host_t *host,
     const char *plugin_id) {
   (void)factory;
-  if (strcmp(plugin_id, descriptor.id) != 0)
+  const bool failFirstProcess =
+      strcmp(plugin_id, error_descriptor.id) == 0;
+  if (!failFirstProcess && strcmp(plugin_id, descriptor.id) != 0)
     return NULL;
   clap_plugin_t *plugin = calloc(1, sizeof(*plugin));
   gain_data *data = calloc(1, sizeof(*data));
@@ -178,7 +196,8 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
   }
   data->host = host;
   data->gain = 0.5;
-  plugin->desc = &descriptor;
+  data->failFirstProcess = failFirstProcess;
+  plugin->desc = failFirstProcess ? &error_descriptor : &descriptor;
   plugin->plugin_data = data;
   plugin->init = plugin_init;
   plugin->destroy = plugin_destroy;
@@ -194,12 +213,12 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
 }
 static uint32_t CLAP_ABI plugin_count(const clap_plugin_factory_t *factory) {
   (void)factory;
-  return 1;
+  return 2;
 }
 static const clap_plugin_descriptor_t *CLAP_ABI plugin_descriptor(
     const clap_plugin_factory_t *factory, uint32_t index) {
   (void)factory;
-  return index == 0 ? &descriptor : NULL;
+  return index == 0 ? &descriptor : index == 1 ? &error_descriptor : NULL;
 }
 static const clap_plugin_factory_t factory = {plugin_count, plugin_descriptor,
                                                create_plugin};

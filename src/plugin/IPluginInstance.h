@@ -38,6 +38,9 @@ public:
              const std::vector<std::wstring> &channels) = 0;
   virtual void process(float **output, float **input,
                        unsigned frames) noexcept = 0;
+  // A backend may latch an unrecoverable process error for observation on a
+  // non-realtime thread. The audio callback must never report it synchronously.
+  virtual bool processingFailed() const noexcept { return false; }
 };
 
 class IPluginHost {

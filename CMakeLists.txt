@@ -343,6 +343,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   set_tests_properties(skyapo-clap-plugin-info PROPERTIES
     ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}"
     PASS_REGULAR_EXPRESSION "7[ \t]+Gain")
+  add_executable(skyapo-clap-failure-test tests/clap_failure_test.cpp)
+  target_include_directories(skyapo-clap-failure-test PRIVATE src/plugin)
+  target_link_libraries(skyapo-clap-failure-test PRIVATE skyapo-core)
+  add_dependencies(skyapo-clap-failure-test skyapo-test-clap)
+  add_test(NAME skyapo-clap-process-failure COMMAND skyapo-clap-failure-test)
+  set_tests_properties(skyapo-clap-process-failure PROPERTIES
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
 endif()
 
 add_executable(skyapo-render-tests tests/render_tests.cpp)
