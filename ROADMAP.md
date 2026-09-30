@@ -79,13 +79,13 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add a redistributable SkyAPO-authored VST3 half-gain fixture; CTest verifies −6.0206 dB offline and 1000 variable realtime DSP blocks pass the allocation audit.
 - [x] Verify the VST3 fixture in the physical-mic → PipeWire → DSP → virtual-mic graph on Built-in Audio at 48 kHz stereo/1024 quantum; an independent client recorded 192000 frames with correlation 1, ratio 0.250594 (−12.0206 dB), zero callback allocations/deallocations and zero overruns. Evidence/config: `tests/data/vst3_realtime_chain.txt`.
 - [x] Verify the installed LSP Filter Stereo third-party VST3 in the realtime PipeWire graph. With its Bypass parameter enabled, an independent 192000-frame recording measured unity gain/correlation 1; with bypass disabled and Input gain normalized to 0.82, it measured RMS ratio 1.21256 (+1.674 dB) and correlation 0.984988. The gain-only probe's strict correlation gate correctly did not classify this frequency-altering result as a pure-gain pass. Daemon reported zero overruns and zero instrumented callback allocations/deallocations; third-party internal allocations are outside that audit.
-- [ ] Verify yabridge VST3 wrapper processing in the realtime PipeWire graph; offline yabridge processing has passed, but no realtime claim yet.
+- [x] Verify a yabridge-produced VST3 wrapper in a private realtime PipeWire graph: ATKExpander mono processed and reached an independent consumer; its `realtime: no` metadata means this is functional-path evidence, not a real-time-safety guarantee.
 - [x] Expose VST3 normalized parameter metadata and validated numeric-ID config overrides; verify default/override audio numerically, metadata CLI, bad-ID/range rejection, and callback allocation audit.
 - [ ] Add VST3 plugin state/bypass, latency, auxiliary buses and plugin failure isolation.
 - [!] VST2 distribution is externally license-blocked: official Steinberg terms require a pre-October-2018 signed VST2 license and forbid redistributing its proprietary headers. Keep the 1.0 requirement open; resume only if valid authorization is established. See `docs/PLUGINS.md`.
 - [ ] Test yabridge VST2 wrappers if a lawful host path becomes available.
 - [ ] Add CLAP live parameter/control changes, state/latency support, production-plugin validation and safer failure isolation.
-- [ ] Verify yabridge-produced wrappers in the realtime graph and test yabridge VST2 wrappers; document user workflow.
+- [ ] Expand yabridge verification to additional/stereo-compatible wrappers, address plugin-reported non-realtime behavior/isolation, and test yabridge VST2 wrappers if a lawful host path becomes available.
 - [ ] Plugin live parameters, state, bypass, latency and isolation behavior.
 - Acceptance: each format is individually built/tested/reported; no SDK license violations or fabricated support.
 
@@ -123,7 +123,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [ ] Stable daemon, major EAPO directives, hot reload with rollback.
 - [ ] PipeWire capture/virtual mic, recovery, mono/stereo at 44.1/48/96 kHz.
 - [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include and Convolution validated; GraphicEQ compiles with its actual upstream implementation.
-- [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. LV2/CLAP and initial single-bus VST3 hosts are prototypes, not full 1.0 acceptance; VST2 is license-blocked and realtime yabridge compatibility remains unverified.
+- [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. LV2/CLAP and initial single-bus VST3 hosts are prototypes, not full 1.0 acceptance; one mono yabridge wrapper works functionally but reports `realtime: no`, and VST2 remains license-blocked.
 - [ ] Ported/evolved original editor; full CLI and diagnostics.
 - [ ] Packaging, user service, desktop integration, licensing and clean-install docs.
 - [ ] Full regression, sanitizer, hardware, GUI, plugin, packaging and fresh-install test report.

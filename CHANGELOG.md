@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Verified a yabridge-produced ATKExpander VST3 through a private PipeWire graph and independent mono consumer: 143360 frames captured, daemon/consumer RMS 0.00077629/0.00077680, DSP ratio 0.0109782, zero daemon overruns and audited allocations/deallocations. The wrapper reports `realtime: no`; this is a functional-path test, not a safety guarantee. A prior `File name too long`/Wine stack-overflow was caused by long isolation paths and did not recur with short private paths.
 - `skyapo diagnostics` now reports the linked PipeWire library version, or explicitly says PipeWire support was not built.
 - `skyapo status` now reports a connected-but-unresponsive daemon socket as an error; diagnostics retain version information and show the timeout state rather than returning an empty status.
 - Added Preamp/BiQuad numeric-domain validation with source-line diagnostics and regression tests; the Qt device selector now refreshes PipeWire devices through the CLI, persists stable node names, and safely terminates in-flight CLI work when its window closes.
@@ -17,10 +18,10 @@
 - Added initial mono/stereo, single-audio-bus VST3 processing; manually rendered the installed LSP Filter Stereo plugin offline (192000 frames at 48 kHz; output samples changed).
 - Added a SkyAPO-authored VST3 half-gain bundle fixture; CTest measures −6.0206 dB offline and audits 1000 variable realtime processing blocks without host/DSP callback allocations.
 - Added VST3 writable parameter metadata and numeric-ID normalized config overrides; CTest validates metadata, −12.0412 dB override output, invalid ID/range rejection and allocation-free callback processing with a static override.
-- Verified the VST3 fixture through the live Built-in Audio → PipeWire → SkyAPO Virtual Mic path; an independent recording client measured 192000 frames, correlation 1 and −12.0206 dB with zero callback allocations/deallocations and overruns. Third-party VST3/yabridge realtime remains unverified.
-- Verified the installed LSP Filter Stereo VST3 in the same live graph: bypass enabled produced unity/correlation 1; active Input gain normalized to 0.82 produced measured ratio 1.21256 (+1.674 dB), correlation 0.984988 over 192000 frames. This is an observed effect response, not a pure-gain probe pass; yabridge realtime remains unverified.
+- Verified the VST3 fixture through the live Built-in Audio → PipeWire → SkyAPO Virtual Mic path; an independent recording client measured 192000 frames, correlation 1 and −12.0206 dB with zero callback allocations/deallocations and overruns.
+- Verified the installed LSP Filter Stereo VST3 in the same live graph: bypass enabled produced unity/correlation 1; active Input gain normalized to 0.82 produced measured ratio 1.21256 (+1.674 dB), correlation 0.984988 over 192000 frames. This is an observed effect response, not a pure-gain probe pass.
 - Verified offline processing of a local yabridge ATKExpander VST3 wrapper in mono (192000 frames at 48 kHz; samples changed). Its stereo use was correctly rejected because the plugin exposes a mono bus.
-- Documented VST3 limits: live automation, auxiliary buses, state, latency compensation, UI and isolation remain unsupported; yabridge realtime and VST2 remain unverified.
+- Documented VST3 limits: live automation, auxiliary buses, state, latency compensation, UI and isolation remain unsupported. VST2 remains unimplemented.
 - Audited Steinberg's current VST2 licensing terms; documented the pre-October-2018 license requirement and kept VST2 open as an external legal blocker rather than vendoring restricted headers.
 - Added a pinned official CLAP SDK submodule and initial native CLAP effect host with CLAP_PATH/standard-path discovery, config IDs, offline render and 1000-block realtime-allocation tests.
 - Added a native CLAP stereo half-gain test plugin; CTest confirms the expected −6.0206 dB output and no recurring host-side callback allocation. Live events/state/latency and production plugin safety remain unsupported.
