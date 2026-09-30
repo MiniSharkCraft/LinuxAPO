@@ -187,7 +187,6 @@ int main() {
           0.2f * std::sin(2.0 * 3.141592653589793 * 100.0 * i / 48000.0);
       tone[2 * i] = tone[2 * i + 1] = sample;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
     double inputRms = 0.0;
     double outputRms = 0.0;
     for (unsigned block = 0; block < 12; ++block) {
@@ -210,7 +209,7 @@ int main() {
     const double ratio = std::sqrt(outputRms / inputRms);
     std::cout << "LoudnessCorrection upstream 100 Hz amplitude ratio: " << ratio
               << '\n';
-    if (!(ratio > 0.4 && ratio < 0.9)) {
+    if (std::abs(ratio - 0.7775) > 0.005) {
       std::cerr << "upstream LoudnessCorrection produced unexpected 100 Hz "
                    "amplitude ratio: "
                 << ratio << '\n';
@@ -1092,6 +1091,25 @@ int main() {
   for (int i = 0; i < 6; ++i)
     if (std::abs(unity[i] - original[i]) > 1e-5f) {
       std::cerr << "IIR unity mismatch\n";
+      return 1;
+    }
+
+  if (!write(path,
+             "Filter: ON IIR Order 1 Coefficients 0.5 0.25 1 -0.5\n"))
+    return 1;
+  Engine iirFeedback(48000, 2, 128);
+  iirFeedback.loadConfig(path);
+  float feedbackImpulse[8] = {1, -2, 0, 0, 0, 0, 0, 0};
+  iirFeedback.process(feedbackImpulse, 1);
+  iirFeedback.process(feedbackImpulse + 2, 2);
+  iirFeedback.process(feedbackImpulse + 6, 1);
+  const float expectedFeedback[8] = {.5f, -1.0f, .5f, -1.0f,
+                                    .25f, -.5f, .125f, -.25f};
+  for (int i = 0; i < 8; ++i)
+    if (std::abs(feedbackImpulse[i] - expectedFeedback[i]) > 1e-6f) {
+      std::cerr << "upstream IIR coefficient order/feedback state mismatch at "
+                << i << ": expected " << expectedFeedback[i] << ", got "
+                << feedbackImpulse[i] << '\n';
       return 1;
     }
 
