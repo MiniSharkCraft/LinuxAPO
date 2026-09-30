@@ -67,10 +67,13 @@ def validate_desktop_metadata(root):
         raise RuntimeError(f"invalid AppStream metainfo XML: {error}") from error
     if component.tag != "component" or component.get("type") != "desktop-application":
         raise RuntimeError("AppStream metainfo must describe a desktop-application component")
-    if component.findtext("id") != "org.skyapo.SkyAPO":
-        raise RuntimeError("AppStream component ID does not match the installed metainfo filename")
+    if component.findtext("id") != "org.skyapo.skyapo":
+        raise RuntimeError("AppStream component ID must use the canonical SkyAPO application ID")
     if component.findtext("name") != "SkyAPO":
         raise RuntimeError("AppStream component name is missing or incorrect")
+    homepage = component.find("url[@type='homepage']")
+    if homepage is None or homepage.text != "https://sourceforge.net/projects/equalizerapo/":
+        raise RuntimeError("AppStream metadata must link to the official Equalizer APO project")
     launchable = component.find("launchable")
     if launchable is None or launchable.get("type") != "desktop-id" or launchable.text != "skyapo.desktop":
         raise RuntimeError("AppStream launchable must refer to skyapo.desktop")
@@ -113,6 +116,8 @@ def main():
         "usr/share/applications/skyapo.desktop",
         "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
         "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
+        "usr/share/man/man1/skyapo.1",
+        "usr/share/man/man1/skyapod.1",
         "usr/share/man/man1/skyapo-bench.1",
         "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
         "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt",

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.skyapo.SkyAPO</id>
+  <id>org.skyapo.skyapo</id>
   <name>SkyAPO</name>
   <summary>Realtime microphone audio processing based on Equalizer APO</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -8,6 +8,7 @@
   <developer id="org.skyapo">
     <name>SkyAPO contributors</name>
   </developer>
+  <url type="homepage">https://sourceforge.net/projects/equalizerapo/</url>
   <content_rating type="oars-1.1"/>
   <description>
     <p>SkyAPO routes a selected PipeWire capture device through Equalizer APO DSP and exposes the processed audio as a virtual microphone.</p>
