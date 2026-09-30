@@ -4,7 +4,6 @@ pkgrel=8
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
 # Maintainer: Cong Nguyen
 arch=('x86_64')
-url='https://sourceforge.net/projects/equalizerapo/'
 license=('GPL-2.0-or-later' 'MIT')
 depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme' 'muparser')
 makedepends=('cmake' 'gcc' 'git' 'pkgconf')
