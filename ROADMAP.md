@@ -56,6 +56,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical (FFTW3f optional; convolution has fixed negotiated block size).
 - [ ] Port Channel/Copy/Include conditional details and LoudnessCorrection only where Linux equivalents preserve behavior; document endpoint-volume semantics.
+- [x] Explicitly reject `LoudnessCorrection:` with source/line diagnostics until Linux can provide the Windows render endpoint master-volume signal; document why a fixed-gain approximation would change semantics.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
 - Acceptance: every claimed directive has golden reference tests and sanitizer coverage; known latency only is reported.
 
