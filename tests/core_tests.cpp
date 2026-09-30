@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -20,7 +21,28 @@ bool write(const fs::path &path, const std::string &contents) {
   out << contents;
   return bool(out);
 }
+bool setTestPluginPath(const char *name, const char *value) {
+  if (setenv(name, value, 1) == 0)
+    return true;
+  std::cerr << "cannot set fixture-only plugin path " << name << '\n';
+  return false;
+}
 int main() {
+#ifdef SKYAPO_TEST_LV2
+  if (!setTestPluginPath("LV2_PATH", SKYAPO_TEST_LV2_PATH))
+    return 1;
+#endif
+#ifdef SKYAPO_TEST_CLAP
+  if (!setTestPluginPath("CLAP_PATH", SKYAPO_TEST_CLAP_PATH) ||
+      !setTestPluginPath("SKYAPO_CLAP_PATHS_ONLY", "1"))
+    return 1;
+#endif
+#ifdef SKYAPO_TEST_VST3
+  if (!setTestPluginPath("VST3_PATH", SKYAPO_TEST_VST3_PATH) ||
+      !setTestPluginPath("SKYAPO_VST3_PATHS_ONLY", "1"))
+    return 1;
+#endif
+
   const std::string path =
       "/tmp/skyapo-test-" + std::to_string(getpid()) + ".txt";
   if (!write(path, "Preamp: -6 dB\n"))

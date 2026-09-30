@@ -15,6 +15,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <dlfcn.h>
 #include <pthread.h>
 
@@ -57,11 +58,14 @@ std::vector<fs::path> searchPaths() {
       begin = end + 1;
     }
   }
-  if (const char *home = std::getenv("HOME"))
-    paths.emplace_back(fs::path(home) / ".clap");
-  paths.emplace_back("/usr/lib/clap");
-  paths.emplace_back("/usr/local/lib/clap");
-  paths.emplace_back("/usr/lib64/clap");
+  const char *pathsOnly = std::getenv("SKYAPO_CLAP_PATHS_ONLY");
+  if (!pathsOnly || std::string_view(pathsOnly) != "1") {
+    if (const char *home = std::getenv("HOME"))
+      paths.emplace_back(fs::path(home) / ".clap");
+    paths.emplace_back("/usr/lib/clap");
+    paths.emplace_back("/usr/local/lib/clap");
+    paths.emplace_back("/usr/lib64/clap");
+  }
   return paths;
 }
 

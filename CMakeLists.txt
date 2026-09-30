@@ -417,8 +417,8 @@ endif()
 target_link_options(skyapo-realtime-safety-tests PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
 add_test(NAME skyapo-realtime-safety COMMAND skyapo-realtime-safety-tests)
 if(LILV_FOUND AND LV2_FOUND)
-  set(SKYAPO_TEST_LV2_DIR
-      "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/skyapo-test.lv2")
+  set(SKYAPO_TEST_LV2_PATH "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/lv2")
+  set(SKYAPO_TEST_LV2_DIR "${SKYAPO_TEST_LV2_PATH}/skyapo-test.lv2")
   add_library(skyapo-test-lv2 MODULE tests/plugins/test_gain.c)
   target_link_libraries(skyapo-test-lv2 PRIVATE PkgConfig::LV2)
   set_target_properties(skyapo-test-lv2 PROPERTIES
@@ -430,6 +430,8 @@ if(LILV_FOUND AND LV2_FOUND)
   configure_file(tests/plugins/skyapo-test.lv2/plugin.ttl
     "${SKYAPO_TEST_LV2_DIR}/plugin.ttl" COPYONLY)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_LV2=1)
+  target_compile_definitions(skyapo-tests PRIVATE
+    SKYAPO_TEST_LV2_PATH="${SKYAPO_TEST_LV2_PATH}")
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_LV2=1)
   add_dependencies(skyapo-tests skyapo-test-lv2)
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-lv2)
@@ -439,13 +441,13 @@ if(LILV_FOUND AND LV2_FOUND)
   add_dependencies(skyapo-lv2-oversize-test skyapo-test-lv2)
   add_test(NAME skyapo-lv2-oversize-block COMMAND skyapo-lv2-oversize-test)
   set_tests_properties(skyapo-lv2-oversize-block PROPERTIES
-    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+    ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   if(SKYAPO_SANITIZERS)
     set_property(TEST skyapo-lv2-oversize-block APPEND PROPERTY ENVIRONMENT
       "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
   endif()
   set_tests_properties(skyapo-core skyapo-realtime-safety PROPERTIES
-    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+    ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   if(SKYAPO_SANITIZERS)
     set_property(TEST skyapo-core skyapo-realtime-safety APPEND PROPERTY
       ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
@@ -462,15 +464,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   set_target_properties(skyapo-test-clap PROPERTIES PREFIX ""
     SUFFIX ".clap" LIBRARY_OUTPUT_DIRECTORY "${SKYAPO_TEST_CLAP_DIR}")
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CLAP=1)
+  target_compile_definitions(skyapo-tests PRIVATE
+    SKYAPO_TEST_CLAP_PATH="${SKYAPO_TEST_CLAP_DIR}")
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_CLAP=1)
   add_dependencies(skyapo-tests skyapo-test-clap)
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-clap)
   set_property(TEST skyapo-core skyapo-realtime-safety APPEND PROPERTY
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
   add_test(NAME skyapo-clap-plugin-info COMMAND skyapo plugin info
     org.skyapo.test.gain)
   set_tests_properties(skyapo-clap-plugin-info PROPERTIES
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}"
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1"
     PASS_REGULAR_EXPRESSION "7[ \t]+Gain")
   add_executable(skyapo-clap-failure-test tests/clap_failure_test.cpp)
   target_include_directories(skyapo-clap-failure-test PRIVATE src/plugin)
@@ -478,7 +482,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   add_dependencies(skyapo-clap-failure-test skyapo-test-clap)
   add_test(NAME skyapo-clap-process-failure COMMAND skyapo-clap-failure-test)
   set_tests_properties(skyapo-clap-process-failure PROPERTIES
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
 endif()
 
 add_executable(skyapo-render-tests tests/render_tests.cpp)
@@ -492,9 +496,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
     $<TARGET_FILE:skyapo-render>
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_override.txt -12.0412)
   set_tests_properties(skyapo-offline-clap-render PROPERTIES
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
   set_tests_properties(skyapo-offline-clap-parameter-render PROPERTIES
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
   add_dependencies(skyapo-render-tests skyapo-test-clap)
 endif()
 if(SKYAPO_HAVE_VST3)
@@ -523,6 +527,8 @@ if(SKYAPO_HAVE_VST3)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_VST3=1)
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-vst3)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST3=1)
+  target_compile_definitions(skyapo-tests PRIVATE
+    SKYAPO_TEST_VST3_PATH="${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
   add_dependencies(skyapo-tests skyapo-test-vst3)
   set_property(TEST skyapo-realtime-safety APPEND PROPERTY ENVIRONMENT
     "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
@@ -537,9 +543,9 @@ if(LILV_FOUND AND LV2_FOUND)
     $<TARGET_FILE:skyapo-render>
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_override.txt -18.0412)
   set_tests_properties(skyapo-offline-lv2-render PROPERTIES
-    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+    ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   set_tests_properties(skyapo-offline-lv2-parameter-render PROPERTIES
-    ENVIRONMENT "LV2_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+    ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   if(SKYAPO_SANITIZERS)
     set_property(TEST skyapo-offline-lv2-render APPEND PROPERTY ENVIRONMENT
       "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
