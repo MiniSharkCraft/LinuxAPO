@@ -758,6 +758,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   find_program(SKYAPO_PIPEWIRE_EXECUTABLE pipewire REQUIRED)
   find_program(SKYAPO_PW_CLI_EXECUTABLE pw-cli REQUIRED)
   find_program(SKYAPO_PW_DUMP_EXECUTABLE pw-dump REQUIRED)
+  find_program(SKYAPO_PW_METADATA_EXECUTABLE pw-metadata REQUIRED)
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
     PATHS /usr/share/pipewire /usr/local/share/pipewire REQUIRED)
   foreach(channel_mode IN ITEMS stereo mono)
@@ -839,7 +840,8 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
       renegotiate)
   set_tests_properties(skyapo-pipewire-e2e-renegotiate
-    PROPERTIES TIMEOUT 100 LABELS "pipewire;integration;recovery")
+    PROPERTIES TIMEOUT 100 LABELS "pipewire;integration;recovery"
+      ENVIRONMENT "SKYAPO_PW_METADATA=${SKYAPO_PW_METADATA_EXECUTABLE}")
   if(SKYAPO_TEST_CLAP_DIR)
     add_test(NAME skyapo-pipewire-e2e-plugin-bypass
       COMMAND ${Python3_EXECUTABLE}

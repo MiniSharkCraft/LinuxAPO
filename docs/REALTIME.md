@@ -30,6 +30,8 @@ An earlier implementation was visible but failed WirePlumber format negotiation;
 
 The debounced inotify config watcher was subsequently tested live. The daemon loaded `tests/data/reload_minus6.txt`, then a replacement with `Preamp: -3 dB`; status reset per-chain meters and reported ratio 0.707946. An independent client then captured 192000 frames from the virtual source: correlation 1 and ratio 0.707946. Replacing the config with `UnsupportedDirective: true` produced a source/line reload error; status stayed streaming and an independent recording still measured ratio 0.707946. Callback allocation/deallocation counts remained zero. This verifies valid reload, bad reload rollback and real consumption of the retained graph.
 
+The private automated `skyapo-pipewire-e2e-include-reload` now additionally issues five successive valid reload requests (five live graph crossfades), an invalid config request, and a valid recovery request; the test passes and independently records the final −2 dB chain. This stresses serialization/last-good handling but does not claim to force a specific control request into an exact callback quantum of the 10 ms transition.
+
 After adding Channel/Copy routing, the normal PipeWire regression was repeated on the same physical device, and repeated with the ASan/UBSan daemon and recorder using `ASAN_OPTIONS=detect_leaks=0`. Both recordings independently consumed 192000 virtual-source frames with correlation 1 and RMS ratio 0.501187 (−6 dB). Runtime status reported zero audited callback allocations/deallocations and zero overruns. The sanitizer run shut down without memory-access diagnostics; disabling leak checking is needed only for the independently reproduced PipeWire context leak described below.
 
 ## Commands and results

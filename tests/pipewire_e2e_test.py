@@ -283,7 +283,8 @@ def main():
             assert_virtual_source(pw_dump, env, old_virtual_id)
 
             if renegotiate:
-                metadata = shutil.which("pw-metadata")
+                metadata = (os.environ.get("SKYAPO_PW_METADATA") or
+                            shutil.which("pw-metadata"))
                 if not metadata:
                     raise RuntimeError("pw-metadata is required for renegotiate E2E")
 
@@ -528,9 +529,39 @@ def main():
                     raise RuntimeError(
                         "recreated Include directory did not reload:\n"
                         f"{recovered_include}")
+
+                for gain in ("-1", "-4", "-2", "-5", "-2"):
+                    include_child.write_text(f"Preamp: {gain} dB\n")
+                    burst_reload = run(
+                        [str(cli), "config", "reload"], env, timeout=8)
+                    if "Config reload succeeded" not in burst_reload.stdout:
+                        raise RuntimeError(
+                            "rapid valid config reload failed:\n"
+                            f"{burst_reload.stdout}")
+                include_child.write_text("UnsupportedBurstCommand: true\n")
+                burst_rejected = run(
+                    [str(cli), "config", "reload"], env, timeout=8)
+                if ("Config reload failed; keeping last valid graph" not in
+                        burst_rejected.stdout):
+                    raise RuntimeError(
+                        "invalid reload burst did not retain last graph:\n"
+                        f"{burst_rejected.stdout}")
+                include_child.write_text("Preamp: -2 dB\n")
+                burst_recovered = run(
+                    [str(cli), "config", "reload"], env, timeout=8)
+                if "Config reload succeeded" not in burst_recovered.stdout:
+                    raise RuntimeError(
+                        "daemon failed to reload after rapid invalid edit:\n"
+                        f"{burst_recovered.stdout}")
+                burst_status = run([str(cli), "status"], env).stdout
+                if "Daemon: streaming" not in burst_status:
+                    raise RuntimeError(
+                        "daemon stopped during rapid reload burst:\n"
+                        f"{burst_status}")
                 print("Include edit reloaded to -3 dB; invalid edit and "
                       "directory removal retained it; directory recreation "
-                      "reloaded to -2 dB.")
+                      "reloaded to -2 dB. Five successive live transitions, "
+                      "an invalid reload, and a valid recovery also passed.")
                 expected_db = -2.0
 
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
