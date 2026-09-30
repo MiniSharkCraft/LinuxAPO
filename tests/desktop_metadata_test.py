@@ -19,7 +19,7 @@ if not icon_path.is_file():
 root = ET.parse(metainfo_path).getroot()
 if root.attrib.get("type") != "desktop-application":
     raise SystemExit("AppStream component is not a desktop application")
-if root.findtext("id") != "org.skyapo.SkyAPO":
+if root.findtext("id") != "org.skyapo.skyapo":
     raise SystemExit("AppStream component does not use its reverse-DNS ID")
 launchable = root.find("launchable")
 if launchable is None or launchable.text != desktop_path.name:
@@ -28,5 +28,5 @@ for required in ("name", "summary", "metadata_license", "project_license"):
     if not root.findtext(required):
         raise SystemExit(f"AppStream metadata is missing {required}")
 homepage = root.find("url[@type='homepage']")
-if homepage is not None and "equalizerapo" in (homepage.text or "").lower():
-    raise SystemExit("AppStream homepage must identify SkyAPO, not Equalizer APO")
+if homepage is None or not (homepage.text or "").startswith("https://"):
+    raise SystemExit("AppStream metadata must provide an HTTPS homepage")
