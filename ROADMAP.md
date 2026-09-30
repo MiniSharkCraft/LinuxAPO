@@ -41,7 +41,9 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Negotiate F32P at 44.1/48/96 kHz and verify stereo capture-to-virtual-source recordings with the -6 dB numerical regression.
 - [x] Destroy the live SkyAPO virtual node with `pw-cli`; verify daemon retry recreates the source, relinks both physical channels, and an independent recorder still measures the configured DSP gain.
 - [x] Restart a private PipeWire server while SkyAPO is processing a deterministic stereo source; verify stable-name rediscovery, virtual source recreation, FL/FR links and the expected −6 dB DSP ratio.
-- [ ] Test physical device unplug/replug; verify mono capture and virtual source consumer churn.
+- [x] Exercise a one-channel PipeWire source; verify `MONO` mapping, mono virtual mic, 48 kHz negotiation and −6 dB processing.
+- [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
+- [ ] Test physical device unplug/replug and virtual source consumer churn on real clients.
 - [ ] Test virtual source consumer churn, daemon restart, overrun reporting and format/quantum changes.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 

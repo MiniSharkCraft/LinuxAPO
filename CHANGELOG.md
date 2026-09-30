@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Extended the private PipeWire test source with mono mode and verified `MONO` device enumeration/mapping, mono virtual-source processing at −6 dB, and recovery after removing/recreating the selected node with the same stable name. Real physical-device unplug/replug and post-recovery independent recording remain unverified.
 - Added the opt-in `skyapo-pipewire-test-source` fixture and verified daemon recovery across a private PipeWire-server restart: the stable test source and virtual mic returned, stereo links were restored, and status measured the expected −6 dB with zero overruns/callback allocations. The private restart graph had no session manager, so independent recording was not claimed for that run.
 - Verified virtual-source-loss recovery on the live PipeWire graph: after destroying the SkyAPO source, the daemon recreated it, relinked the selected physical microphone and an independent recorder measured the configured −6 dB DSP output (192000 frames, correlation 1, ratio 0.501187). Physical-device hotplug remains untested.
 - Added an Arch Linux container job to CI for PKGBUILD build and package CTest validation; locally rebuilt `skyapo` and `skyapo-debug` from a fresh source clone, with 12/12 tests passing. Hosted CI remains unverified without a configured remote.
