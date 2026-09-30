@@ -1,3 +1,6 @@
 [submodule "upstream/equalizerapo"]
 	path = upstream/equalizerapo
 	url = https://git.code.sf.net/p/equalizerapo/code
+[submodule "upstream/clap"]
+	path = upstream/clap
+	url = https://github.com/free-audio/clap.git

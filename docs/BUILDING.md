@@ -1,6 +1,6 @@
 # Building
 
-Requirements: CMake 3.20+, C++17 compiler, pkg-config, libsndfile and PipeWire development files. The daemon currently requires `libpipewire-0.3`; a PipeWire user session is needed for device/runtime operations. FFTW3f is optional at configure time and enables upstream GraphicEQ/Convolution. Lilv is optional and enables LV2 hosting. Qt 6 Widgets is optional and enables `skyapo-ui` with selected upstream GUI components. Arch example: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber fftw lilv qt6-base`.
+Requirements: CMake 3.20+, C++17 compiler, pkg-config, libsndfile and PipeWire development files. Initialize pinned source with `git submodule update --init --recursive`; the official CLAP API headers are a separate MIT-licensed submodule. The daemon currently requires `libpipewire-0.3`; a PipeWire user session is needed for device/runtime operations. FFTW3f is optional at configure time and enables upstream GraphicEQ/Convolution. Lilv is optional and enables LV2 hosting. Qt 6 Widgets is optional and enables `skyapo-ui` with selected upstream GUI components. Arch example: `sudo pacman -S cmake gcc pkgconf libsndfile pipewire wireplumber fftw lilv qt6-base`.
 
 ```sh
 git clone --recurse-submodules <SkyAPO-repository>

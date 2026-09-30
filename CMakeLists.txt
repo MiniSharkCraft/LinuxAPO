@@ -49,6 +49,15 @@ target_include_directories(skyapo-core
          ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
+  target_sources(skyapo-core PRIVATE src/plugin/CLAPPluginHost.cpp)
+  target_include_directories(skyapo-core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include)
+  target_link_libraries(skyapo-core PUBLIC ${CMAKE_DL_LIBS})
+  target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_CLAP=1)
+else()
+  message(STATUS "CLAP headers not present: initialize upstream/clap to enable CLAP")
+endif()
 if(LILV_FOUND)
   target_sources(skyapo-core PRIVATE src/plugin/LV2PluginHost.cpp)
   target_link_libraries(skyapo-core PUBLIC PkgConfig::LILV)
@@ -225,10 +234,37 @@ if(LILV_FOUND AND LV2_FOUND)
 else()
   message(STATUS "LV2 development headers not found: LV2 host test fixture disabled")
 endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
+  set(SKYAPO_TEST_CLAP_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/clap")
+  file(MAKE_DIRECTORY "${SKYAPO_TEST_CLAP_DIR}")
+  add_library(skyapo-test-clap MODULE tests/plugins/test_gain_clap.c)
+  target_include_directories(skyapo-test-clap PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include)
+  set_target_properties(skyapo-test-clap PROPERTIES PREFIX ""
+    SUFFIX ".clap" LIBRARY_OUTPUT_DIRECTORY "${SKYAPO_TEST_CLAP_DIR}")
+  target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CLAP=1)
+  target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_CLAP=1)
+  add_dependencies(skyapo-tests skyapo-test-clap)
+  add_dependencies(skyapo-realtime-safety-tests skyapo-test-clap)
+  set_property(TEST skyapo-core skyapo-realtime-safety APPEND PROPERTY
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+  add_test(NAME skyapo-clap-plugin-info COMMAND skyapo plugin info
+    org.skyapo.test.gain)
+  set_tests_properties(skyapo-clap-plugin-info PROPERTIES
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+endif()
 
 add_executable(skyapo-render-tests tests/render_tests.cpp)
 target_link_libraries(skyapo-render-tests PRIVATE PkgConfig::SNDFILE)
 add_test(NAME skyapo-offline-render COMMAND skyapo-render-tests $<TARGET_FILE:skyapo-render> ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
+  add_test(NAME skyapo-offline-clap-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_gain.txt -6.0206)
+  set_tests_properties(skyapo-offline-clap-render PROPERTIES
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+  add_dependencies(skyapo-render-tests skyapo-test-clap)
+endif()
 if(LILV_FOUND AND LV2_FOUND)
   add_test(NAME skyapo-offline-lv2-render COMMAND skyapo-render-tests
     $<TARGET_FILE:skyapo-render>

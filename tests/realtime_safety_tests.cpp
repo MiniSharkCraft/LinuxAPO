@@ -105,6 +105,32 @@ int main() {
     unlink(pluginPath);
   }
 #endif
+#ifdef SKYAPO_TEST_CLAP
+  {
+    char pluginPath[] = "/tmp/skyapo-clap-test-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Plugin: CLAP org.skyapo.test.gain\n";
+    }
+    Engine plugin(48000, 2, 8192, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 8192);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      const unsigned frames = (iteration * 61) % 8192 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::sin(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+    }
+    unlink(pluginPath);
+  }
+#endif
 #ifdef SKYAPO_TEST_CONVOLUTION
   char irTemplate[] = "/tmp/skyapo-rt-ir-XXXXXX";
   int irFd = mkstemp(irTemplate);

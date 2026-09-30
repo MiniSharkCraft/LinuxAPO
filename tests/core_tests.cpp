@@ -86,6 +86,21 @@ int main() {
   }
 #endif
 
+#ifdef SKYAPO_TEST_CLAP
+  if (!write(path, "Plugin: CLAP org.skyapo.test.gain\n"))
+    return 1;
+  Engine clapPlugin(48000, 2, 128, {L"L", L"R"});
+  clapPlugin.loadConfig(path);
+  float clapBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float clapExpected[8] = {.1f, -.2f, .3f, -.4f, .5f, -.5f, .25f, -.25f};
+  clapPlugin.process(clapBlock, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(clapBlock[i] - clapExpected[i]) > 1e-5f) {
+      std::cerr << "CLAP test plugin output mismatch at " << i << '\n';
+      return 1;
+    }
+#endif
+
   if (!write(path, "Filter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n"))
     return 1;
   Engine eq(48000, 2, 128);

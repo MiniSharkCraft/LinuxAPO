@@ -19,6 +19,9 @@
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
+#ifdef SKYAPO_HAVE_CLAP
+#include "CLAPPluginHost.h"
+#endif
 #include "helpers/ChannelHelper.h"
 #include "helpers/StringHelper.h"
 
@@ -90,6 +93,9 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   factories.push_back(std::make_unique<PreampFilterFactory>());
   factories.push_back(std::make_unique<DelayFilterFactory>());
   factories.push_back(std::make_unique<CopyFilterFactory>());
+#ifdef SKYAPO_HAVE_CLAP
+  factories.push_back(makeCLAPPluginFilterFactory());
+#endif
 #ifdef SKYAPO_HAVE_LV2
   factories.push_back(makeLV2PluginFilterFactory());
 #endif
@@ -410,11 +416,11 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                  std::to_string(lineNo) + ": " + name +
                                  " requires FFTW3f development files");
 #endif
-#ifndef SKYAPO_HAVE_LV2
+#if !defined(SKYAPO_HAVE_LV2) && !defined(SKYAPO_HAVE_CLAP)
       if (originalCommand == L"Plugin")
         throw std::runtime_error(normalizedPath.string() + ":" +
-                                 std::to_string(lineNo) + ": " + name +
-                                 " requires Lilv development files for LV2");
+                                 std::to_string(lineNo) + ": Plugin requires "
+                                 "native plugin host support");
 #endif
       throw std::runtime_error(normalizedPath.string() + ":" +
                                std::to_string(lineNo) + ": invalid " + name +

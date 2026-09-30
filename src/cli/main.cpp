@@ -3,9 +3,13 @@
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
+#ifdef SKYAPO_HAVE_CLAP
+#include "CLAPPluginHost.h"
+#endif
 #ifdef SKYAPO_HAVE_PIPEWIRE
 #include "../pipewire/DeviceManager.h"
 #endif
+#include <algorithm>
 #include <chrono>
 #include <fcntl.h>
 #include <iostream>
@@ -129,18 +133,45 @@ int main(int argc, char **argv) {
     }
     if (cmd == "plugin" && argc == 3 &&
         (std::string(argv[2]) == "list" || std::string(argv[2]) == "scan")) {
+      bool foundAnyHost = false;
+#ifdef SKYAPO_HAVE_CLAP
+      foundAnyHost = true;
+      CLAPPluginHost clapHost;
+      const auto clapPlugins = clapHost.list();
+      std::cout << "CLAP plugins discovered: " << clapPlugins.size() << '\n';
+      for (const auto &[id, name] : clapPlugins)
+        std::cout << "CLAP\t" << id << '\t' << name << '\n';
+#endif
 #ifdef SKYAPO_HAVE_LV2
+      foundAnyHost = true;
       LV2PluginHost host;
       const auto plugins = host.list();
       std::cout << "LV2 plugins discovered: " << plugins.size() << '\n';
       for (const auto &[uri, name] : plugins)
-        std::cout << uri << '\t' << name << '\n';
-      return 0;
-#else
-      throw std::runtime_error("LV2 support was not built (install Lilv)");
+        std::cout << "LV2\t" << uri << '\t' << name << '\n';
 #endif
+      if (foundAnyHost)
+        return 0;
+      throw std::runtime_error("no plugin host was built");
     }
     if (cmd == "plugin" && argc == 4 && std::string(argv[2]) == "info") {
+#ifdef SKYAPO_HAVE_CLAP
+      {
+        CLAPPluginHost clapHost;
+        const std::string requested = argv[3];
+        const auto plugins = clapHost.list();
+        const auto found = std::find_if(
+            plugins.begin(), plugins.end(), [&](const auto &plugin) {
+              return plugin.first == requested;
+            });
+        if (found != plugins.end()) {
+          const auto info = clapHost.describe(requested);
+          std::cout << info.name << "\nFormat: CLAP\nID: " << info.uri
+                    << "\nAudio parameters: not exposed by the current host\n";
+          return 0;
+        }
+      }
+#endif
 #ifdef SKYAPO_HAVE_LV2
       const auto info = LV2PluginHost().describe(argv[3]);
       std::cout << info.name << "\nURI: " << info.uri << '\n';
@@ -153,7 +184,11 @@ int main(int argc, char **argv) {
                   << "]\n";
       return 0;
 #else
+#ifdef SKYAPO_HAVE_CLAP
+      throw std::runtime_error("plugin not found in CLAP catalog");
+#else
       throw std::runtime_error("LV2 support was not built (install Lilv)");
+#endif
 #endif
     }
     if (cmd == "start" && argc == 2) {

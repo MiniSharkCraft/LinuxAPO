@@ -61,7 +61,9 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 ## 0.7.x — plugin formats and yabridge
 
-- [ ] Add remaining CLAP, VST2 and VST3 support as legally distributable host integrations permit.
+- [x] Add first native CLAP audio-effect host against official pinned CLAP headers; add ID discovery via CLAP_PATH/standard paths and numeric offline/realtime-audit fixtures.
+- [ ] Add CLAP parameter/event/state/latency support, production plugin validation and safer failure isolation.
+- [ ] Add VST2 and VST3 support as legally distributable host integrations permit.
 - [ ] Verify yabridge-produced wrappers using ordinary native format scanning; document user workflow.
 - [ ] Plugin live parameters, state, bypass, latency and isolation behavior.
 - Acceptance: each format is individually built/tested/reported; no SDK license violations or fabricated support.
@@ -96,7 +98,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [ ] Stable daemon, major EAPO directives, hot reload with rollback.
 - [ ] PipeWire capture/virtual mic, recovery, mono/stereo at 44.1/48/96 kHz.
 - [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include and Convolution validated; GraphicEQ compiles with its actual upstream implementation.
-- [ ] VST2/VST3/LV2/CLAP, yabridge compatibility, plugin state/bypass/failure and known-latency reporting.
+- [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. Current native LV2 and first CLAP hosts are prototypes, not full 1.0 acceptance.
 - [ ] Ported/evolved original editor; full CLI and diagnostics.
 - [ ] Packaging, user service, desktop integration, licensing and clean-install docs.
 - [ ] Full regression, sanitizer, hardware, GUI, plugin, packaging and fresh-install test report.
