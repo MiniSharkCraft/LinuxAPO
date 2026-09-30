@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
+option(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS
+  "Build tests for the experimental FST-based VST2-compatible host" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
@@ -355,6 +357,7 @@ endif()
 
 add_executable(skyapo-tests tests/core_tests.cpp)
 target_link_libraries(skyapo-tests PRIVATE skyapo-core PkgConfig::SNDFILE)
+target_compile_definitions(skyapo-tests PRIVATE __forceinline=inline)
 if(MUPARSER_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_MUPARSER=1)
 endif()
@@ -362,6 +365,28 @@ if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
 endif()
 add_test(NAME skyapo-core COMMAND skyapo-tests)
+if(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS)
+  set(SKYAPO_FST_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/upstream/fst/fst")
+  if(NOT EXISTS "${SKYAPO_FST_INCLUDE}/fst.h")
+    message(FATAL_ERROR
+      "SKYAPO_BUILD_VST2_PROTOTYPE_TESTS requires the upstream/fst submodule")
+  endif()
+  add_library(skyapo-test-vst2-plugin SHARED
+    tests/plugins/vst2_gain_fixture.c)
+  target_include_directories(skyapo-test-vst2-plugin SYSTEM PRIVATE
+    "${SKYAPO_FST_INCLUDE}")
+  add_executable(skyapo-vst2-host-prototype-tests
+    src/plugin/VST2PluginHost.cpp tests/vst2_host_prototype_test.cpp)
+  target_include_directories(skyapo-vst2-host-prototype-tests PRIVATE src/plugin)
+  target_include_directories(skyapo-vst2-host-prototype-tests SYSTEM PRIVATE
+    "${SKYAPO_FST_INCLUDE}")
+  target_link_libraries(skyapo-vst2-host-prototype-tests PRIVATE
+    ${CMAKE_DL_LIBS})
+  add_dependencies(skyapo-vst2-host-prototype-tests skyapo-test-vst2-plugin)
+  add_test(NAME skyapo-vst2-host-prototype
+    COMMAND skyapo-vst2-host-prototype-tests
+      "$<TARGET_FILE:skyapo-test-vst2-plugin>")
+endif()
 add_executable(skyapo-realtime-safety-tests tests/realtime_safety_tests.cpp src/platform/RealtimeAudit.cpp)
 target_link_libraries(skyapo-realtime-safety-tests PRIVATE skyapo-core)
 if(FFTW3F_FOUND)

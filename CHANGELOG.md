@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added an opt-in, isolated FST-header VST2-compatible host prototype and fixture tests; it is not wired into the app and does not imply third-party or production support. Pinned FST separately and documented its licensing/trademark review requirements. CI now builds/runs the prototype and sanitizers, pins checkout actions, and smoke-tests an installed Arch package.
+- Fixed Linux BiQuad state cleanup in the generated upstream header: unqualified `abs(double)` selected an integer overload and erased filter state at block boundaries. The build-time patch now uses `std::abs`; sample-by-sample Engine-vs-upstream tests across 1/17/128/256-frame blocks verify +6 dB center response and off-band response.
 - Added `skyapo diagnostics --json` with typed runtime/build fields and explicit `null` for unavailable values; its CLI fixture verifies JSON escaping and the unchanged text diagnostics command. CLAP/VST3 process errors now latch lock-free, silence later blocks without recalling the failed plugin, and surface the plugin identifier plus config source line through status/JSON diagnostics.
 - `LoudnessCorrection:` now fails with an actionable file/line error explaining its dependency on Windows `IAudioEndpointVolume`; no fixed-gain approximation is silently substituted.
 - Verified a yabridge-produced ATKExpander VST3 through a private PipeWire graph and independent mono consumer: 143360 frames captured, daemon/consumer RMS 0.00077629/0.00077680, DSP ratio 0.0109782, zero daemon overruns and audited allocations/deallocations. The wrapper reports `realtime: no`; this is a functional-path test, not a safety guarantee. A prior `File name too long`/Wine stack-overflow was caused by long isolation paths and did not recur with short private paths.

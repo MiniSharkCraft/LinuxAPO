@@ -1,10 +1,15 @@
 #include "Engine.h"
+#include "BiQuad.h"
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sndfile.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 bool write(const fs::path &path, const std::string &contents) {
@@ -244,6 +249,73 @@ int main() {
     changed |= std::abs(impulse[i]) > 1e-5f;
   if (!changed) {
     std::cerr << "upstream BiQuad did not produce a filter tail\n";
+    return 1;
+  }
+
+  const auto measureToneGain = [&](double frequency) {
+    constexpr int rate = 48000;
+    constexpr int totalFrames = rate;
+    constexpr int settleFrames = 12000;
+    if (!write(path, "Filter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n"))
+      return std::pair<double, double>{-1.0, 0.0};
+    Engine measured(rate, 2, 256);
+    measured.loadConfig(path);
+    if (measured.filterCount() != 1)
+      return std::pair<double, double>{-1.0, 0.0};
+    BiQuad upstreamReference(BiQuad::PEAKING, 6.0, 1000.0, rate, 1.0,
+                             false);
+    std::vector<float> tone(static_cast<size_t>(totalFrames) * 2);
+    std::vector<float> referenceOutput(static_cast<size_t>(totalFrames) * 2);
+    constexpr double twoPi = 6.28318530717958647692;
+    for (int frame = 0; frame < totalFrames; ++frame) {
+      const float sample = static_cast<float>(
+          std::sin(twoPi * frequency * frame / rate));
+      tone[2 * frame] = sample;
+      tone[2 * frame + 1] = sample;
+      const float expected = static_cast<float>(upstreamReference.process(sample));
+      referenceOutput[2 * frame] = expected;
+      referenceOutput[2 * frame + 1] = expected;
+    }
+    constexpr unsigned blocks[] = {1, 17, 128, 256};
+    unsigned blockIndex = 0;
+    for (int frame = 0; frame < totalFrames;) {
+      const unsigned count = std::min<unsigned>(
+          blocks[blockIndex++ % std::size(blocks)], totalFrames - frame);
+      measured.process(tone.data() + 2 * frame, count);
+      for (unsigned i = 0; i < count; ++i)
+        if (std::abs(tone[2 * (frame + i)] -
+                     referenceOutput[2 * (frame + i)]) > 2e-6f) {
+          std::cerr << "Engine BiQuad differs from upstream BiQuad at frame "
+                    << frame + i << ", frequency " << frequency << " Hz\n";
+          return std::pair<double, double>{-1.0, 0.0};
+        }
+      frame += count;
+    }
+
+    double inputEnergy = 0.0, outputEnergy = 0.0;
+    for (int frame = settleFrames; frame < totalFrames; ++frame) {
+      const double reference = std::sin(twoPi * frequency * frame / rate);
+      inputEnergy += reference * reference;
+      outputEnergy += static_cast<double>(tone[2 * frame]) * tone[2 * frame];
+    }
+    return std::pair<double, double>{
+        std::sqrt(outputEnergy / inputEnergy),
+        upstreamReference.gainAt(frequency, rate)};
+  };
+  const auto centerResponse = measureToneGain(1000.0);
+  const auto remoteResponse = measureToneGain(100.0);
+  const double expectedCenterGain = std::pow(10.0, 6.0 / 20.0);
+  if (centerResponse.first < 0.0 || remoteResponse.first < 0.0 ||
+      std::abs(centerResponse.second - 6.0) > 1e-6 ||
+      std::abs(20.0 * std::log10(centerResponse.first) -
+               centerResponse.second) > 0.02 ||
+      std::abs(20.0 * std::log10(remoteResponse.first) -
+               remoteResponse.second) > 0.02 ||
+      std::abs(centerResponse.first - expectedCenterGain) > 0.01) {
+    std::cerr << "upstream BiQuad response mismatch: center="
+              << centerResponse.first << " (expected " << expectedCenterGain
+              << "), 100Hz=" << remoteResponse.first << " (expected "
+              << remoteResponse.second << " dB)\n";
     return 1;
   }
 

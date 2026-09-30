@@ -28,7 +28,14 @@ foreach(component IN LISTS EAPO_FILTERS)
 endforeach()
 file(READ ${EAPO}/filters/BiQuad.h biquad)
 string(REPLACE "#include <climits>" "#include <climits>\n#include <cfloat>" biquad "${biquad}")
+string(REPLACE "#define IS_DENORMAL(d) (abs(d) < DBL_MIN)"
+       "#define IS_DENORMAL(d) (std::abs(d) < DBL_MIN)" biquad "${biquad}")
 string(REPLACE "__declspec(align(16))" "alignas(16)" biquad "${biquad}")
+string(FIND "${biquad}"
+  "#define IS_DENORMAL(d) (std::abs(d) < DBL_MIN)" biquad_denormal_patch)
+if(biquad_denormal_patch EQUAL -1)
+  message(FATAL_ERROR "Could not apply the Linux BiQuad denormal patch")
+endif()
 file(WRITE ${EAPO_PORT}/filters/BiQuad.h "${biquad}")
 
 if(FFTW3F_FOUND)

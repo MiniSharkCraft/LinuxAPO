@@ -2,8 +2,9 @@
 
 This is an unintegrated experiment, not production VST2 support. It adds an
 `IPluginInstance` implementation in `src/plugin/VST2PluginHost.cpp`; it is not
-registered with `Engine`, the configuration parser, CMake, package metadata, or
-the UI. Its sole API source is the pinned FST submodule at
+registered with `Engine`, the configuration parser, package metadata, or the
+UI. CMake can build it only as an opt-in test target; it is not linked into the
+SkyAPO application. Its sole API source is the pinned FST submodule at
 `upstream/fst` (`647af068765b75867e3a28b4dd8991ab9ed47f7c`). It does not include
 Steinberg or Equalizer APO `aeffect.h` / `aeffectx.h` headers.
 
@@ -35,8 +36,21 @@ is made about compatibility with arbitrary third-party plugins.
 
 ## Standalone fixture test
 
+The project also has an opt-in CMake/CTest target for repeatable normal and
+sanitizer builds:
+
+```sh
+cmake -S . -B build-vst2-prototype \
+  -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
+cmake --build build-vst2-prototype --target skyapo-vst2-host-prototype-tests
+ctest --test-dir build-vst2-prototype \
+  -R '^skyapo-vst2-host-prototype$' --output-on-failure
+```
+
+This does not enable plugin discovery or make the host available to configs.
+
 This deliberately bypasses the project build system so this prototype does not
-silently become a user-facing feature:
+silently become a user-facing feature, or can be run independently:
 
 ```sh
 mkdir -p /tmp/skyapo-vst2-prototype
