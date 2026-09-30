@@ -182,6 +182,12 @@ target_link_options(skyapod PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=reall
 enable_testing()
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-desktop-metadata
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop_metadata_test.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.desktop
+      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.svg
+      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/org.skyapo.SkyAPO.metainfo.xml)
   add_test(NAME skyapo-diagnostics-json
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics_json_test.py
@@ -326,6 +332,10 @@ if(SKYAPO_BUILD_UI)
     install(TARGETS skyapo-ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES packaging/skyapo.desktop
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+    install(FILES packaging/skyapo.svg
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps)
+    install(FILES packaging/org.skyapo.SkyAPO.metainfo.xml
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo)
   else()
     message(STATUS "Qt 6 Widgets not found: skyapo-ui target disabled")
   endif()

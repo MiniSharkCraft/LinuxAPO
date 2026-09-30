@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.skyapo.SkyAPO</id>
+  <name>SkyAPO</name>
+  <summary>Realtime microphone audio processing based on Equalizer APO</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <developer id="org.skyapo">
+    <name>SkyAPO contributors</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <description>
+    <p>SkyAPO routes a selected PipeWire capture device through Equalizer APO DSP and exposes the processed audio as a virtual microphone.</p>
+  </description>
+  <launchable type="desktop-id">skyapo.desktop</launchable>
+  <provides>
+    <binary>skyapo</binary>
+    <binary>skyapod</binary>
+    <binary>skyapo-ui</binary>
+    <binary>skyapo-render</binary>
+  </provides>
+  <url type="homepage">https://sourceforge.net/projects/equalizerapo/</url>
+  <releases>
+    <release version="0.1.0" date="2026-09-30">
+      <description><p>Initial Linux release with PipeWire realtime processing and an offline renderer.</p></description>
+    </release>
+  </releases>
+</component>

@@ -1,6 +1,6 @@
 # SkyAPO roadmap
 
-Current development version: **0.1.0**. The current commit is the first root-repository baseline and the realtime proof in `docs/REALTIME.md` is a regression gate. Roadmap versions are targets, not claims; only tested acceptance criteria advance a milestone. Plan reviewed 2026-09-30.
+Current development version: **0.1.0**. This root repository tracks the Linux port separately from its pinned official Equalizer APO submodule; the realtime proof in `docs/REALTIME.md` is a regression gate. Roadmap versions are targets, not claims; only tested acceptance criteria advance a milestone. Plan reviewed 2026-09-30.
 
 ## 0.1.x — realtime prototype (current baseline)
 
@@ -115,7 +115,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add tested structured/machine-readable CLI diagnostics (`skyapo diagnostics --json`).
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
 - [x] Desktop launcher for the Qt editor.
-- [ ] AppStream metadata, branded icon, MIME association and man pages.
+- [x] AppStream metadata, branded icon and man pages. No MIME association is declared: current EAPO configs are ordinary `.txt` files, and claiming that broad MIME type would hijack unrelated text documents.
 - [x] Add GitHub Actions Linux configure/build/CTest and ASan/UBSan jobs without physical hardware; actual hosted results remain pending because this local repository has no configured remote.
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
 - [ ] Add formatting checks and verify hosted workflow runs after publishing/connecting the repository.
