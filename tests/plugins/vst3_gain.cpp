@@ -11,7 +11,15 @@ using namespace Steinberg::Vst;
 namespace {
 class TestGain final : public SingleComponentEffect {
 public:
-  static FUnknown *create(void *) { return static_cast<IAudioProcessor *>(new TestGain); }
+  explicit TestGain(bool failFirstProcess = false)
+      : failFirstProcess(failFirstProcess) {}
+
+  static FUnknown *create(void *) {
+    return static_cast<IAudioProcessor *>(new TestGain);
+  }
+  static FUnknown *createErrorOnce(void *) {
+    return static_cast<IAudioProcessor *>(new TestGain(true));
+  }
 
   tresult PLUGIN_API initialize(FUnknown *context) override {
     const auto result = SingleComponentEffect::initialize(context);
@@ -27,6 +35,10 @@ public:
   tresult PLUGIN_API setProcessing(TBool) override { return kResultOk; }
 
   tresult PLUGIN_API process(ProcessData &data) override {
+    if (failFirstProcess && !failedOnce) {
+      failedOnce = true;
+      return kResultFalse;
+    }
     if (data.numInputs != 1 || data.numOutputs != 1 || !data.inputs ||
         !data.outputs || data.inputs[0].numChannels != 2 ||
         data.outputs[0].numChannels != 2 || data.symbolicSampleSize != kSample32)
@@ -54,6 +66,8 @@ public:
 
 private:
   float gain = 0.5f;
+  bool failFirstProcess = false;
+  bool failedOnce = false;
 };
 } // namespace
 
@@ -62,4 +76,8 @@ DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000001),
            PClassInfo::kManyInstances, kVstAudioEffectClass,
            "SkyAPO Test Half Gain", Vst::kDistributable, "Fx",
            "1.0.0", kVstVersionString, TestGain::create)
+DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000002),
+           PClassInfo::kManyInstances, kVstAudioEffectClass,
+           "SkyAPO Test Error Once", Vst::kDistributable, "Fx", "1.0.0",
+           kVstVersionString, TestGain::createErrorOnce)
 END_FACTORY

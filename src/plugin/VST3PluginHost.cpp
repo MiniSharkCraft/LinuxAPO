@@ -2,6 +2,7 @@
 
 #include "IFilter.h"
 #include "IFilterFactory.h"
+#include "IPluginFailureState.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
 #include "public.sdk/source/vst/hosting/module.h"
@@ -14,6 +15,7 @@
 #include "pluginterfaces/vst/vstspeaker.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -26,6 +28,8 @@
 
 namespace {
 using VST3::Hosting::Module;
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "VST3 failure latch must be lock-free on the audio thread");
 struct CatalogItem {
   Module::Ptr module;
   VST3::Hosting::ClassInfo info;
@@ -299,7 +303,8 @@ public:
   std::vector<std::wstring> initialize(float, unsigned,
       const std::vector<std::wstring> &channels) override { return channels; }
   void process(float **output, float **input, unsigned frames) noexcept override {
-    if (frames > maxFrameCount) {
+    if (frames > maxFrameCount ||
+        processingError.load(std::memory_order_acquire)) {
       for (unsigned c = 0; c < channelCount; ++c)
         std::fill_n(output[c], frames, 0.0f);
       return;
@@ -309,9 +314,15 @@ public:
       outputs[c] = output[c];
     }
     data.numSamples = static_cast<int32_t>(frames);
-    if (processor->process(data) != Steinberg::kResultOk)
+    if (processor->process(data) != Steinberg::kResultOk) {
+      processingError.store(true, std::memory_order_release);
       for (size_t c = 0; c < channelCount; ++c)
         std::fill_n(output[c], frames, 0.0f);
+    }
+  }
+
+  bool processingFailed() const noexcept override {
+    return processingError.load(std::memory_order_acquire);
   }
 
 private:
@@ -329,9 +340,10 @@ private:
   std::vector<PluginParameterInfo> parameterInfos;
   std::unique_ptr<Steinberg::Vst::ParameterChanges> parameterChanges;
   bool active = false, processing = false;
+  std::atomic<bool> processingError{false};
 };
 
-class VST3PluginFilter final : public IFilter {
+class VST3PluginFilter final : public IFilter, public IPluginFailureState {
 public:
   VST3PluginFilter(VST3PluginHost &owner, std::string uid,
                    std::vector<PluginParameterValue> overrides)
@@ -345,6 +357,9 @@ public:
   }
   void process(float **output, float **input, unsigned frames) override {
     instance->process(output, input, frames);
+  }
+  bool processingFailed() const noexcept override {
+    return instance && instance->processingFailed();
   }
 private:
   VST3PluginHost &host;

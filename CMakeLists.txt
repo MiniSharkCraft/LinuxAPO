@@ -387,6 +387,13 @@ if(SKYAPO_HAVE_VST3)
   set_tests_properties(skyapo-vst3-plugin-info PROPERTIES
     ENVIRONMENT "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1"
     PASS_REGULAR_EXPRESSION "7[ \t]+Gain[ \t]+default=0.5")
+  add_executable(skyapo-vst3-failure-test tests/vst3_failure_test.cpp)
+  target_include_directories(skyapo-vst3-failure-test PRIVATE src/plugin)
+  target_link_libraries(skyapo-vst3-failure-test PRIVATE skyapo-core)
+  add_dependencies(skyapo-vst3-failure-test skyapo-test-vst3)
+  add_test(NAME skyapo-vst3-process-failure COMMAND skyapo-vst3-failure-test)
+  set_tests_properties(skyapo-vst3-process-failure PROPERTIES
+    ENVIRONMENT "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
   set_tests_properties(skyapo-offline-vst3-render skyapo-offline-vst3-parameter-render
     PROPERTIES ENVIRONMENT
     "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
