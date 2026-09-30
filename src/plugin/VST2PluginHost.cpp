@@ -13,6 +13,9 @@
 #include <vector>
 
 namespace {
+static_assert(std::atomic<bool>::is_always_lock_free,
+              "VST2 prototype failure latch must be lock-free on the audio thread");
+
 struct HostContext {
   float sampleRate{};
   unsigned blockSize{};
