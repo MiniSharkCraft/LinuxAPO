@@ -751,6 +751,48 @@ int main() {
   }
 
 #ifdef SKYAPO_TEST_MUPARSERX
+  const auto upstreamIirExample =
+      fs::path(SKYAPO_TEST_SOURCE_DIR) /
+      "upstream/equalizerapo/Setup/config/iir_lowpass.txt";
+  const auto measureUpstreamIirTone = [&](double frequency) {
+    Engine upstreamIir(48000, 2, 128);
+    upstreamIir.loadConfig(upstreamIirExample.string());
+    double inputEnergy = 0.0;
+    double outputEnergy = 0.0;
+    std::vector<float> block(128 * 2);
+    for (unsigned blockIndex = 0; blockIndex < 16; ++blockIndex) {
+      for (unsigned frame = 0; frame < 128; ++frame) {
+        const float sample =
+            static_cast<float>(std::sin(2.0 * 3.141592653589793 * frequency *
+                                        (blockIndex * 128 + frame) / 48000.0));
+        block[2 * frame] = block[2 * frame + 1] = sample;
+      }
+      upstreamIir.process(block.data(), 128);
+      if (blockIndex >= 8) {
+        for (float sample : block)
+          outputEnergy += static_cast<double>(sample) * sample;
+        for (unsigned frame = 0; frame < 128; ++frame) {
+          const double sample = std::sin(2.0 * 3.141592653589793 * frequency *
+                                         (blockIndex * 128 + frame) / 48000.0);
+          inputEnergy += 2.0 * sample * sample;
+        }
+      }
+    }
+    return std::sqrt(outputEnergy / inputEnergy);
+  };
+  const double upstreamIirPassband = measureUpstreamIirTone(1000.0);
+  const double upstreamIirStopband = measureUpstreamIirTone(12000.0);
+  if (upstreamIirPassband < 0.8 || upstreamIirStopband > 0.15 ||
+      upstreamIirStopband >= upstreamIirPassband * 0.15) {
+    std::cerr << "official Equalizer APO iir_lowpass.txt response mismatch: "
+              << "1 kHz=" << upstreamIirPassband
+              << ", 12 kHz=" << upstreamIirStopband << '\n';
+    return 1;
+  }
+  std::cout << "official Equalizer APO iir_lowpass.txt: 1 kHz="
+            << upstreamIirPassband << ", 12 kHz=" << upstreamIirStopband
+            << '\n';
+
   const auto expressionRoot = dir / "expression-root.txt";
   if (!write(expressionRoot,
              "Eval: inlineGain = -6\nInclude: expression-child.txt\n") ||
