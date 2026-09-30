@@ -113,6 +113,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add a Linux Include editor with config-relative path validation and native file browsing; upstream Include's Registry ACL and tab-navigation hooks are intentionally not reused.
 - [x] Add Linux visual `Channel:`/`Copy:` editors with EAPO serialization and explicit raw-text fallback for unsupported syntax; upstream widgets remain excluded due to Windows device/channel-mask dependencies.
 - [x] Add a visual IIR coefficient editor with ordering/range validation, round-trip tests and raw-expression fallback; the upstream Editor has no IIR visual editor to reuse.
+- [x] Add a Linux `Convolution:` row adapter that preserves the directive, resolves/browses IR paths relative to the config, and displays missing/unreadable-file errors; the live config checker remains authoritative for WAV/sample-rate validity. Offscreen tests cover path round-trip and real checker acceptance/rejection.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
