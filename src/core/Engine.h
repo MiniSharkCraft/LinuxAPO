@@ -24,14 +24,20 @@ public:
   };
   class ConfigError : public std::runtime_error {
   public:
-    ConfigError(const std::string &message, std::vector<IncludeSite> chain)
-        : std::runtime_error(message), includeChain(std::move(chain)) {}
+    ConfigError(const std::string &message, std::vector<IncludeSite> chain,
+                std::vector<std::filesystem::path> attempted = {})
+        : std::runtime_error(message), includeChain(std::move(chain)),
+          attemptedConfigFiles(std::move(attempted)) {}
     const std::vector<IncludeSite> &includeSites() const noexcept {
       return includeChain;
+    }
+    const std::vector<std::filesystem::path> &attemptedFiles() const noexcept {
+      return attemptedConfigFiles;
     }
 
   private:
     std::vector<IncludeSite> includeChain;
+    std::vector<std::filesystem::path> attemptedConfigFiles;
   };
 
   Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
@@ -91,6 +97,7 @@ private:
   void parseConfigFile(const std::filesystem::path &path, FilterList &candidate,
                        std::vector<std::filesystem::path> &includeStack,
                        std::vector<std::filesystem::path> &configFiles,
+                       std::vector<std::filesystem::path> &attemptedFiles,
                        std::vector<IncludeSite> &includeChain,
                        bool &stageActive, mup::ParserX *expressionParser);
   std::vector<FilterNode> buildGraph(FilterList &candidate);

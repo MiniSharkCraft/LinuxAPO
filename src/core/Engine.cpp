@@ -227,6 +227,7 @@ void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
   std::vector<std::filesystem::path> configFiles;
+  std::vector<std::filesystem::path> attemptedFiles;
   std::vector<IncludeSite> includeChain;
   bool stageActive = true;
 #ifdef SKYAPO_HAVE_MUPARSERX
@@ -265,14 +266,14 @@ void Engine::loadConfig(const std::string &path) {
   }
   try {
     parseConfigFile(std::filesystem::path(path), candidate, includeStack,
-                    configFiles, includeChain, stageActive,
+                    configFiles, attemptedFiles, includeChain, stageActive,
                     expressionParserPtr);
   } catch (const ConfigError &) {
     throw;
   } catch (const std::exception &error) {
     if (includeChain.empty())
       throw;
-    throw ConfigError(error.what(), includeChain);
+    throw ConfigError(error.what(), includeChain, attemptedFiles);
   }
   for (auto &factory : factories)
     addReturnedFilters(factory->endOfConfiguration(), path, 0,
@@ -508,6 +509,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              FilterList &candidate,
                              std::vector<std::filesystem::path> &includeStack,
                              std::vector<std::filesystem::path> &configFiles,
+                             std::vector<std::filesystem::path> &attemptedFiles,
                              std::vector<IncludeSite> &includeChain,
                              bool &stageActive,
                              mup::ParserX *expressionParser) {
@@ -519,6 +521,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   auto normalizedPath = std::filesystem::weakly_canonical(absolutePath, ec);
   if (ec)
     normalizedPath = absolutePath.lexically_normal();
+  if (std::find(attemptedFiles.begin(), attemptedFiles.end(), normalizedPath) ==
+      attemptedFiles.end())
+    attemptedFiles.push_back(normalizedPath);
   if (includeStack.size() >= 100)
     throw std::runtime_error("include nesting exceeds 100 files at " +
                              normalizedPath.string());
@@ -741,7 +746,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       // Keep the chain intact when recursion fails; loadConfig reports it as
       // parser-owned source ancestry. Successful recursion unwinds this site.
       parseConfigFile(included, candidate, includeStack, configFiles,
-                      includeChain, includedStage, expressionParser);
+                      attemptedFiles, includeChain, includedStage,
+                      expressionParser);
       includeChain.pop_back();
       continue;
     }

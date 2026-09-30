@@ -1,4 +1,5 @@
 #include "Runtime.h"
+#include "TransitionMetricsGeneration.h"
 #include "../platform/PlatformChannels.h"
 #include "../platform/RealtimeAudit.h"
 #include "../platform/Settings.h"
@@ -140,6 +141,9 @@ struct Runtime {
   std::atomic<unsigned> callbacksInFlight{0};
   std::atomic<AudioMode> audioMode{AudioMode::Running};
   std::atomic<bool> transitionComplete{false};
+  // A queued completion event can outlive its graph; this prevents it from
+  // resetting telemetry for a more recently installed graph.
+  skyapo::pipewire::TransitionMetricsGeneration transitionMetrics;
   unsigned transitionCounter{};
   unsigned transitionLength{};
   unsigned transitionDurationMs{10};
@@ -312,16 +316,20 @@ struct Runtime {
     promoteCompletedTransition();
     if (pendingEngine || pending.load(std::memory_order_seq_cst))
       throw std::runtime_error("another DSP graph transition is still active");
+    // Every accepted replacement invalidates queued completion telemetry,
+    // including hard swaps after a PipeWire format change.
+    const auto generation = transitionMetrics.graphReplaced();
     auto *current = active.load(std::memory_order_seq_cst);
     if (current && sameFormat(*current, *replacement)) {
       // Keep both owners on the control thread. The callback only reads the
       // published raw pointer and never destroys or mutates ownership.
       retiredEngines.reserve(retiredEngines.size() + 1);
       transitionCounter = 0;
-      transitionLength = std::max(
-          1u, replacement->sampleRate() * transitionDurationMs / 1000);
+      transitionLength =
+          std::max(1u, replacement->sampleRate() * transitionDurationMs / 1000);
       auto *next = replacement.get();
       pendingEngine = std::move(replacement);
+      transitionMetrics.transitionStarted(generation);
       pending.store(next, std::memory_order_seq_cst);
       return;
     }
@@ -426,7 +434,15 @@ struct Runtime {
     };
     // Read/validate persisted state first. A malformed sidecar or plugin load
     // rejection must not be silently overwritten by saving the live graph.
-    auto replacement = createEngine();
+    std::unique_ptr<Engine> replacement;
+    try {
+      replacement = createEngine();
+    } catch (const Engine::ConfigError &error) {
+      // Keep last-good dependency watches and additionally watch paths from
+      // the failed candidate, so creating a missing Include retries reload.
+      configWatcher->extend(error.attemptedFiles());
+      throw;
+    }
     const auto saved = saveCurrentPluginStates();
     if (saved)
       std::cerr << "skyapod: saved state for " << saved
@@ -470,8 +486,13 @@ struct Runtime {
   static void transitionReady(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
     r.reclaimRetired();
-    // Drop the one crossfade quantum from the steady-state signal statistics.
-    r.resetMetrics.store(true, std::memory_order_release);
+    // A delayed event from an earlier transition must not reset telemetry
+    // collected for a newer graph. The callback publishes completion before
+    // signaling this event; duplicate event delivery is harmless.
+    if (r.transitionMetrics.shouldResetMetrics()) {
+      // Restart signal-level statistics after the graph crossfade completes.
+      r.resetMetrics.store(true, std::memory_order_release);
+    }
   }
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
@@ -546,6 +567,7 @@ struct Runtime {
         if (r.transitionCounter >= r.transitionLength) {
           engine = nextEngine;
           r.active.store(engine, std::memory_order_seq_cst);
+          r.transitionMetrics.transitionCompleted();
           r.pending.store(nullptr, std::memory_order_seq_cst);
           r.transitionComplete.store(true, std::memory_order_seq_cst);
           nextEngine = nullptr;

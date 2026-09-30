@@ -1,6 +1,7 @@
 #include "../src/platform/PlatformChannels.h"
 #include "../src/platform/RealtimeAudit.h"
 #include "Engine.h"
+#include "../src/pipewire/TransitionMetricsGeneration.h"
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,25 @@
 extern "C" void *__wrap_malloc(size_t);
 extern "C" void __wrap_free(void *);
 int main() {
+  {
+    skyapo::pipewire::TransitionMetricsGeneration generations;
+    const auto first = generations.graphReplaced();
+    generations.transitionStarted(first);
+    generations.transitionCompleted();
+    // Simulate a completion event queued behind a newer hard graph swap.
+    generations.graphReplaced();
+    if (generations.shouldResetMetrics()) {
+      std::cerr << "stale graph completion reset current telemetry\n";
+      return 1;
+    }
+    const auto next = generations.graphReplaced();
+    generations.transitionStarted(next);
+    generations.transitionCompleted();
+    if (!generations.shouldResetMetrics() || generations.shouldResetMetrics()) {
+      std::cerr << "current graph completion did not reset telemetry once\n";
+      return 1;
+    }
+  }
   {
     realtime::Scope scope;
     auto *c = __wrap_malloc(8);

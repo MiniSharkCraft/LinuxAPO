@@ -630,11 +630,48 @@ def main():
                     raise RuntimeError(
                         "daemon stopped during rapid reload burst:\n"
                         f"{burst_status}")
+
+                future_include = include_directory / "future.txt"
+                included_config.write_text(
+                    "Include: includes/future.txt\n")
+                deadline = time.monotonic() + 8
+                rejected_future = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    rejected_future = result.stdout
+                    if ("Config reload error:" in rejected_future and
+                            "cannot open config:" in rejected_future and
+                            "DSP amplitude ratio: 0.794328" in rejected_future):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "missing newly referenced Include did not preserve "
+                        f"the last valid graph:\n{rejected_future}")
+                future_include.write_text("Preamp: -4 dB\n")
+                deadline = time.monotonic() + 8
+                recovered_future = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    recovered_future = result.stdout
+                    if (result.returncode == 0 and
+                            "Config reload error:" not in recovered_future and
+                            "DSP amplitude ratio: 0.630957" in
+                            recovered_future):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "creating a newly referenced Include did not recover "
+                        f"the graph:\n{recovered_future}")
                 print("Include edit reloaded to -3 dB; invalid edit and "
                       "directory removal retained it; directory recreation "
                       "reloaded to -2 dB. Five successive live transitions, "
-                      "an invalid reload, and a valid recovery also passed.")
-                expected_db = -2.0
+                      "an invalid reload, a valid recovery, and a newly "
+                      "created missing Include recovery also passed.")
+                expected_db = -4.0
 
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
             consumer_args += ["--expected-rate", str(sample_rate)]

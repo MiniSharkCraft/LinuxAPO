@@ -18,6 +18,7 @@ public:
 
   int fileDescriptor() const { return descriptor; }
   void update(const std::vector<std::filesystem::path> &configFiles);
+  void extend(const std::vector<std::filesystem::path> &configFiles);
   bool consumeEvents();
 
 private:

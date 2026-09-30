@@ -106,6 +106,20 @@ int main() {
       result = 1;
     }
 
+    const auto futureDirectory = directory / "future-includes";
+    const auto futureInclude = futureDirectory / "child.txt";
+    watcher.extend({futureInclude});
+    fs::create_directories(futureDirectory);
+    if (!hasEvent(watcher)) {
+      std::cerr << "watcher missed creation of a missing Include directory\n";
+      result = 1;
+    }
+    watcher.extend({futureInclude});
+    if (!write(futureInclude, "Preamp: -4 dB\n") || !hasEvent(watcher)) {
+      std::cerr << "watcher missed creation of a future Include file\n";
+      result = 1;
+    }
+
     watcher.update({root});
     if (!write(included, "Preamp: -2 dB\n")) {
       std::cerr << "could not update inactive Include fixture\n";

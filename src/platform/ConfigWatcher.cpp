@@ -40,7 +40,10 @@ void ConfigWatcher::update(
       absolute = std::filesystem::absolute(file).lexically_normal();
     const auto directory = absolute.parent_path();
     desired[directory.string()].path = directory;
-    desired[directory.string()].required = true;
+    std::error_code directoryError;
+    desired[directory.string()].required =
+        std::filesystem::is_directory(directory, directoryError) &&
+        !directoryError;
     desired[directory.string()].files.insert(absolute.filename().string());
 
     auto current = directory;
@@ -92,6 +95,20 @@ void ConfigWatcher::update(
     if (!retained.count(watch))
       inotify_rm_watch(descriptor, watch);
   directories.swap(next);
+}
+
+void ConfigWatcher::extend(
+    const std::vector<std::filesystem::path> &configFiles) {
+  std::vector<std::filesystem::path> combined;
+  for (const auto &[watch, directory] : directories) {
+    (void)watch;
+    if (!directory.required)
+      continue;
+    for (const auto &file : directory.files)
+      combined.push_back(directory.path / file);
+  }
+  combined.insert(combined.end(), configFiles.begin(), configFiles.end());
+  update(combined);
 }
 
 void ConfigWatcher::processEvent(int watch, uint32_t mask, const char *name,
