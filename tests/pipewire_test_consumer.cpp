@@ -1,4 +1,5 @@
 // Native PipeWire client used to consume and numerically verify the test mic.
+// --expect-silent accepts near-zero RMS for intentional plugin-failure tests.
 #include <pipewire/filter.h>
 #include <pipewire/keys.h>
 #include <pipewire/pipewire.h>
@@ -27,6 +28,7 @@ struct Consumer {
   spa_hook coreHook{}, registryHook{}, filterHook{};
   spa_source* timeout{};
   unsigned channels{2};
+  bool expectSilent{};
   std::array<const char*, 2> channelNames{};
   std::array<void*, 2> inputs{};
   std::array<uint32_t, 2> inputIds{Invalid, Invalid};
@@ -38,8 +40,9 @@ struct Consumer {
   std::atomic<double> energy{0.0};
   std::atomic<bool> failed{false};
 
-  explicit Consumer(bool mono)
+  explicit Consumer(bool mono, bool silent)
       : channels(mono ? 1 : 2),
+        expectSilent(silent),
         channelNames(mono ? std::array<const char*, 2>{"MONO", ""}
                           : std::array<const char*, 2>{"FL", "FR"}) {}
 
@@ -236,8 +239,9 @@ struct Consumer {
         "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
         static_cast<unsigned long long>(capturedFrames), channels, rms,
         expected, ratio);
-    return !failed.load() && capturedFrames > 48000 &&
-                   std::abs(ratio - 1.0) < 0.03
+    const bool audioMatches = expectSilent ? rms < 1.0e-6
+                                           : std::abs(ratio - 1.0) < 0.03;
+    return !failed.load() && capturedFrames > 48000 && audioMatches
                ? 0
                : 1;
   }
@@ -245,12 +249,23 @@ struct Consumer {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc > 2 || (argc == 2 && std::string(argv[1]) != "--mono")) {
-    std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono]\n");
-    return 2;
+  bool mono = false;
+  bool expectSilent = false;
+  for (int arg = 1; arg < argc; ++arg) {
+    const std::string option(argv[arg]);
+    if (option == "--mono")
+      mono = true;
+    else if (option == "--expect-silent")
+      expectSilent = true;
+    else {
+      std::fprintf(stderr,
+                   "usage: skyapo-pipewire-test-consumer [--mono] "
+                   "[--expect-silent]\n");
+      return 2;
+    }
   }
   try {
-    Consumer consumer(argc == 2);
+    Consumer consumer(mono, expectSilent);
     return consumer.run();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "test consumer: %s\n", error.what());
