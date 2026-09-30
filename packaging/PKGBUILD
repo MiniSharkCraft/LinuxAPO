@@ -32,4 +32,11 @@ check() {
 
 package() {
   DESTDIR="$pkgdir" cmake --install "$srcdir/skyapo-build"
+
+  # Arch and namcap expect the license texts under /usr/share/licenses/$pkgname.
+  # Keep the copies under the project documentation as well, then install the
+  # same upstream texts into the standard package license directory.
+  install -d "$pkgdir/usr/share/licenses/$pkgname"
+  install -m 644 "$pkgdir/usr/share/doc/SkyAPO/licenses/"*.txt \
+    -t "$pkgdir/usr/share/licenses/$pkgname"
 }
