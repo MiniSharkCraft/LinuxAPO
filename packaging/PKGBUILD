@@ -41,4 +41,6 @@ package() {
   install -d "$pkgdir/usr/share/licenses/$pkgname"
   install -m 644 "$pkgdir/usr/share/doc/SkyAPO/licenses/"*.txt \
     -t "$pkgdir/usr/share/licenses/$pkgname"
+
+  python "$srcdir/skyapo/packaging/package_smoke_test.py" "$pkgdir"
 }
