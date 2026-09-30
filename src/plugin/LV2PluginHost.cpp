@@ -4,19 +4,224 @@
 #include "IPluginLatencyState.h"
 #include "IPluginParameterControl.h"
 #include "IPluginBypassControl.h"
+#include "IPluginSourceContext.h"
+#include "IPluginStatePersistence.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <lilv/lilv.h>
+#include <lv2/urid/urid.h>
+#include <lv2/state/state.h>
+#include <lv2/atom/atom.h>
 #include <limits>
 #include <lv2/core/lv2.h>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <unordered_map>
+#include <array>
+#include <memory>
+#include <mutex>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
+namespace fs = std::filesystem;
+constexpr size_t MaxStateBytes = 16 * 1024 * 1024;
+
+struct UridMapper {
+  LV2_URID_Map map{this, mapUri};
+  LV2_URID_Unmap unmap{this, unmapUrid};
+  static constexpr size_t Capacity = 65536;
+  std::array<std::atomic<const std::string *>, Capacity> uris{};
+  std::mutex mutex;
+  std::unordered_map<std::string, LV2_URID> byUri;
+  std::vector<std::unique_ptr<std::string>> ownedUris;
+  static thread_local bool audioThread;
+  static LV2_URID mapUri(LV2_URID_Map_Handle handle, const char *uri) {
+    if (!handle || !uri || !*uri)
+      return 0;
+    auto &self = *static_cast<UridMapper *>(handle);
+    for (LV2_URID id = 1; id < Capacity; ++id) {
+      const auto *known = self.uris[id].load(std::memory_order_acquire);
+      if (!known)
+        break;
+      if (*known == uri)
+        return id;
+    }
+    // LV2 URIDs are expected to be mapped during instantiation. Unknown URIs
+    // requested from run() fail closed instead of allocating or blocking.
+    if (audioThread)
+      return 0;
+    std::lock_guard<std::mutex> lock(self.mutex);
+    const auto found = self.byUri.find(uri);
+    if (found != self.byUri.end())
+      return found->second;
+    LV2_URID id = static_cast<LV2_URID>(self.ownedUris.size() + 1);
+    if (id >= Capacity)
+      return 0;
+    std::unique_ptr<std::string> entry;
+    try {
+      entry = std::make_unique<std::string>(uri);
+      const auto *stable = entry.get();
+      self.byUri.emplace(*stable, id);
+      self.ownedUris.emplace_back(std::move(entry));
+      self.uris[id].store(stable, std::memory_order_release);
+    } catch (...) {
+      self.byUri.erase(uri);
+      return 0;
+    }
+    return id;
+  }
+  static const char *unmapUrid(LV2_URID_Unmap_Handle handle, LV2_URID id) {
+    if (!handle)
+      return nullptr;
+    auto &self = *static_cast<UridMapper *>(handle);
+    if (!id || id >= Capacity)
+      return nullptr;
+    const auto *known = self.uris[id].load(std::memory_order_acquire);
+    return known ? known->c_str() : nullptr;
+  }
+};
+thread_local bool UridMapper::audioThread = false;
+UridMapper &uridMapper() {
+  static UridMapper mapper;
+  return mapper;
+}
+
+uint64_t stateHash(const std::string &value) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const unsigned char byte : value) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+std::string stateIdentity(const fs::path &source, unsigned line,
+                          const std::string &uri) {
+  return source.generic_string() + "\n" + std::to_string(line) + "\n" + uri;
+}
+fs::path statePath(const std::string &identity) {
+  fs::path base;
+  if (const char *xdg = std::getenv("XDG_STATE_HOME");
+      xdg && *xdg && fs::path(xdg).is_absolute())
+    base = xdg;
+  else if (const char *home = std::getenv("HOME"); home && *home)
+    base = fs::path(home) / ".local" / "state";
+  else
+    throw std::runtime_error(
+        "LV2 state persistence needs absolute XDG_STATE_HOME or HOME");
+  std::ostringstream name;
+  name << std::hex << std::setw(16) << std::setfill('0') << stateHash(identity)
+       << ".ttl";
+  return base / "skyapo" / "lv2-state" / name.str();
+}
+std::string readState(const fs::path &path) {
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    if (errno == ENOENT)
+      return {};
+    throw std::runtime_error("cannot open LV2 state: " + path.string() + ": " +
+                             std::strerror(errno));
+  }
+  struct Guard {
+    int fd;
+    ~Guard() {
+      close(fd);
+    }
+  } guard{fd};
+  struct stat st{};
+  if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+      (st.st_mode & 0077) || st.st_size <= 0 ||
+      static_cast<uint64_t>(st.st_size) > MaxStateBytes)
+    throw std::runtime_error("invalid or oversized LV2 state file: " +
+                             path.string());
+  std::string data(static_cast<size_t>(st.st_size), '\0');
+  size_t offset = 0;
+  while (offset < data.size()) {
+    const auto n = ::read(fd, data.data() + offset, data.size() - offset);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      throw std::runtime_error("short read from LV2 state file");
+    offset += static_cast<size_t>(n);
+  }
+  char extra{};
+  ssize_t extraBytes;
+  do {
+    extraBytes = ::read(fd, &extra, 1);
+  } while (extraBytes < 0 && errno == EINTR);
+  if (extraBytes != 0)
+    throw std::runtime_error("LV2 state file changed while being read: " +
+                             path.string());
+  return data;
+}
+void atomicWriteState(const fs::path &path, const std::string &data) {
+  if (data.size() > MaxStateBytes)
+    throw std::runtime_error("LV2 state exceeds 16 MiB limit");
+  std::error_code ec;
+  fs::create_directories(path.parent_path(), ec);
+  if (ec || fs::is_symlink(fs::symlink_status(path.parent_path(), ec)) || ec)
+    throw std::runtime_error("cannot safely create LV2 state directory: " +
+                             path.parent_path().string());
+  if (chmod(path.parent_path().c_str(), 0700) < 0)
+    throw std::runtime_error("cannot secure LV2 state directory");
+  std::string pattern = path.string() + ".tmp-XXXXXX";
+  std::vector<char> temp(pattern.begin(), pattern.end());
+  temp.push_back('\0');
+  const int fd = mkstemp(temp.data());
+  if (fd < 0)
+    throw std::runtime_error("cannot create LV2 state temporary file");
+  bool renamed = false;
+  bool fdOpen = true;
+  try {
+    if (fchmod(fd, 0600) < 0)
+      throw std::runtime_error("cannot secure LV2 state file");
+    size_t offset = 0;
+    while (offset < data.size()) {
+      const auto n = ::write(fd, data.data() + offset, data.size() - offset);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n <= 0)
+        throw std::runtime_error("cannot write LV2 state file");
+      offset += static_cast<size_t>(n);
+    }
+    if (fsync(fd) < 0)
+      throw std::runtime_error("cannot sync LV2 state file");
+    const int closeResult = close(fd);
+    fdOpen = false;
+    if (closeResult < 0)
+      throw std::runtime_error("cannot close LV2 state file");
+    if (rename(temp.data(), path.c_str()) < 0)
+      throw std::runtime_error("cannot atomically replace LV2 state file");
+    renamed = true;
+    const int dir =
+        open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir < 0)
+      throw std::runtime_error("cannot open LV2 state directory for sync");
+    if (fsync(dir) < 0) {
+      close(dir);
+      throw std::runtime_error("cannot sync LV2 state directory");
+    }
+    close(dir);
+  } catch (...) {
+    if (fdOpen)
+      close(fd);
+    if (!renamed)
+      unlink(temp.data());
+    throw;
+  }
+}
+
 static_assert(std::atomic<float>::is_always_lock_free,
               "LV2 live parameter mailboxes must be lock-free");
 
@@ -37,7 +242,8 @@ LilvWorld *processWorld() {
 }
 
 class LV2Instance final : public IPluginInstance,
-                          public IPluginParameterControl {
+                          public IPluginParameterControl,
+                          public IPluginStatePersistence {
   enum class PortKind { AudioInput, AudioOutput, Control };
   struct Port {
     PortKind kind{};
@@ -60,9 +266,12 @@ public:
   LV2Instance(LilvWorld *world, const LilvPlugin *plugin, std::string uri,
               float sampleRate, unsigned maxFrames,
               const std::vector<std::wstring> &channels,
-              const std::vector<PluginParameterValue> &overrides)
-      : pluginUri(std::move(uri)), maxFrameCount(maxFrames),
-        channelCount(static_cast<unsigned>(channels.size())) {
+              const std::vector<PluginParameterValue> &overrides,
+              std::string identity = {})
+      : pluginUri(std::move(uri)), worldRef(world), pluginRef(plugin),
+        maxFrameCount(maxFrames),
+        channelCount(static_cast<unsigned>(channels.size())),
+        persistentIdentity(std::move(identity)) {
     if (!std::isfinite(sampleRate) || sampleRate < 8000.0f || !maxFrames ||
         channels.empty())
       throw std::runtime_error("invalid LV2 instance audio configuration");
@@ -83,15 +292,20 @@ public:
     }
 
     LilvNodes *required = lilv_plugin_get_required_features(plugin);
-    if (required && lilv_nodes_size(required)) {
-      const LilvNode *feature = lilv_nodes_get_first(required);
-      const std::string featureUri =
-          feature ? lilv_node_as_uri(feature) : "unknown feature";
-      lilv_nodes_free(required);
-      cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                   latencyProperty);
-      throw std::runtime_error("LV2 plugin requires unsupported host feature " +
-                               featureUri);
+    if (required) {
+      for (LilvIter *i = lilv_nodes_begin(required);
+           !lilv_nodes_is_end(required, i); i = lilv_nodes_next(required, i)) {
+        const LilvNode *feature = lilv_nodes_get(required, i);
+        const std::string featureUri =
+            feature ? lilv_node_as_uri(feature) : "unknown feature";
+        if (featureUri != LV2_URID__map && featureUri != LV2_URID__unmap) {
+          lilv_nodes_free(required);
+          cleanupNodes(audioPort, controlPort, inputPort, outputPort,
+                       latencyProperty);
+          throw std::runtime_error(
+              "LV2 plugin requires unsupported host feature " + featureUri);
+        }
+      }
     }
     lilv_nodes_free(required);
 
@@ -159,9 +373,8 @@ public:
           LilvNode *name = lilv_port_get_name(plugin, descriptor);
           const std::string displayName =
               name ? lilv_node_as_string(name) : ports[i].symbol;
-          parameterInfos.push_back(
-              {ports[i].symbol, displayName, defaultValue, minValue, maxValue,
-               defaultValue});
+          parameterInfos.push_back({ports[i].symbol, displayName, defaultValue,
+                                    minValue, maxValue, defaultValue});
           auto parameter = std::make_unique<LiveParameter>();
           parameter->symbol = ports[i].symbol;
           parameter->name = displayName;
@@ -215,23 +428,74 @@ public:
                                  override.symbol + "'");
       port->control = override.value;
       info->value = override.value;
-      auto live = std::find_if(
-          liveParameters.begin(), liveParameters.end(),
-          [&](const auto &parameter) {
-            return parameter->symbol == override.symbol;
-          });
+      auto live = std::find_if(liveParameters.begin(), liveParameters.end(),
+                               [&](const auto &parameter) {
+                                 return parameter->symbol == override.symbol;
+                               });
       if (live != liveParameters.end())
         (*live)->value.store(override.value, std::memory_order_relaxed);
     }
 
-    instance = lilv_plugin_instantiate(plugin, sampleRate, nullptr);
+    auto &mapper = uridMapper();
+    mapFeature = {LV2_URID__map, &mapper.map};
+    unmapFeature = {LV2_URID__unmap, &mapper.unmap};
+    features[0] = &mapFeature;
+    features[1] = &unmapFeature;
+    features[2] = nullptr;
+    instance = lilv_plugin_instantiate(plugin, sampleRate, features);
     if (!instance)
       throw std::runtime_error("LV2 plugin instantiate failed: " + pluginUri);
+    auto cleanupInstance = [this](LilvInstance *created) {
+      if (active)
+        lilv_instance_deactivate(created);
+      lilv_instance_free(created);
+      instance = nullptr;
+      active = false;
+    };
+    std::unique_ptr<LilvInstance, decltype(cleanupInstance)> instanceGuard(
+        instance, cleanupInstance);
+    stateInterface = static_cast<const LV2_State_Interface *>(
+        lilv_instance_get_extension_data(instance, LV2_STATE__interface));
     for (auto &port : ports)
       if (port.kind == PortKind::Control)
         lilv_instance_connect_port(instance, port.index, &port.control);
+    if (!persistentIdentity.empty()) {
+      savedStatePath = statePath(persistentIdentity);
+      const auto saved = readState(savedStatePath);
+      if (!saved.empty()) {
+        if (!stateInterface)
+          throw std::runtime_error("LV2 state exists but plugin does not "
+                                   "implement state:interface: " +
+                                   pluginUri);
+        LilvState *state =
+            lilv_state_new_from_string(world, &mapper.map, saved.c_str());
+        if (!state)
+          throw std::runtime_error("corrupt LV2 state file: " +
+                                   savedStatePath.string());
+        const LilvNode *statePlugin = lilv_state_get_plugin_uri(state);
+        const char *storedIdentity = lilv_state_get_label(state);
+        if (!statePlugin ||
+            std::string(lilv_node_as_uri(statePlugin)) != pluginUri ||
+            !storedIdentity || storedIdentity != persistentIdentity) {
+          lilv_state_free(state);
+          throw std::runtime_error("LV2 state identity mismatch: " +
+                                   savedStatePath.string());
+        }
+        lilv_state_restore(state, instance, setStatePort, this, 0, features);
+        lilv_state_free(state);
+        for (const auto &parameter : liveParameters) {
+          const float value = ports[parameter->portIndex].control;
+          if (!std::isfinite(value) || value < parameter->minimum ||
+              value > parameter->maximum)
+            throw std::runtime_error(
+                "LV2 state contains an invalid value for '" +
+                parameter->symbol + "': " + pluginUri);
+        }
+      }
+    }
     lilv_instance_activate(instance);
     active = true;
+    instanceGuard.release();
   }
 
   ~LV2Instance() override {
@@ -242,7 +506,9 @@ public:
     }
   }
 
-  const std::string &uri() const noexcept override { return pluginUri; }
+  const std::string &uri() const noexcept override {
+    return pluginUri;
+  }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
   }
@@ -260,13 +526,12 @@ public:
       if (symbol == parameter.symbol || symbol == parameter.name) {
         if (match != liveParameters.size())
           throw std::runtime_error("ambiguous LV2 parameter '" + symbol +
-                                  "' (use its port symbol)");
+                                   "' (use its port symbol)");
         match = i;
       }
     }
     if (match == liveParameters.size())
-      throw std::runtime_error("unknown LV2 input parameter '" + symbol +
-                               "'");
+      throw std::runtime_error("unknown LV2 input parameter '" + symbol + "'");
     auto &parameter = *liveParameters[match];
     if (value < parameter.minimum || value > parameter.maximum)
       throw std::runtime_error("LV2 parameter '" + symbol +
@@ -276,6 +541,40 @@ public:
     // start of a process block, before calling run(); plugin port memory is
     // therefore never concurrently written by the control thread.
     parameter.value.store(value, std::memory_order_release);
+  }
+
+  bool savePersistentPluginState() override {
+    if (!instance || !stateInterface || persistentIdentity.empty())
+      return false;
+    if (persistentIdentity.size() > 4096)
+      throw std::runtime_error("LV2 state identity exceeds 4096 bytes");
+    // Save is called on the quiesced control thread. Flush latest live
+    // parameter mailboxes so an update issued just before graph replacement or
+    // shutdown is not lost merely because no subsequent audio block ran.
+    for (const auto &parameter : liveParameters)
+      ports[parameter->portIndex].control =
+          parameter->value.load(std::memory_order_acquire);
+    auto &mapper = uridMapper();
+    LilvState *state = lilv_state_new_from_instance(
+        pluginRef, instance, &mapper.map, nullptr, nullptr, nullptr, nullptr,
+        getStatePort, this, LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE, features);
+    if (!state)
+      throw std::runtime_error("LV2 plugin failed to provide state: " +
+                               pluginUri);
+    lilv_state_set_label(state, persistentIdentity.c_str());
+    std::ostringstream uri;
+    uri << "urn:skyapo:lv2-state:" << std::hex << stateHash(persistentIdentity);
+    char *serialized =
+        lilv_state_to_string(worldRef, &mapper.map, &mapper.unmap, state,
+                             uri.str().c_str(), nullptr);
+    lilv_state_free(state);
+    if (!serialized)
+      throw std::runtime_error("cannot serialize LV2 plugin state: " +
+                               pluginUri);
+    std::string data(serialized);
+    lilv_free(serialized);
+    atomicWriteState(savedStatePath, data);
+    return true;
   }
 
   std::vector<std::wstring>
@@ -302,10 +601,53 @@ public:
     for (const auto &parameter : liveParameters)
       ports[parameter->portIndex].control =
           parameter->value.load(std::memory_order_acquire);
+    struct AudioThreadScope {
+      bool previous{UridMapper::audioThread};
+      AudioThreadScope() {
+        UridMapper::audioThread = true;
+      }
+      ~AudioThreadScope() {
+        UridMapper::audioThread = previous;
+      }
+    } audioThreadScope;
     lilv_instance_run(instance, frames);
   }
 
 private:
+  static const void *getStatePort(const char *symbol, void *opaque,
+                                  uint32_t *size, uint32_t *type) {
+    auto &self = *static_cast<LV2Instance *>(opaque);
+    const auto found = std::find_if(
+        self.ports.begin(), self.ports.end(), [&](const Port &port) {
+          return port.controlInput && port.symbol == symbol;
+        });
+    if (found == self.ports.end())
+      return nullptr;
+    *size = sizeof(float);
+    *type = uridMapper().map.map(uridMapper().map.handle, LV2_ATOM__Float);
+    return &found->control;
+  }
+  static void setStatePort(const char *symbol, void *opaque, const void *value,
+                           uint32_t size, uint32_t type) {
+    auto &self = *static_cast<LV2Instance *>(opaque);
+    const auto floatType =
+        uridMapper().map.map(uridMapper().map.handle, LV2_ATOM__Float);
+    if (size != sizeof(float) || type != floatType)
+      return;
+    const auto found = std::find_if(
+        self.ports.begin(), self.ports.end(), [&](const Port &port) {
+          return port.controlInput && port.symbol == symbol;
+        });
+    if (found == self.ports.end())
+      return;
+    const float restored = *static_cast<const float *>(value);
+    if (!std::isfinite(restored))
+      return;
+    found->control = restored;
+    for (auto &parameter : self.liveParameters)
+      if (parameter->portIndex == found->index)
+        parameter->value.store(restored, std::memory_order_relaxed);
+  }
   static void cleanupNodes(LilvNode *a, LilvNode *b, LilvNode *c, LilvNode *d,
                            LilvNode *e) {
     lilv_node_free(a);
@@ -316,11 +658,19 @@ private:
   }
 
   std::string pluginUri;
+  LilvWorld *worldRef{};
+  const LilvPlugin *pluginRef{};
   unsigned maxFrameCount;
   unsigned channelCount;
   std::vector<Port> ports;
   LilvInstance *instance{};
   bool active = false;
+  std::string persistentIdentity;
+  fs::path savedStatePath;
+  const LV2_State_Interface *stateInterface{};
+  LV2_Feature mapFeature{};
+  LV2_Feature unmapFeature{};
+  const LV2_Feature *features[3]{};
   std::vector<PluginParameterInfo> parameterInfos;
   // Stable heap-owned atomic mailboxes are allocated during plugin setup;
   // neither publication nor consumption allocates or locks in the callback.
@@ -330,21 +680,30 @@ private:
 class LV2PluginFilter final : public IFilter,
                               public AtomicPluginBypass,
                               public IPluginLatencyState,
-                              public IPluginParameterControl {
+                              public IPluginParameterControl,
+                              public IPluginStatePersistence {
 public:
   LV2PluginFilter(LV2PluginHost &host, std::string uri,
-                  std::vector<PluginParameterValue> parameters)
+                  std::vector<PluginParameterValue> parameters,
+                  std::filesystem::path source = {}, unsigned line = 0)
       : host(host), pluginUri(std::move(uri)),
-        parameterOverrides(std::move(parameters)) {}
+        parameterOverrides(std::move(parameters)), source(std::move(source)),
+        line(line) {}
 
-  bool getInPlace() override { return false; }
+  bool getInPlace() override {
+    return false;
+  }
 
   std::vector<std::wstring>
   initialize(float sampleRate, unsigned maxFrameCount,
              std::vector<std::wstring> channelNames) override {
     channelCount = static_cast<unsigned>(channelNames.size());
-    instance = host.create(pluginUri, sampleRate, maxFrameCount, channelNames,
-                           parameterOverrides);
+    instance = source.empty()
+                   ? host.create(pluginUri, sampleRate, maxFrameCount,
+                                 channelNames, parameterOverrides)
+                   : host.createForConfig(pluginUri, sampleRate, maxFrameCount,
+                                          channelNames, parameterOverrides,
+                                          source, line);
     return instance->initialize(sampleRate, maxFrameCount, channelNames);
   }
 
@@ -370,21 +729,29 @@ public:
                                pluginUri);
     control->setParameterValue(symbol, value);
   }
+  bool savePersistentPluginState() override {
+    auto *state = dynamic_cast<IPluginStatePersistence *>(instance.get());
+    return state && state->savePersistentPluginState();
+  }
 
 private:
   LV2PluginHost &host;
   std::string pluginUri;
   std::vector<PluginParameterValue> parameterOverrides;
+  std::filesystem::path source;
+  unsigned line{};
   std::unique_ptr<IPluginInstance> instance;
   unsigned channelCount{};
 };
 
 IFilter *allocatePluginFilter(LV2PluginHost &host, std::string uri,
-                              std::vector<PluginParameterValue> parameters) {
+                              std::vector<PluginParameterValue> parameters,
+                              std::filesystem::path source = {},
+                              unsigned line = 0) {
   void *memory = MemoryHelper::alloc(sizeof(LV2PluginFilter));
   try {
-    return new (memory)
-        LV2PluginFilter(host, std::move(uri), std::move(parameters));
+    return new (memory) LV2PluginFilter(
+        host, std::move(uri), std::move(parameters), std::move(source), line);
   } catch (...) {
     MemoryHelper::free(memory);
     throw;
@@ -401,6 +768,15 @@ LV2PluginHost::create(const std::string &uri, float sampleRate,
                       unsigned maxFrames,
                       const std::vector<std::wstring> &channels,
                       const std::vector<PluginParameterValue> &parameters) {
+  return createForConfig(uri, sampleRate, maxFrames, channels, parameters, {},
+                         0);
+}
+
+std::unique_ptr<IPluginInstance> LV2PluginHost::createForConfig(
+    const std::string &uri, float sampleRate, unsigned maxFrames,
+    const std::vector<std::wstring> &channels,
+    const std::vector<PluginParameterValue> &parameters,
+    const std::filesystem::path &source, unsigned line) {
   LilvWorld *world = processWorld();
   if (!world)
     throw std::runtime_error("cannot create Lilv world");
@@ -412,8 +788,14 @@ LV2PluginHost::create(const std::string &uri, float sampleRate,
   lilv_node_free(node);
   if (!plugin)
     throw std::runtime_error("LV2 plugin not found: " + uri);
+  const auto identity =
+      source.empty()
+          ? std::string{}
+          : stateIdentity(std::filesystem::absolute(source).lexically_normal(),
+                          line, uri);
   return std::make_unique<LV2Instance>(world, plugin, uri, sampleRate,
-                                       maxFrames, channels, parameters);
+                                       maxFrames, channels, parameters,
+                                       identity);
 }
 
 PluginDescription LV2PluginHost::describe(const std::string &uri) const {
@@ -495,9 +877,16 @@ std::vector<std::pair<std::string, std::string>> LV2PluginHost::list() const {
   return result;
 }
 
-class LV2PluginFilterFactory final : public IFilterFactory {
+class LV2PluginFilterFactory final : public IFilterFactory,
+                                     public IPluginSourceContext {
 public:
   LV2PluginFilterFactory() : host(std::make_unique<LV2PluginHost>()) {}
+
+  void setPluginSourceLocation(const std::filesystem::path &path,
+                               unsigned sourceLine) override {
+    source = path;
+    line = sourceLine;
+  }
 
   std::vector<IFilter *> createFilter(const std::wstring &,
                                       std::wstring &command,
@@ -542,11 +931,14 @@ public:
                                  "'");
       overrides.push_back({symbol, value});
     }
-    return {allocatePluginFilter(*host, uri, std::move(overrides))};
+    return {
+        allocatePluginFilter(*host, uri, std::move(overrides), source, line)};
   }
 
 private:
   std::unique_ptr<LV2PluginHost> host;
+  std::filesystem::path source;
+  unsigned line{};
 };
 
 std::unique_ptr<IFilterFactory> makeLV2PluginFilterFactory() {

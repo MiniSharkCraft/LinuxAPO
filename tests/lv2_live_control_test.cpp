@@ -1,10 +1,15 @@
 #include "IPluginParameterControl.h"
 #include "LV2PluginHost.h"
+#include "../core/Engine.h"
 
 #include <array>
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <filesystem>
+#include <cstdlib>
+#include <unistd.h>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -43,9 +48,9 @@ int main() {
       return 1;
     }
 
-    for (const auto &invalid :
-         std::vector<std::pair<std::string, float>>{
-             {"missing", 0.5f}, {"gain", 1.01f},
+    for (const auto &invalid : std::vector<std::pair<std::string, float>>{
+             {"missing", 0.5f},
+             {"gain", 1.01f},
              {"gain", std::numeric_limits<float>::infinity()}}) {
       bool rejected = false;
       try {
@@ -59,6 +64,39 @@ int main() {
         return 1;
       }
     }
+
+    const auto stateRoot = std::filesystem::temp_directory_path() /
+                           ("skyapo-lv2-state-" + std::to_string(getpid()));
+    std::filesystem::remove_all(stateRoot);
+    std::filesystem::create_directories(stateRoot);
+    if (setenv("XDG_STATE_HOME", stateRoot.c_str(), 1) != 0)
+      throw std::runtime_error("cannot set isolated LV2 state directory");
+    const auto config = stateRoot / "state-test.txt";
+    {
+      std::ofstream out(config);
+      out << "Plugin: LV2 https://skyapo.example/plugins/test-gain gain=0.25\n";
+    }
+    {
+      Engine engine(48000, 2, 64);
+      engine.loadConfig(config.string());
+      engine.setPluginParameter("https://skyapo.example/plugins/test-gain",
+                                "gain", 0.8f);
+      if (engine.savePersistentPluginStates() != 1)
+        throw std::runtime_error("Engine did not save LV2 plugin state");
+    }
+    {
+      Engine restored(48000, 2, 64);
+      restored.loadConfig(config.string());
+      std::array<float, 16> block{};
+      for (size_t i = 0; i < block.size(); ++i)
+        block[i] = 1.0f;
+      restored.process(block.data(), 8);
+      if (std::abs(block.front() - 0.8f) > 1e-6f ||
+          std::abs(block.back() - 0.8f) > 1e-6f)
+        throw std::runtime_error(
+            "LV2 saved state was not numerically restored");
+    }
+    std::filesystem::remove_all(stateRoot);
     std::cout << "LV2 live parameter mailbox passed\n";
     return 0;
   } catch (const std::exception &error) {
