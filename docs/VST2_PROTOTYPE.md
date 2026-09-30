@@ -1,61 +1,106 @@
-# VST2 host feasibility prototype
+# Experimental FST-based legacy plugin host
 
-This is an unintegrated experiment, not production VST2 support. It adds an
-`IPluginInstance` implementation in `src/plugin/VST2PluginHost.cpp`; it is not
-registered with `Engine`, the configuration parser, package metadata, or the
-UI. CMake can build it only as an opt-in test target; it is not linked into the
-SkyAPO application. Its sole API source is the pinned FST submodule at
-`upstream/fst` (`647af068765b75867e3a28b4dd8991ab9ed47f7c`). It does not include
-Steinberg or Equalizer APO `aeffect.h` / `aeffectx.h` headers.
+SkyAPO has an opt-in integration path for Linux effect modules implementing
+the legacy VST2 ABI. It is experimental, is not enabled in the default build or
+Arch package, and is not production compatibility support. The implementation
+uses the pinned FST submodule at `upstream/fst`
+(`647af068765b75867e3a28b4dd8991ab9ed47f7c`) as its only VST2 ABI source. It
+does not include Steinberg or Equalizer APO
+`aeffect.h` / `aeffectx.h` headers.
 
-FST describes itself as an independently reverse-engineered interface and
-licenses its header GPL-3.0-or-later. Its README says the interface is not yet
-feature-complete and marks unknown opcodes as deprecated. Keep the upstream
-license, copyright notices, and reverse-engineering notes with the submodule.
-The EAPO source files used by SkyAPO declare GPL version 2 or (at the user's
-option) any later version; combining code and distributing a build still needs
-a deliberate license review, including applicable GPL obligations. This note
-is evidence about the files' notices, not a legal opinion.
+## What is wired up
 
-FST's README also discusses Steinberg's `VST` trademark and names restrictions
-for plugins. It does not resolve how SkyAPO should market or name a host. Obtain
-appropriate trademark/licensing review before public distribution; the
-prototype's existence is not a legal clearance. Steinberg's current SDK FAQ
-addresses its own SDK files and license terms separately; this prototype does
-not use those files.
+With `SKYAPO_ENABLE_FST_VST2_HOST=ON`, CMake compiles
+`src/plugin/VST2PluginHost.cpp` and `src/plugin/VST2PluginFilter.cpp` into
+`skyapo-core`, and `Engine` registers the filter factory when plugin filters
+are enabled. The adapter implements the shared `IPluginHost` /
+`IPluginInstance` processing boundary. A graph can instantiate a module path
+with:
 
-The current code only exercises a host-compatible 32-bit float mono/stereo
-effect module path: dynamic load, `VSTPluginMain`/`main` resolution, basic host
-callbacks, `AEffect` validation, open/configure/activate/close, parameter-name
-and normalized-value lookup, and `processReplacing`. It does not provide
-discovery, GUI, state/chunks, automation, MIDI/events, shell plugins, multiple
-buses, sample-accurate parameter events, process isolation, or comprehensive
-host callback behavior. In-process plugins can crash or compromise the daemon;
-C++ exception handling cannot isolate memory faults or hostile code. No claim
-is made about compatibility with arbitrary third-party plugins.
-
-Oversize process requests latch failure and silence only the negotiated
-`maxFrameCount` prefix: the host cannot assume that samples beyond the caller's
-announced output capacity exist. The prototype fixture checks a sentinel just
-past that capacity and an exact-capacity buffer under ASan.
-
-## Standalone fixture test
-
-The project also has an opt-in CMake/CTest target for repeatable normal and
-sanitizer builds:
-
-```sh
-cmake -S . -B build-vst2-prototype \
-  -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
-cmake --build build-vst2-prototype --target skyapo-vst2-host-prototype-tests
-ctest --test-dir build-vst2-prototype \
-  -R '^skyapo-vst2-host-prototype$' --output-on-failure
+```text
+Plugin: VST2 "/path/to/effect.so" 0=0.5
 ```
 
-This does not enable plugin discovery or make the host available to configs.
+The path must identify a loadable native Linux module; quotes allow spaces.
+Parameter overrides use decimal parameter indices and normalized values in
+`[0, 1]`, and are applied while constructing the graph. The host loads
+`VSTPluginMain` (or fallback `main`), supplies basic version/sample-rate/block
+size callbacks, validates the `AEffect`, and opens/configures/activates it. The
+current process path supports 32-bit float mono/stereo effects with
+`processReplacing`. It implements temporary host-level dry bypass, a latched
+fail-closed state for invalid/oversize requests or caught processing errors,
+reports the initial `AEffect::initialDelay` latency snapshot, and accepts live
+parameter updates by decimal index or unique display name:
 
-This deliberately bypasses the project build system so this prototype does not
-silently become a user-facing feature, or can be run independently:
+```sh
+skyapo plugin set /path/to/effect.so 0 0.75
+skyapo plugin set /path/to/effect.so Gain 0.75
+```
+
+Live updates are published off-thread through preallocated lock-free
+latest-value mailboxes and applied through `setParameter` at the next
+process-block boundary. Values are temporary and are not persisted.
+
+It does **not** implement VST2 module discovery or `skyapo plugin list/info`
+metadata, plugin state/chunks, UI, automation or MIDI
+events, shell plugins, multiple buses, sample-accurate parameter events,
+comprehensive host callbacks, dynamic latency updates, delay compensation, or
+process isolation. The daemon loads modules in-process: native crashes and
+hostile code are not isolated by C++ exception handling. The fixture is
+SkyAPO-authored and does not demonstrate compatibility with arbitrary
+third-party plugins. A yabridge-generated Linux VST2 wrapper would still need
+this VST2 host interface. A locally installed Blue Cat Gain 3 VST2 wrapper
+generated by yabridge 5.1.1 was loaded through this path with an isolated,
+pre-initialized Wine prefix: `skyapo config check` reported `Valid config: 1
+filters`, and `skyapo-render` processed an 8192-frame stereo WAV at 44.1 kHz.
+The measured output was unity gain (RMS ratio 1, correlation 1) at the default
+setting and with numeric override `0=0.0` and `0=1.0`; this did not demonstrate
+an audible/parameter-driven effect, so it is only wrapper load/offline-path
+evidence. yabridge logged `realtime: no`; no PipeWire E2E, third-party
+real-time-safety or broad compatibility claim follows from this probe.
+
+## Build and tests
+
+Build the integrated path and run its fixture coverage:
+
+```sh
+cmake -S . -B build-vst2 \
+  -DSKYAPO_ENABLE_FST_VST2_HOST=ON \
+  -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-vst2 -j
+ctest --test-dir build-vst2 \
+  -R '^(skyapo-core|skyapo-realtime-safety)$' --output-on-failure
+```
+
+To also enable the private PipeWire consumer test, configure and build with:
+
+```sh
+cmake -S . -B build-vst2 \
+  -DSKYAPO_ENABLE_FST_VST2_HOST=ON \
+  -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-vst2 -j
+ctest --test-dir build-vst2 \
+  -R '^skyapo-pipewire-e2e-vst2-live-parameter$' --output-on-failure
+```
+
+The core fixture tests mono/stereo graph construction, config-time and live
+parameter updates, invalid module/parameter rejection, dry bypass/resume, and
+audio output. The realtime safety test processes variable blocks while
+toggling bypass and live parameters and checks SkyAPO's callback allocation
+audit. These tests do not load third-party plugins or detect allocations
+internal to arbitrary plugin code. A private PipeWire E2E mode starts a test
+source, SkyAPO and an independent consumer; it changes the fixture gain to
+`0.75` through CLI/daemon control and verifies the measured output. The latest
+run consumed 143360 frames and measured RMS ratio `1.000044` against expected
+output; daemon status reported zero callback allocations/deallocations and
+zero overruns. This is fixture evidence, not third-party compatibility or
+hardware-microphone validation. An
+optional standalone ABI harness remains
+available with `-DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON` and CTest name
+`skyapo-vst2-host-prototype`.
+
+The FST-only fixture can also be built without the app test suite:
 
 ```sh
 mkdir -p /tmp/skyapo-vst2-prototype
@@ -69,6 +114,29 @@ c++ -std=c++17 -Isrc/plugin -Iupstream/fst/fst \
   /tmp/skyapo-vst2-prototype/vst2_gain_fixture.so
 ```
 
-The fixture is SkyAPO-authored test code built against the FST API; it is not a
-third-party compatibility test and should not be installed or advertised as a
-user plugin.
+## License, trademark, and 1.0 release gate
+
+FST describes itself as independently reverse-engineered, licenses its API
+header GPL-3.0-or-later, and says the interface is not feature-complete. Keep
+the submodule, its history, license, copyright notices, and reverse-engineering
+notes intact. The EAPO files used by SkyAPO carry GPL version 2-or-later
+notices; the effect of combining/distributing all components and the required
+source/license notices still needs a deliberate review. The upstream FST
+README also warns about Steinberg's `VST` trademark and about compatibility
+naming. Avoid public compatibility claims or branding until reviewed.
+
+Steinberg's [licensing FAQ](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Licensing.html)
+says VST2 source can be shared without redistributing Steinberg's
+`aeffect.h` / `aeffectx.h` files, and says binary distribution of a VST2 host
+requires an agreement signed before October 2018. That statement is not a
+legal determination of this separate FST-based implementation. The absence of
+Steinberg headers is not, by itself, a clearance. The FST integration is
+therefore disabled in default/package builds pending qualified legal and
+trademark review; CMake installs FST's license when the option is enabled.
+
+VST2 remains a 1.0 product requirement, not a dropped goal. The release gate
+remains open until legal/package approval, permitted third-party ABI validation,
+and independent-consumer PipeWire evidence exist, and the project defines the
+compatibility level needed for missing live parameter/state and failure
+isolation features. The prototype is a step toward that goal, not evidence that
+the gates have passed.

@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="icons/resize_corner.ico">icons/resize-corner.svg</file>
+    <file alias="icons/dark-mode/invert_response.svg">icons/invert-response.svg</file>
+    <file alias="icons/dark-mode/normalize_response.svg">icons/normalize-response.svg</file>
+    <file alias="icons/dark-mode/reset_response.svg">icons/reset-response.svg</file>
+  </qresource>
+</RCC>

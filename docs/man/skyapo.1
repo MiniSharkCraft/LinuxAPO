@@ -61,6 +61,17 @@ List plugins discoverable by the plugin hosts built into this package.
 .B plugin info \fIURI\fR
 Print metadata for a discovered plugin.
 .TP
+.B plugin set \fIPLUGIN-ID\fR \fIPARAM\fR \fIVALUE\fR
+Set a live parameter on the uniquely matching active plugin instance. Current
+hosts validate the parameter against the plugin's declared range and deliver
+the update at an audio block boundary; the update is not persisted to the
+configuration file. Parameter identifiers and value units depend on format.
+.TP
+.B plugin bypass \fIPLUGIN-ID\fR on|off
+Enable or disable SkyAPO's transparent host bypass for the uniquely matching
+active LV2, CLAP, or VST3 plugin instance. The state is runtime-only. Bypass
+copies plugin input to output without calling the plugin process hook.
+.TP
 .B help, --help, -h
 Print command help.
 .TP

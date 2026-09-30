@@ -2,9 +2,11 @@ pkgname=skyapo
 pkgver=0.1.0
 pkgrel=12
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
+# SkyAPO is not published separately yet; link the official upstream project.
+url='https://sourceforge.net/projects/equalizerapo/'
 # Maintainer: Cong Nguyen
 arch=('x86_64')
-license=('GPL-2.0-or-later' 'MIT' 'BSD-2-Clause')
+license=('GPL-2.0-or-later' 'LGPL-3.0-only' 'MIT' 'BSD-2-Clause')
 depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme')
 makedepends=('cmake' 'gcc' 'git' 'pkgconf')
 # Makepkg runs this PKGBUILD from its containing directory. Using PWD avoids
@@ -14,7 +16,18 @@ source=("skyapo::git+file://${PWD}/.."
 sha256sums=('SKIP'
             '11689042843844638414af070f928ef5200461dc59fa237bad4a01531f982609')
 
+# `git+file://` checks out committed Git state; it does not snapshot the
+# developer's modified or untracked files. Refuse a misleading package build
+# instead of silently packaging a different tree than the one being reviewed.
+_skyapo_source_root="$(realpath "${PWD}/..")"
+
 prepare() {
+  if [[ -n "$(git -C "$_skyapo_source_root" status --porcelain --untracked-files=all)" ]]; then
+    printf '==> ERROR: SkyAPO source worktree is dirty; commit or stash changes before makepkg.\n' >&2
+    printf '==> ERROR: The local git+file source only includes committed files.\n' >&2
+    return 1
+  fi
+
   cd "$srcdir/skyapo"
   git submodule update --init --recursive
 }

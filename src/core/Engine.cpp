@@ -1,7 +1,10 @@
 #include "Engine.h"
 #include "../plugin/IPluginFailureState.h"
+#include "../plugin/IPluginBypassControl.h"
+#include "../plugin/IPluginParameterControl.h"
+#include "../plugin/IPluginIdentity.h"
+#include "../plugin/IPluginLatencyState.h"
 #include "FilterConfiguration.h"
-#include "FilterEngine.h"
 #include "FilterConfigurationContext.h"
 
 #include "BiQuadFilterFactory.h"
@@ -35,10 +38,14 @@
 #ifdef SKYAPO_HAVE_VST3
 #include "VST3PluginHost.h"
 #endif
+#ifdef SKYAPO_HAVE_FST_VST2
+#include "VST2PluginFilter.h"
+#endif
 #include "helpers/ChannelHelper.h"
 #include "helpers/StringHelper.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -162,7 +169,8 @@ void Engine::ConfigurationDeleter::operator()(
 }
 
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
-               std::vector<std::wstring> names, bool allowPendingEndpointVolume)
+               std::vector<std::wstring> names, bool allowPendingEndpointVolume,
+               bool enablePluginFilters)
     : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames),
       allowPendingEndpointVolume(allowPendingEndpointVolume) {
   if (!channels || !maxFrames)
@@ -190,13 +198,20 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   factories.push_back(std::make_unique<CopyFilterFactory>());
   factories.push_back(std::make_unique<LoudnessCorrectionFilterFactory>());
 #ifdef SKYAPO_HAVE_CLAP
-  factories.push_back(makeCLAPPluginFilterFactory());
+  if (enablePluginFilters)
+    factories.push_back(makeCLAPPluginFilterFactory());
 #endif
 #ifdef SKYAPO_HAVE_VST3
-  factories.push_back(makeVST3PluginFilterFactory());
+  if (enablePluginFilters)
+    factories.push_back(makeVST3PluginFilterFactory());
+#endif
+#ifdef SKYAPO_HAVE_FST_VST2
+  if (enablePluginFilters)
+    factories.push_back(makeVST2PluginFilterFactory());
 #endif
 #ifdef SKYAPO_HAVE_LV2
-  factories.push_back(makeLV2PluginFilterFactory());
+  if (enablePluginFilters)
+    factories.push_back(makeLV2PluginFilterFactory());
 #endif
 #ifdef SKYAPO_HAVE_CONVOLUTION
   factories.push_back(std::make_unique<ConvolutionFilterFactory>());
@@ -207,6 +222,8 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
 void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
+  std::vector<std::filesystem::path> configFiles;
+  std::vector<IncludeSite> includeChain;
   bool stageActive = true;
 #ifdef SKYAPO_HAVE_MUPARSERX
   mup::ParserX expressionParser(mup::pckALL_NON_COMPLEX);
@@ -223,26 +240,47 @@ void Engine::loadConfig(const std::string &path) {
 #else
   mup::ParserX *expressionParserPtr = nullptr;
 #endif
-  FilterEngine factoryContext(channelCount, channelCount, maxFrameCount);
+  FilterConfigurationContext context(channelCount, channelCount, maxFrameCount);
   const auto addReturnedFilters =
       [&](std::vector<IFilter *> produced, const std::filesystem::path &source,
           unsigned line, const std::string &directive) {
         for (auto *filter : produced)
           candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                               source, line, directive});
+                               source, line, directive, includeChain});
       };
   for (auto &factory : factories) {
-    factory->initialize(&factoryContext);
+    factory->initialize(&context);
     addReturnedFilters(factory->startOfConfiguration(), path, 0,
                        "configuration initialization");
   }
-  parseConfigFile(std::filesystem::path(path), candidate, includeStack,
-                  stageActive, expressionParserPtr);
+  try {
+    parseConfigFile(std::filesystem::path(path), candidate, includeStack,
+                    configFiles, includeChain, stageActive,
+                    expressionParserPtr);
+  } catch (const ConfigError &) {
+    throw;
+  } catch (const std::exception &error) {
+    if (includeChain.empty())
+      throw;
+    throw ConfigError(error.what(), includeChain);
+  }
   for (auto &factory : factories)
     addReturnedFilters(factory->endOfConfiguration(), path, 0,
                        "configuration finalization");
 
-  auto newGraph = buildGraph(candidate);
+  std::vector<FilterNode> newGraph;
+  try {
+    newGraph = buildGraph(candidate);
+  } catch (const std::exception &error) {
+    const std::string message = error.what();
+    for (const auto &parsed : candidate) {
+      const std::string prefix = parsed.source.string() + ":" +
+                                 std::to_string(parsed.line) + ":";
+      if (message.rfind(prefix, 0) == 0 && !parsed.includeChain.empty())
+        throw ConfigError(message, parsed.includeChain);
+    }
+    throw;
+  }
   const bool newFixedBlock =
       std::any_of(newGraph.begin(), newGraph.end(),
                   [](const auto &node) { return node.fixedBlock; });
@@ -298,8 +336,6 @@ void Engine::loadConfig(const std::string &path) {
     throw;
   }
 
-  FilterConfigurationContext context(channelCount, channelCount,
-                                      maxFrameCount);
   void *memory = MemoryHelper::alloc(sizeof(FilterConfiguration));
   FilterConfiguration *built = nullptr;
   try {
@@ -318,6 +354,7 @@ void Engine::loadConfig(const std::string &path) {
   graph.swap(newGraph);
   configuration.swap(newConfiguration);
   descriptions.swap(newDescriptions);
+  loadedConfigFiles.swap(configFiles);
   fixedBlock = newFixedBlock;
 }
 
@@ -460,6 +497,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              FilterList &candidate,
                              std::vector<std::filesystem::path> &includeStack,
+                             std::vector<std::filesystem::path> &configFiles,
+                             std::vector<IncludeSite> &includeChain,
                              bool &stageActive,
                              mup::ParserX *expressionParser) {
   std::error_code ec;
@@ -481,6 +520,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   std::ifstream in(normalizedPath);
   if (!in)
     throw std::runtime_error("cannot open config: " + normalizedPath.string());
+  if (std::find(configFiles.begin(), configFiles.end(), normalizedPath) ==
+      configFiles.end())
+    configFiles.push_back(normalizedPath);
   includeStack.push_back(normalizedPath);
   struct PopPath {
     std::vector<std::filesystem::path> &stack;
@@ -492,7 +534,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     auto produced = factory->startOfFile(widePath);
     for (auto *filter : produced)
       candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, 0, "file initialization"});
+                           normalizedPath, 0, "file initialization",
+                           includeChain});
   }
   std::string raw;
   unsigned lineNo = 0;
@@ -684,8 +727,12 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       if (included.is_relative())
         included = normalizedPath.parent_path() / included;
       bool includedStage = stageActive;
-      parseConfigFile(included, candidate, includeStack, includedStage,
-                      expressionParser);
+      includeChain.push_back({normalizedPath, lineNo});
+      // Keep the chain intact when recursion fails; loadConfig reports it as
+      // parser-owned source ancestry. Successful recursion unwinds this site.
+      parseConfigFile(included, candidate, includeStack, configFiles,
+                      includeChain, includedStage, expressionParser);
+      includeChain.pop_back();
       continue;
     }
 
@@ -730,7 +777,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     for (auto *filter : made)
       candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
                            normalizedPath, lineNo,
-                           StringHelper::toString(originalCommand, 65001)});
+                           StringHelper::toString(originalCommand, 65001),
+                           includeChain});
   }
   if (!conditions.empty())
     throw std::runtime_error(normalizedPath.string() + ":" +
@@ -743,7 +791,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     auto produced = factory->endOfFile(widePath);
     for (auto *filter : produced)
       candidate.push_back({std::unique_ptr<IFilter, FilterDeleter>(filter),
-                           normalizedPath, lineNo, "file finalization"});
+                           normalizedPath, lineNo, "file finalization",
+                           includeChain});
   }
 }
 
@@ -767,4 +816,61 @@ std::vector<std::string> Engine::failedPluginDescriptions() const {
       failures.push_back(state->failureIdentifier() + " — " + descriptions[i]);
   }
   return failures;
+}
+
+std::optional<uint64_t> Engine::pluginLatencySamples() const noexcept {
+  uint64_t total = 0;
+  for (const auto &node : graph) {
+    if (!dynamic_cast<const IPluginFailureState *>(node.filter))
+      continue;
+    const auto *latency =
+        dynamic_cast<const IPluginLatencyState *>(node.filter);
+    if (!latency)
+      return std::nullopt;
+    const uint64_t samples = latency->latencySamples();
+    if (samples > std::numeric_limits<uint64_t>::max() - total)
+      return std::nullopt;
+    total += samples;
+  }
+  return total;
+}
+
+void Engine::setPluginParameter(const std::string &pluginId,
+                                const std::string &parameter, float value) {
+  IPluginParameterControl *match = nullptr;
+  for (const auto &node : graph) {
+    auto *control = dynamic_cast<IPluginParameterControl *>(node.filter);
+    if (!control || control->pluginIdentifier() != pluginId)
+      continue;
+    if (match)
+      throw std::runtime_error("plugin ID is ambiguous in the active chain: " +
+                               pluginId);
+    match = control;
+  }
+  if (!match)
+    throw std::runtime_error("no active plugin with live parameter control: " +
+                             pluginId);
+  match->setParameterValue(parameter, value);
+}
+
+void Engine::setPluginBypass(const std::string &pluginId, bool bypassed) {
+  IPluginIdentity *identity = nullptr;
+  IPluginBypassControl *bypassControl = nullptr;
+  for (const auto &node : graph) {
+    auto *candidate = dynamic_cast<IPluginIdentity *>(node.filter);
+    if (!candidate || candidate->pluginIdentifier() != pluginId)
+      continue;
+    if (identity)
+      throw std::runtime_error("plugin ID is ambiguous in the active chain: " +
+                               pluginId);
+    identity = candidate;
+    bypassControl = dynamic_cast<IPluginBypassControl *>(node.filter);
+  }
+  if (!identity)
+    throw std::runtime_error("no active plugin with bypass control: " +
+                             pluginId);
+  if (!bypassControl)
+    throw std::runtime_error("plugin host does not support bypass: " +
+                             pluginId);
+  bypassControl->setPluginBypassed(bypassed);
 }

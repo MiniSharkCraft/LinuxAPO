@@ -1,9 +1,13 @@
 #include "LV2PluginHost.h"
 
 #include "IFilter.h"
+#include "IPluginLatencyState.h"
+#include "IPluginParameterControl.h"
+#include "IPluginBypassControl.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <lilv/lilv.h>
 #include <limits>
@@ -13,6 +17,9 @@
 #include <utility>
 
 namespace {
+static_assert(std::atomic<float>::is_always_lock_free,
+              "LV2 live parameter mailboxes must be lock-free");
+
 LilvWorld *processWorld() {
   // Keep one catalog for the process, not one catalog per Engine/reload. The
   // installed Lilv 0.28 build leaves a 24-byte allocation from
@@ -29,7 +36,8 @@ LilvWorld *processWorld() {
   return world;
 }
 
-class LV2Instance final : public IPluginInstance {
+class LV2Instance final : public IPluginInstance,
+                          public IPluginParameterControl {
   enum class PortKind { AudioInput, AudioOutput, Control };
   struct Port {
     PortKind kind{};
@@ -38,6 +46,14 @@ class LV2Instance final : public IPluginInstance {
     float control{};
     bool controlInput{};
     std::string symbol;
+  };
+  struct LiveParameter {
+    std::string symbol;
+    std::string name;
+    uint32_t portIndex{};
+    float minimum{};
+    float maximum{};
+    std::atomic<float> value{0.0f};
   };
 
 public:
@@ -141,10 +157,19 @@ public:
         ports[i].control = defaultValue;
         if (input) {
           LilvNode *name = lilv_port_get_name(plugin, descriptor);
+          const std::string displayName =
+              name ? lilv_node_as_string(name) : ports[i].symbol;
           parameterInfos.push_back(
-              {ports[i].symbol,
-               name ? lilv_node_as_string(name) : ports[i].symbol, defaultValue,
-               minValue, maxValue, defaultValue});
+              {ports[i].symbol, displayName, defaultValue, minValue, maxValue,
+               defaultValue});
+          auto parameter = std::make_unique<LiveParameter>();
+          parameter->symbol = ports[i].symbol;
+          parameter->name = displayName;
+          parameter->portIndex = i;
+          parameter->minimum = minValue;
+          parameter->maximum = maxValue;
+          parameter->value.store(defaultValue, std::memory_order_relaxed);
+          liveParameters.push_back(std::move(parameter));
           lilv_node_free(name);
         }
         lilv_node_free(def);
@@ -190,6 +215,13 @@ public:
                                  override.symbol + "'");
       port->control = override.value;
       info->value = override.value;
+      auto live = std::find_if(
+          liveParameters.begin(), liveParameters.end(),
+          [&](const auto &parameter) {
+            return parameter->symbol == override.symbol;
+          });
+      if (live != liveParameters.end())
+        (*live)->value.store(override.value, std::memory_order_relaxed);
     }
 
     instance = lilv_plugin_instantiate(plugin, sampleRate, nullptr);
@@ -215,6 +247,37 @@ public:
     return parameterInfos;
   }
 
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginUri;
+  }
+
+  void setParameterValue(const std::string &symbol, float value) override {
+    if (!std::isfinite(value))
+      throw std::runtime_error("LV2 parameter value must be finite");
+    size_t match = liveParameters.size();
+    for (size_t i = 0; i < liveParameters.size(); ++i) {
+      const auto &parameter = *liveParameters[i];
+      if (symbol == parameter.symbol || symbol == parameter.name) {
+        if (match != liveParameters.size())
+          throw std::runtime_error("ambiguous LV2 parameter '" + symbol +
+                                  "' (use its port symbol)");
+        match = i;
+      }
+    }
+    if (match == liveParameters.size())
+      throw std::runtime_error("unknown LV2 input parameter '" + symbol +
+                               "'");
+    auto &parameter = *liveParameters[match];
+    if (value < parameter.minimum || value > parameter.maximum)
+      throw std::runtime_error("LV2 parameter '" + symbol +
+                               "' value is outside its declared range");
+    // Control threads publish only to this lock-free mailbox. The audio
+    // thread copies the newest value into the LV2 control-port storage at the
+    // start of a process block, before calling run(); plugin port memory is
+    // therefore never concurrently written by the control thread.
+    parameter.value.store(value, std::memory_order_release);
+  }
+
   std::vector<std::wstring>
   initialize(float, unsigned,
              const std::vector<std::wstring> &channels) override {
@@ -236,6 +299,9 @@ public:
       else if (port.kind == PortKind::AudioOutput)
         lilv_instance_connect_port(instance, port.index, output[port.channel]);
     }
+    for (const auto &parameter : liveParameters)
+      ports[parameter->portIndex].control =
+          parameter->value.load(std::memory_order_acquire);
     lilv_instance_run(instance, frames);
   }
 
@@ -256,9 +322,15 @@ private:
   LilvInstance *instance{};
   bool active = false;
   std::vector<PluginParameterInfo> parameterInfos;
+  // Stable heap-owned atomic mailboxes are allocated during plugin setup;
+  // neither publication nor consumption allocates or locks in the callback.
+  std::vector<std::unique_ptr<LiveParameter>> liveParameters;
 };
 
-class LV2PluginFilter final : public IFilter {
+class LV2PluginFilter final : public IFilter,
+                              public AtomicPluginBypass,
+                              public IPluginLatencyState,
+                              public IPluginParameterControl {
 public:
   LV2PluginFilter(LV2PluginHost &host, std::string uri,
                   std::vector<PluginParameterValue> parameters)
@@ -270,13 +342,33 @@ public:
   std::vector<std::wstring>
   initialize(float sampleRate, unsigned maxFrameCount,
              std::vector<std::wstring> channelNames) override {
+    channelCount = static_cast<unsigned>(channelNames.size());
     instance = host.create(pluginUri, sampleRate, maxFrameCount, channelNames,
                            parameterOverrides);
     return instance->initialize(sampleRate, maxFrameCount, channelNames);
   }
 
   void process(float **output, float **input, unsigned frames) override {
+    if (copyInputWhenBypassed(output, input, frames, channelCount))
+      return;
     instance->process(output, input, frames);
+  }
+  uint32_t latencySamples() const noexcept override {
+    // Instances with an LV2 latency-reporting port are rejected during host
+    // construction until delay compensation is implemented.
+    return 0;
+  }
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginUri;
+  }
+  void setParameterValue(const std::string &symbol, float value) override {
+    if (!instance)
+      throw std::runtime_error("LV2 plugin is not active: " + pluginUri);
+    auto *control = dynamic_cast<IPluginParameterControl *>(instance.get());
+    if (!control)
+      throw std::runtime_error("LV2 plugin does not support live parameters: " +
+                               pluginUri);
+    control->setParameterValue(symbol, value);
   }
 
 private:
@@ -284,6 +376,7 @@ private:
   std::string pluginUri;
   std::vector<PluginParameterValue> parameterOverrides;
   std::unique_ptr<IPluginInstance> instance;
+  unsigned channelCount{};
 };
 
 IFilter *allocatePluginFilter(LV2PluginHost &host, std::string uri,
@@ -415,7 +508,7 @@ public:
     std::wstring format, wideUri;
     input >> format >> wideUri;
     if (format != L"LV2")
-      throw std::runtime_error("Plugin: currently supports only LV2 <URI>");
+      return {};
     if (wideUri.empty())
       throw std::runtime_error(
           "expected Plugin: LV2 <plugin-URI> [symbol=value ...]");

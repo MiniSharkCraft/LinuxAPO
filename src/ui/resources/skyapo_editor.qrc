@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="icons/list-add-green.ico">icons/list-add.svg</file>
+    <file alias="icons/list-remove-red.ico">icons/list-remove.svg</file>
+    <file alias="icons/accessories-text-editor.ico">icons/text-editor.svg</file>
+  </qresource>
+</RCC>

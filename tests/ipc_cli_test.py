@@ -101,7 +101,32 @@ def main():
     assert result.returncode == 0, result.stderr
     assert result.stdout == reply.decode()
 
-    print("IPC CLI framing, status compatibility, and peer rejection tests passed")
+    plugin_reply = b"Updated org.example/gain parameter Gain dB to 0.250000\n"
+    plugin_request = (
+        b"SKYAPO/1 PLUGIN_SET 16:org.example/gain 7:Gain dB 0.250000\n"
+    )
+    result = cli_exchange(
+        executable,
+        ["plugin", "set", "org.example/gain", "Gain dB", "0.25"],
+        plugin_request,
+        ok(plugin_reply),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == plugin_reply.decode()
+
+    bypass_reply = b"Bypassed org.example/gain\n"
+    bypass_request = b"SKYAPO/1 PLUGIN_BYPASS 16:org.example/gain 2:on\n"
+    result = cli_exchange(
+        executable,
+        ["plugin", "bypass", "org.example/gain", "on"],
+        bypass_request,
+        ok(bypass_reply),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == bypass_reply.decode()
+
+    print("IPC CLI framing, plugin parameter/bypass control, status compatibility, "
+          "and peer rejection tests passed")
 
 
 if __name__ == "__main__":

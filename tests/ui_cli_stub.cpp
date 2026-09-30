@@ -6,6 +6,32 @@
 #include <thread>
 
 int main(int argc, char **argv) {
+  if (argc == 3 && std::string(argv[1]) == "plugin" &&
+      std::string(argv[2]) == "list") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    std::cout << "LV2 plugins discovered: 1\n"
+                 "LV2\thttps://example.test/plugins/gain\tTest Gain\n";
+    return 0;
+  }
+  if (argc == 5 && std::string(argv[1]) == "config" &&
+      std::string(argv[2]) == "check" && std::string(argv[3]) == "--json") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    std::ifstream input(argv[4]);
+    const std::string contents((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    const bool valid = contents.find("Preamp: -3 dB") != std::string::npos;
+    if (valid) {
+      std::cout << "{\"valid\":true,\"filter_count\":1,"
+                   "\"diagnostics\":[]}\n";
+      return 0;
+    }
+    std::cout << "{\"valid\":false,\"filter_count\":null,"
+                 "\"diagnostics\":[{\"file\":\""
+              << argv[4]
+              << "\",\"line\":1,\"reason\":\"fixture rejected unsaved "
+                 "Preamp value\"}]}\n";
+    return 1;
+  }
   if (argc >= 3 && std::string(argv[1]) == "device" &&
       std::string(argv[2]) == "list") {
     std::this_thread::sleep_for(std::chrono::milliseconds(800));

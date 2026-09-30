@@ -2,6 +2,7 @@
 #include <charconv>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cerrno>
 #include <cstdlib>
@@ -11,6 +12,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -80,10 +83,21 @@ inline constexpr unsigned ProtocolVersion = 1;
 inline constexpr size_t MaxRequestBytes = 128;
 inline constexpr size_t MaxResponseBytes = 4 * 1024 * 1024;
 
-enum class Command { Status, Reload, Stop, Invalid };
+enum class Command {
+  Status,
+  Reload,
+  Stop,
+  SetPluginParameter,
+  SetPluginBypass,
+  Invalid
+};
 struct DecodedRequest {
   Command command = Command::Invalid;
   std::string error;
+  std::string pluginId;
+  std::string parameter;
+  float value{};
+  bool bypassed{};
 };
 struct DecodedResponse {
   bool ok = false;
@@ -91,9 +105,36 @@ struct DecodedResponse {
 };
 
 inline std::string requestFrame(const std::string &command) {
-  if (command != "STATUS" && command != "RELOAD" && command != "STOP")
+  if (command != "STATUS" && command != "RELOAD" && command != "STOP" &&
+      command.rfind("PLUGIN_SET ", 0) != 0 &&
+      command.rfind("PLUGIN_BYPASS ", 0) != 0)
     throw std::runtime_error("unsupported daemon command");
-  return "SKYAPO/" + std::to_string(ProtocolVersion) + " " + command + "\n";
+  const std::string frame = "SKYAPO/" + std::to_string(ProtocolVersion) +
+                            " " + command + "\n";
+  if (frame.size() > MaxRequestBytes)
+    throw std::runtime_error("daemon IPC request exceeds size limit");
+  return frame;
+}
+
+inline bool readLengthPrefixed(const std::string &text, size_t &offset,
+                               std::string &value) {
+  const size_t colon = text.find(':', offset);
+  if (colon == std::string::npos || colon == offset)
+    return false;
+  size_t length = 0;
+  const auto parsed = std::from_chars(text.data() + offset,
+                                      text.data() + colon, length);
+  if (parsed.ec != std::errc{} || parsed.ptr != text.data() + colon ||
+      length > text.size() - colon - 1)
+    return false;
+  offset = colon + 1;
+  value.assign(text.data() + offset, length);
+  offset += length;
+  return true;
+}
+
+inline std::string lengthPrefixed(const std::string &value) {
+  return std::to_string(value.size()) + ":" + value;
 }
 
 inline DecodedRequest decodeRequest(const std::string &frame) {
@@ -121,6 +162,46 @@ inline DecodedRequest decodeRequest(const std::string &frame) {
     return {Command::Reload, {}};
   if (command == "STOP")
     return {Command::Stop, {}};
+  constexpr std::string_view pluginPrefix = "PLUGIN_SET ";
+  if (command.rfind(pluginPrefix.data(), 0) == 0) {
+    const auto payload = command.substr(pluginPrefix.size());
+    size_t offset = 0;
+    std::string pluginId, parameter;
+    if (!readLengthPrefixed(payload, offset, pluginId) || pluginId.empty() ||
+        offset >= payload.size() || payload[offset++] != ' ' ||
+        !readLengthPrefixed(payload, offset, parameter) || parameter.empty() ||
+        offset >= payload.size() || payload[offset++] != ' ')
+      return {Command::Invalid, "malformed PLUGIN_SET request"};
+    const char *valueBegin = payload.data() + offset;
+    char *valueEnd = nullptr;
+    errno = 0;
+    const float value = std::strtof(valueBegin, &valueEnd);
+    if (errno == ERANGE || valueEnd == valueBegin ||
+        valueEnd != payload.data() + payload.size() || !std::isfinite(value))
+      return {Command::Invalid, "invalid PLUGIN_SET parameter value"};
+    DecodedRequest request{Command::SetPluginParameter, {}};
+    request.pluginId = std::move(pluginId);
+    request.parameter = std::move(parameter);
+    request.value = value;
+    return request;
+  }
+  constexpr std::string_view bypassPrefix = "PLUGIN_BYPASS ";
+  if (command.rfind(bypassPrefix.data(), 0) == 0) {
+    const auto payload = command.substr(bypassPrefix.size());
+    size_t offset = 0;
+    std::string pluginId, value;
+    if (!readLengthPrefixed(payload, offset, pluginId) || pluginId.empty() ||
+        offset >= payload.size() || payload[offset++] != ' ' ||
+        !readLengthPrefixed(payload, offset, value) ||
+        offset != payload.size())
+      return {Command::Invalid, "malformed PLUGIN_BYPASS request"};
+    if (value != "on" && value != "off")
+      return {Command::Invalid, "PLUGIN_BYPASS state must be on or off"};
+    DecodedRequest request{Command::SetPluginBypass, {}};
+    request.pluginId = std::move(pluginId);
+    request.bypassed = value == "on";
+    return request;
+  }
   return {Command::Invalid, "unsupported daemon command"};
 }
 

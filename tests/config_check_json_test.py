@@ -78,6 +78,33 @@ def main():
         assert diagnostic["command"] == "Filter"
         assert diagnostic["directive"].startswith("Filter:")
         assert "Nyquist" in diagnostic["reason"]
+        assert diagnostic["include_chain"] == [
+            {"file": str(including.resolve()), "line": 2}
+        ]
+
+        quoted_root = root / "quoted-root.txt"
+        quoted_child = root / "child # one.txt"
+        nested_leaf = root / "nested" / "leaf # two.txt"
+        nested_leaf.parent.mkdir()
+        quoted_child.write_text(
+            "# child comment\n"
+            'Include: "nested/leaf # two.txt" # nested trailing comment\n'
+        )
+        nested_leaf.write_text(
+            "# leaf comment\nFilter: ON PK Fc 30000 Hz Gain 6 dB Q 1\n"
+        )
+        quoted_root.write_text(
+            'Preamp: 0 dB\nInclude: "child # one.txt" # root trailing comment\n'
+        )
+        quoted = run_check(executable, quoted_root)
+        assert quoted.returncode != 0
+        diagnostic = json.loads(quoted.stdout)["diagnostics"][0]
+        assert diagnostic["file"] == str(nested_leaf.resolve())
+        assert diagnostic["line"] == 2
+        assert diagnostic["include_chain"] == [
+            {"file": str(quoted_root.resolve()), "line": 2},
+            {"file": str(quoted_child.resolve()), "line": 2},
+        ]
 
         missing = root / 'missing "config" \\ file.txt'
         absent = run_check(executable, missing)
@@ -89,6 +116,7 @@ def main():
         assert diagnostic["directive"] is None
         assert diagnostic["command"] is None
         assert diagnostic["reason"] == "cannot open config file"
+        assert diagnostic["include_chain"] == []
 
         if os.name == "posix":
             raw_path = os.fsencode(root) + b"/missing-\xff.txt"
@@ -103,7 +131,7 @@ def main():
             result = json.loads(invalid_utf8.stdout)
             assert "\ufffd" in result["diagnostics"][0]["file"]
 
-    print("config check JSON success, root/include errors, and escaping passed")
+    print("config check JSON success, nested include ancestry, and escaping passed")
 
 
 if __name__ == "__main__":

@@ -3,10 +3,13 @@
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
 file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
 set(EAPO_SOURCES)
-# FilterConfiguration consumes only immutable sizing values. Adapt generated
-# copies to a narrow context instead of coupling them to SkyAPO's legacy global
-# FilterEngine factory shim. Upstream source stays pristine; checked tokens make
-# upstream drift fail at configure time rather than silently skip this fix.
+# FilterConfiguration and IFilterFactory consume only immutable sizing values
+# at construction/configuration time. Adapt generated copies to a narrow
+# context interface instead of retaining a global-name FilterEngine shim.
+# Upstream source stays pristine; checked tokens make drift fail at configure.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${EAPO}/FilterConfiguration.h" "${EAPO}/FilterConfiguration.cpp"
+  "${EAPO}/IFilterFactory.h")
 foreach(configuration_file FilterConfiguration.h FilterConfiguration.cpp)
   set(configuration_path ${EAPO_PORT}/${configuration_file})
   file(READ "${EAPO}/${configuration_file}" configuration_content)
@@ -48,6 +51,35 @@ foreach(configuration_file FilterConfiguration.h FilterConfiguration.cpp)
     file(WRITE "${configuration_path}" "${configuration_content}")
   endif()
 endforeach()
+set(factory_header_path ${EAPO_PORT}/IFilterFactory.h)
+file(READ "${EAPO}/IFilterFactory.h" factory_header_content)
+string(FIND "${factory_header_content}" "class FilterEngine;"
+  factory_context_forward_decl)
+string(FIND "${factory_header_content}"
+  "virtual void initialize(FilterEngine* engine)" factory_context_signature)
+if(factory_context_forward_decl EQUAL -1 OR
+   factory_context_signature EQUAL -1)
+  message(FATAL_ERROR
+    "Upstream IFilterFactory changed; review its Linux context adaptation")
+endif()
+string(REPLACE "class FilterEngine;"
+  "#include <IFilterFactoryContext.h>" factory_header_content
+  "${factory_header_content}")
+string(REPLACE "FilterEngine* engine" "IFilterFactoryContext* context"
+  factory_header_content "${factory_header_content}")
+string(FIND "${factory_header_content}" "FilterEngine"
+  remaining_filter_engine)
+if(NOT remaining_filter_engine EQUAL -1)
+  message(FATAL_ERROR "Could not decouple upstream IFilterFactory context")
+endif()
+if(EXISTS "${factory_header_path}")
+  file(READ "${factory_header_path}" previous_factory_header)
+else()
+  set(previous_factory_header "")
+endif()
+if(NOT "${previous_factory_header}" STREQUAL "${factory_header_content}")
+  file(WRITE "${factory_header_path}" "${factory_header_content}")
+endif()
 list(APPEND EAPO_SOURCES ${EAPO_PORT}/FilterConfiguration.cpp)
 set(EAPO_FILTERS PreampFilter PreampFilterFactory BiQuad BiQuadFilter
     BiQuadFilterFactory IIRFilter IIRFilterFactory DelayFilter DelayFilterFactory

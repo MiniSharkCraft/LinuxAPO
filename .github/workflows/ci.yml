@@ -29,6 +29,7 @@ jobs:
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
+          -DSKYAPO_ENABLE_FST_VST2_HOST=ON
           -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
 
       - name: Build
@@ -50,14 +51,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
-            libsndfile1-dev libpipewire-0.3-dev libfftw3-dev \
+            libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
             liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
 
-      - name: Configure ASan/UBSan
+      - name: Configure ASan/UBSan core suite
         run: >-
           cmake -S . -B build-asan -G Ninja
           -DCMAKE_BUILD_TYPE=Debug -DSKYAPO_SANITIZERS=ON
           -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
+          -DSKYAPO_ENABLE_FST_VST2_HOST=ON
+          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=OFF
 
       - name: Build ASan/UBSan
         run: cmake --build build-asan --parallel 2
@@ -85,7 +88,7 @@ jobs:
           useradd --create-home --shell /bin/bash builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE/packaging"
-          su builder -s /bin/bash -c 'makepkg --noconfirm --clean'
+          su builder -s /bin/bash -c 'makepkg --noconfirm --clean --check'
           pacman -U --noconfirm ./skyapo-[0-9]*.pkg.tar.zst
           skyapo --version
           systemd-analyze verify /usr/lib/systemd/user/skyapod.service

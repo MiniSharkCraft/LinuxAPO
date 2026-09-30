@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,9 +39,15 @@ public:
              const std::vector<std::wstring> &channels) = 0;
   virtual void process(float **output, float **input,
                        unsigned frames) noexcept = 0;
+  // Snapshot queried off the realtime thread after plugin activation.
+  virtual uint32_t latencySamples() const noexcept {
+    return 0;
+  }
   // A backend may latch an unrecoverable process error for observation on a
   // non-realtime thread. The audio callback must never report it synchronously.
-  virtual bool processingFailed() const noexcept { return false; }
+  virtual bool processingFailed() const noexcept {
+    return false;
+  }
 };
 
 class IPluginHost {

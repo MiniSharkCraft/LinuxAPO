@@ -17,7 +17,6 @@
 namespace {
 constexpr uint32_t Invalid = SPA_ID_INVALID;
 constexpr double InputAmplitude = 0.1;
-constexpr double ExpectedDb = -6.0;
 
 struct Consumer {
   pw_main_loop* loop{};
@@ -29,6 +28,8 @@ struct Consumer {
   spa_source* timeout{};
   unsigned channels{2};
   bool expectSilent{};
+  bool acceptAnyAudio{};
+  double expectedDb{-6.0};
   std::array<const char*, 2> channelNames{};
   std::array<void*, 2> inputs{};
   std::array<uint32_t, 2> inputIds{Invalid, Invalid};
@@ -40,11 +41,11 @@ struct Consumer {
   std::atomic<double> energy{0.0};
   std::atomic<bool> failed{false};
 
-  explicit Consumer(bool mono, bool silent)
-      : channels(mono ? 1 : 2),
-        expectSilent(silent),
-        channelNames(mono ? std::array<const char*, 2>{"MONO", ""}
-                          : std::array<const char*, 2>{"FL", "FR"}) {}
+  explicit Consumer(bool mono, bool silent, bool anyAudio, double gainDb)
+      : channels(mono ? 1 : 2), expectSilent(silent), acceptAnyAudio(anyAudio),
+        expectedDb(gainDb),
+        channelNames(mono ? std::array<const char *, 2>{"MONO", ""}
+                          : std::array<const char *, 2>{"FL", "FR"}) {}
 
   static unsigned channelIndex(const char* channel, const Consumer& c) {
     for (unsigned i = 0; i < c.channels; ++i)
@@ -232,15 +233,16 @@ struct Consumer {
         capturedFrames ? std::sqrt(energy.load() / (capturedFrames * channels))
                        : 0.0;
     const double expected =
-        InputAmplitude * std::pow(10.0, ExpectedDb / 20.0) / std::sqrt(2.0);
+        InputAmplitude * std::pow(10.0, expectedDb / 20.0) / std::sqrt(2.0);
     const double ratio = expected > 0 ? rms / expected : 0.0;
     std::printf(
         "Captured frames: %llu\nChannels: %u\nRMS: %.8f\n"
         "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
         static_cast<unsigned long long>(capturedFrames), channels, rms,
         expected, ratio);
-    const bool audioMatches = expectSilent ? rms < 1.0e-6
-                                           : std::abs(ratio - 1.0) < 0.03;
+    const bool audioMatches =
+        acceptAnyAudio ||
+        (expectSilent ? rms < 1.0e-6 : std::abs(ratio - 1.0) < 0.03);
     return !failed.load() && capturedFrames > 48000 && audioMatches
                ? 0
                : 1;
@@ -251,21 +253,32 @@ struct Consumer {
 int main(int argc, char** argv) {
   bool mono = false;
   bool expectSilent = false;
+  bool acceptAnyAudio = false;
+  double expectedDb = -6.0;
   for (int arg = 1; arg < argc; ++arg) {
     const std::string option(argv[arg]);
     if (option == "--mono")
       mono = true;
     else if (option == "--expect-silent")
       expectSilent = true;
-    else {
-      std::fprintf(stderr,
-                   "usage: skyapo-pipewire-test-consumer [--mono] "
-                   "[--expect-silent]\n");
+    else if (option == "--accept-any-audio")
+      acceptAnyAudio = true;
+    else if (option == "--expected-db" && arg + 1 < argc) {
+      char *end = nullptr;
+      expectedDb = std::strtod(argv[++arg], &end);
+      if (end == argv[arg] || *end || !std::isfinite(expectedDb)) {
+        std::fprintf(stderr, "test consumer: invalid --expected-db value\n");
+        return 2;
+      }
+    } else {
+      std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono] "
+                           "[--expect-silent] [--accept-any-audio] "
+                           "[--expected-db DB]\n");
       return 2;
     }
   }
   try {
-    Consumer consumer(mono, expectSilent);
+    Consumer consumer(mono, expectSilent, acceptAnyAudio, expectedDb);
     return consumer.run();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "test consumer: %s\n", error.what());

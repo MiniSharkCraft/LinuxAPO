@@ -35,16 +35,22 @@ def main():
         cache = (build_dir / "CMakeCache.txt").read_text(errors="replace")
         if "SKYAPO_ENABLE_MUPARSERX:BOOL=ON" in cache:
             expected["MuParserX-License.txt"] = "Copyright (c) 2012, Ingo Berg"
+        if "SKYAPO_ENABLE_FST_VST2_HOST:BOOL=ON" in cache:
+            expected["FST-GPL-3.0-or-later-License.txt"] = "GNU GENERAL PUBLIC LICENSE"
         for relative, marker in expected.items():
             path = licenses / relative
             text = (path.read_text(errors="replace").replace("\u00a0", " ")
                     if path.is_file() else "")
             if marker not in text:
                 raise RuntimeError(f"missing/incorrect installed license: {path}")
+        if (prefix / "bin/skyapo-ui").is_file():
+            qt_license = licenses / "Qt-LGPL-3.0-License.txt"
+            if not qt_license.is_file() or "GNU LESSER GENERAL PUBLIC LICENSE" not in qt_license.read_text(errors="replace"):
+                raise RuntimeError(f"missing/incorrect Qt LGPL license: {qt_license}")
         notice = docs / "THIRD_PARTY_NOTICES.md"
         if not notice.is_file() or "FST-based VST2" not in notice.read_text():
             raise RuntimeError("third-party notice inventory was not installed")
-        print("Installed GPL, MIT and BSD license notices verified.")
+        print("Installed project, SDK, optional FST and Qt license notices verified.")
 
 
 if __name__ == "__main__":

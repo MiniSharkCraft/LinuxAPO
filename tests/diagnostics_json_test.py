@@ -23,6 +23,7 @@ STATUS = (
     'Sample rate: 48000 Hz\n'
     'Quantum: unknown\n'
     'Filters: 1\n'
+    'Plugin-reported latency sum: 64 samples (no delay compensation)\n'
     'Filter chain:\n'
     '  Preamp: -6 dB — /tmp/chain "quoted" \\ name.txt:1\n'
     'Config: /tmp/skyapo "quoted" \\ config.txt\n'
@@ -111,6 +112,8 @@ def main():
         }
         assert document["quantum_frames"] is None
         assert document["sample_rate_hz"] == 48000
+        assert document["plugin_reported_latency_sum_samples"] == 64
+        assert abs(document["plugin_reported_latency_sum_ms"] - 64 / 48) < 1e-9
         assert document["channel_positions"] == ["FL", "FR"]
         assert document["filter_chain"] == [
             'Preamp: -6 dB — /tmp/chain "quoted" \\ name.txt:1'
@@ -143,6 +146,8 @@ def main():
         assert absent["capture_node"] is None
         assert absent["virtual_microphone"] is None
         assert absent["sample_rate_hz"] is None
+        assert absent["plugin_reported_latency_sum_samples"] is None
+        assert absent["plugin_reported_latency_sum_ms"] is None
         assert absent["filter_chain"] is None
         assert absent["plugin_failures"] is None
     print("diagnostics JSON escaping, fields, and unknown/null checks passed")

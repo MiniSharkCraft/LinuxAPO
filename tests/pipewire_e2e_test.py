@@ -6,6 +6,7 @@ import json
 import pathlib
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -70,15 +71,86 @@ def destroy_capture_link(pw_cli, pw_dump, env, status):
     return link_id
 
 
+def virtual_source_id(status):
+    match = re.search(r"^Virtual node: (\d+)", status, re.MULTILINE)
+    if not match:
+        raise RuntimeError("daemon status did not expose the virtual node ID")
+    return match.group(1)
+
+
+def assert_virtual_source(pw_dump, env, expected_id):
+    objects = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+    for item in objects:
+        if str(item.get("id")) != str(expected_id):
+            continue
+        info = item.get("info", {})
+        props = info.get("props", item.get("props", {}))
+        if (props.get("node.name") == "skyapo.virtual_mic" and
+                props.get("node.description") == "SkyAPO Virtual Mic" and
+                props.get("media.class") == "Audio/Source"):
+            return
+        raise RuntimeError(
+            f"PipeWire node {expected_id} is not SkyAPO Virtual Mic: {props}")
+    raise RuntimeError(f"PipeWire node {expected_id} disappeared from pw-dump")
+
+
+def start_private_pipewire(pipewire, config, env, logs, runtime):
+    process = subprocess.Popen(
+        [str(pipewire), "--config", str(config)], env=env,
+        stdout=logs, stderr=subprocess.STDOUT)
+    socket = runtime / "pipewire-0"
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("private PipeWire server exited during startup")
+        if socket.exists():
+            return process
+        time.sleep(0.05)
+    raise RuntimeError("private PipeWire server socket was not created")
+
+
+def start_test_source(source, mono, env, source_log):
+    return subprocess.Popen(
+        [str(source)] + (["--mono"] if mono else []), env=env,
+        stdout=source_log, stderr=subprocess.STDOUT)
+
+
 def main():
-    if len(sys.argv) != 11 or sys.argv[10] not in ("mono", "stereo"):
+    if len(sys.argv) != 11 or sys.argv[10] not in (
+        "mono", "stereo", "latency", "include-reload", "source-replug",
+        "server-restart", "plugin-live-param", "lv2-live-param",
+        "vst3-live-param", "vst2-live-param", "plugin-bypass"
+    ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
-            "SOURCE CONSUMER PIPEWIRE_CONFIG DSP_CONFIG mono|stereo")
+            "SOURCE CONSUMER PIPEWIRE_CONFIG DSP_CONFIG "
+            "mono|stereo|latency|include-reload|source-replug|server-restart|"
+            "plugin-live-param|lv2-live-param|vst3-live-param|"
+            "vst2-live-param|plugin-bypass")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
     mono = mode == "mono"
+    latency_plugin = mode == "latency"
+    include_reload = mode == "include-reload"
+    source_replug = mode == "source-replug"
+    server_restart = mode == "server-restart"
+    vst2_live = mode == "vst2-live-param"
+    plugin_live = mode in (
+        "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
+    plugin_bypass = mode == "plugin-bypass"
+    plugin_chain = plugin_live or plugin_bypass or latency_plugin
+    if mode == "lv2-live-param":
+        live_plugin_id, live_parameter = (
+            "https://skyapo.example/plugins/test-gain", "gain")
+    elif mode == "vst3-live-param":
+        live_plugin_id, live_parameter = (
+            "534B5941504F00010000000000000001", "7")
+    elif vst2_live:
+        live_plugin_id = os.environ["SKYAPO_TEST_VST2_PATH"]
+        live_parameter = "Gain"
+    else:
+        live_plugin_id, live_parameter = "org.skyapo.test.gain", "Gain"
     device_name = "skyapo.test.mono" if mono else "skyapo.test.input"
     channel_count = 1 if mono else 2
     with tempfile.TemporaryDirectory(prefix="skyapo-pipewire-e2e-") as temp:
@@ -87,6 +159,15 @@ def main():
         config_home = root / "config"
         runtime.mkdir(mode=0o700)
         config_home.mkdir(mode=0o700)
+        included_config = config_home / "include-reload-root.txt"
+        include_directory = config_home / "includes"
+        include_child = include_directory / "include-reload-child.txt"
+        if include_reload:
+            include_directory.mkdir()
+            included_config.write_text(
+                "Include: includes/include-reload-child.txt\n")
+            include_child.write_text("Preamp: -6 dB\n")
+            dsp_config = included_config
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
@@ -98,22 +179,10 @@ def main():
         daemon_log = (root / "daemon.log").open("w+")
         server = source_process = daemon_process = None
         try:
-            server = subprocess.Popen(
-                [str(pipewire), "--config", str(pw_config)], env=env,
-                stdout=logs, stderr=subprocess.STDOUT)
-            socket = runtime / "pipewire-0"
-            deadline = time.monotonic() + 8
-            while time.monotonic() < deadline and not socket.exists():
-                if server.poll() is not None:
-                    raise RuntimeError("private PipeWire server exited during startup")
-                time.sleep(0.05)
-            if not socket.exists():
-                raise RuntimeError("private PipeWire server socket was not created")
+            server = start_private_pipewire(
+                pipewire, pw_config, env, logs, runtime)
 
-            source_args = [str(source)] + (["--mono"] if mono else [])
-            source_process = subprocess.Popen(
-                source_args, env=env, stdout=source_log,
-                stderr=subprocess.STDOUT)
+            source_process = start_test_source(source, mono, env, source_log)
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 if source_process.poll() is not None:
@@ -149,15 +218,28 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
-            for expected in (
-                f"Channels: {channel_count}", "Filters: 1",
+            expected_filters = 1 if vst2_live else (2 if plugin_chain else 1)
+            expected_status = [
+                f"Channels: {channel_count}", f"Filters: {expected_filters}",
                 f"Active capture links: {channel_count}/{channel_count}",
                 "Format: F32 planar DSP", "Sample rate: 48000 Hz",
-                "Quantum: 1024", "DSP amplitude ratio: 0.501187",
+                "Quantum: 1024",
                 "Callback allocations: 0", "Callback deallocations: 0",
-                "Default render endpoint: unavailable"):
+                "Default render endpoint: unavailable"]
+            if latency_plugin:
+                expected_status.append(
+                    "Plugin-reported latency sum: 64 samples "
+                    "(no delay compensation)")
+            for expected in expected_status:
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
+            if (not plugin_chain and
+                    "DSP amplitude ratio: 0.501187" not in status):
+                raise RuntimeError(
+                    f"unexpected DSP amplitude ratio:\n{status}")
+
+            old_virtual_id = virtual_source_id(status)
+            assert_virtual_source(pw_dump, env, old_virtual_id)
 
             link_id = destroy_capture_link(pw_cli, pw_dump, env, status)
             deadline = time.monotonic() + 8
@@ -175,15 +257,190 @@ def main():
                 raise RuntimeError(
                     f"capture link {link_id} was not restored:\n{recovered_status}")
 
+            if source_replug or server_restart:
+                print("Stopping selected deterministic source…", flush=True)
+                stop(source_process, "deterministic capture source")
+                source_process = None
+                deadline = time.monotonic() + 8
+                became_unavailable = False
+                while time.monotonic() < deadline:
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "skyapod exited after selected source removal")
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    if (result.returncode != 0 or
+                            "Daemon: not reachable" in result.stdout):
+                        became_unavailable = True
+                        break
+                    time.sleep(0.1)
+                if not became_unavailable:
+                    raise RuntimeError(
+                        "daemon status socket remained available after its "
+                        "selected source disappeared")
+
+                if server_restart:
+                    print("Stopping private PipeWire server…", flush=True)
+                    stop(server, "private PipeWire server")
+                    server = None
+                    socket = runtime / "pipewire-0"
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and socket.exists():
+                        time.sleep(0.05)
+                    if socket.exists():
+                        raise RuntimeError(
+                            "PipeWire socket remained after server shutdown")
+                    print("Restarting private server and source…", flush=True)
+                    server = start_private_pipewire(
+                        pipewire, pw_config, env, logs, runtime)
+
+                print("Daemon detected removal; publishing the same stable "
+                      "source name again…", flush=True)
+                source_process = start_test_source(
+                    source, mono, env, source_log)
+                deadline = time.monotonic() + 15
+                relinked_status = ""
+                while time.monotonic() < deadline:
+                    if source_process.poll() is not None:
+                        raise RuntimeError(
+                            "replacement deterministic source exited")
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "skyapod exited while recovering selected source")
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    relinked_status = result.stdout
+                    if (result.returncode == 0 and
+                            "Daemon: streaming" in relinked_status and
+                            "SkyAPO Virtual Mic" in relinked_status and
+                            expected_links in relinked_status):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "daemon did not recover after the same stable-name "
+                        f"source returned:\n{relinked_status}")
+                new_virtual_id = virtual_source_id(relinked_status)
+                if not server_restart and new_virtual_id == old_virtual_id:
+                    raise RuntimeError(
+                        "virtual source node ID did not change after source "
+                        "recovery; expected a recreated PipeWire node")
+                assert_virtual_source(pw_dump, env, new_virtual_id)
+                print(f"Selected source/server recovery ({mode}) returned "
+                      f"SkyAPO Virtual Mic at node {new_virtual_id} "
+                      f"(previous graph ID {old_virtual_id}; IDs may be reused "
+                      f"after a server restart) with {channel_count}/"
+                      f"{channel_count} capture links.")
+                recovered_status = relinked_status
+
+            expected_db = -12.020599913 if latency_plugin else -6.0
+            if plugin_live:
+                live_value = "0.75" if vst2_live else "0.25"
+                changed = run([str(cli), "plugin", "set",
+                               live_plugin_id, live_parameter, live_value], env)
+                if f"Updated {live_plugin_id} parameter {live_parameter} " \
+                   f"to {float(live_value):.6f}" \
+                        not in changed.stdout:
+                    raise RuntimeError(
+                        f"live {mode} parameter update was not acknowledged: "
+                        f"{changed.stdout}")
+                expected_db = (-2.498774732 if vst2_live else -18.041199913)
+            if plugin_bypass:
+                changed = run([str(cli), "plugin", "bypass",
+                               "org.skyapo.test.gain", "on"], env)
+                if changed.stdout != "Bypassed org.skyapo.test.gain\n":
+                    raise RuntimeError(
+                        f"plugin bypass was not acknowledged: {changed.stdout}")
+                # The fixture normally halves samples; bypass must leave only
+                # the configured -6 dB Preamp in the independently recorded path.
+                expected_db = -6.0
+            if include_reload:
+                include_child.write_text("Preamp: -3 dB\n")
+                deadline = time.monotonic() + 8
+                reloaded = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    reloaded = result.stdout
+                    if (result.returncode == 0 and
+                            "DSP amplitude ratio: 0.707946" in reloaded):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "editing an active Include did not reload the graph:\n"
+                        f"{reloaded}")
+
+                include_child.write_text("UnsupportedInInclude: true\n")
+                deadline = time.monotonic() + 8
+                rejected = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    rejected = result.stdout
+                    if ("Config reload error:" in rejected and
+                            "DSP amplitude ratio: 0.707946" in rejected):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "invalid Include reload did not preserve the last "
+                        f"valid graph:\n{rejected}")
+                shutil.rmtree(include_directory)
+                deadline = time.monotonic() + 8
+                missing_include = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    missing_include = result.stdout
+                    if ("Config reload error:" in missing_include and
+                            "cannot open config:" in missing_include and
+                            "DSP amplitude ratio: 0.707946" in
+                            missing_include):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "removing the Include directory did not preserve the "
+                        f"last valid graph:\n{missing_include}")
+
+                include_directory.mkdir()
+                include_child.write_text("Preamp: -2 dB\n")
+                deadline = time.monotonic() + 8
+                recovered_include = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    recovered_include = result.stdout
+                    if (result.returncode == 0 and
+                            "Config reload error:" not in recovered_include and
+                            "DSP amplitude ratio: 0.794328" in
+                            recovered_include):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "recreated Include directory did not reload:\n"
+                        f"{recovered_include}")
+                print("Include edit reloaded to -3 dB; invalid edit and "
+                      "directory removal retained it; directory recreation "
+                      "reloaded to -2 dB.")
+                expected_db = -2.0
+
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
+            if plugin_chain:
+                consumer_args += ["--expected-db", str(expected_db)]
+            elif include_reload:
+                consumer_args += ["--expected-db", str(expected_db)]
             captured = run(consumer_args, env, timeout=12)
             match = re.search(r"RMS ratio to expected: ([0-9.]+)",
                               captured.stdout)
             if not match or abs(float(match.group(1)) - 1.0) >= 0.03:
                 raise RuntimeError(
-                    "capture output did not report the expected -6 dB:\n"
+                    f"capture output did not report expected "
+                    f"{expected_db:g} dB:\n"
                     f"{captured.stdout}")
-            print(f"Private PipeWire {mode} link-loss recovery and capture passed "
+            print(f"Private PipeWire {mode} recovery and capture passed "
                   f"(destroyed link {link_id}).")
             print(status.rstrip())
             print(captured.stdout.rstrip())
@@ -209,6 +466,8 @@ def main():
                 shutdown(((daemon_process, "skyapod"),
                           (source_process, "test source"),
                           (server, "PipeWire server")))
+            except Exception as cleanup_error:
+                print(f"E2E cleanup warning: {cleanup_error}", file=sys.stderr)
             finally:
                 for log in (daemon_log, source_log, logs):
                     log.flush()

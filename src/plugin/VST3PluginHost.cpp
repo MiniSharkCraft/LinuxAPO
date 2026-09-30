@@ -3,6 +3,9 @@
 #include "IFilter.h"
 #include "IFilterFactory.h"
 #include "IPluginFailureState.h"
+#include "IPluginLatencyState.h"
+#include "IPluginParameterControl.h"
+#include "IPluginBypassControl.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
 #include "public.sdk/source/vst/hosting/module.h"
@@ -30,6 +33,10 @@ namespace {
 using VST3::Hosting::Module;
 static_assert(std::atomic<bool>::is_always_lock_free,
               "VST3 failure latch must be lock-free on the audio thread");
+static_assert(std::atomic<float>::is_always_lock_free,
+              "VST3 parameter values must be lock-free on the audio thread");
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "VST3 parameter revisions must be lock-free on the audio thread");
 struct CatalogItem {
   Module::Ptr module;
   VST3::Hosting::ClassInfo info;
@@ -172,8 +179,15 @@ const Catalog &catalog() {
   return cache;
 }
 
-class VST3Instance final : public IPluginInstance {
+class VST3Instance final : public IPluginInstance,
+                           public IPluginParameterControl {
 public:
+  struct LiveParameter {
+    std::atomic<float> value{0.0f};
+    std::atomic<uint64_t> revision{0};
+    uint64_t consumedRevision{};
+  };
+
   VST3Instance(Module::Ptr pluginModule,
                const VST3::Hosting::ClassInfo &classInfo, std::string uid,
                float sampleRate, unsigned maxFrames,
@@ -204,6 +218,7 @@ public:
         parameterInfos.push_back({std::to_string(info.id), parameterName(info),
             static_cast<float>(info.defaultNormalizedValue), 0.0f, 1.0f,
             static_cast<float>(parameterController->getParamNormalized(info.id))});
+        parameterIds.push_back(info.id);
       }
     }
     for (const auto &overrideValue : overrides) {
@@ -223,16 +238,34 @@ public:
                                  overrideValue.symbol + "'");
       found->value = overrideValue.value;
     }
-    parameterChanges = std::make_unique<ParameterChanges>(
-        static_cast<int32>(overrides.size()));
+    liveParameters = parameterInfos.empty()
+                         ? nullptr
+                         : std::make_unique<LiveParameter[]>(parameterInfos.size());
+    for (size_t i = 0; i < parameterInfos.size(); ++i)
+      liveParameters[i].value.store(parameterInfos[i].value,
+                                    std::memory_order_relaxed);
     for (const auto &overrideValue : overrides) {
-      const ParamID id = parseParameterId(overrideValue.symbol);
-      int32 queueIndex = 0;
-      auto *queue = parameterChanges->addParameterData(id, queueIndex);
-      int32 pointIndex = 0;
-      if (!queue || queue->addPoint(0, overrideValue.value, pointIndex) != kResultTrue)
-        throw std::runtime_error("cannot prepare VST3 parameter event");
+      const auto found = std::find_if(parameterInfos.begin(), parameterInfos.end(),
+          [&](const auto &parameter) { return parameter.symbol == overrideValue.symbol; });
+      const size_t index = static_cast<size_t>(found - parameterInfos.begin());
+      liveParameters[index].revision.store(1, std::memory_order_relaxed);
     }
+    // ParameterChanges / ParameterValueQueue are SDK convenience classes, not
+    // thread-safe, and their vectors may allocate. They are exclusively owned
+    // by the audio thread once processing starts. Size every queue and prime
+    // its point vector here, before activation, so one automation point per
+    // parameter can be submitted without growing either vector in process().
+    parameterChanges = std::make_unique<ParameterChanges>(
+        static_cast<int32>(parameterInfos.size()));
+    for (size_t i = 0; i < parameterInfos.size(); ++i) {
+      Steinberg::int32 queueIndex = 0;
+      auto *queue = parameterChanges->addParameterData(
+          parameterIds[i], queueIndex);
+      Steinberg::int32 pointIndex = 0;
+      if (!queue || queue->addPoint(0, parameterInfos[i].value, pointIndex) != kResultTrue)
+        throw std::runtime_error("cannot prepare VST3 parameter queue");
+    }
+    parameterChanges->clearQueue();
     component = provider->getComponentPtr();
     processor = FUnknownPtr<IAudioProcessor>(component);
     if (!component || !processor)
@@ -273,6 +306,7 @@ public:
         component->setActive(true) != kResultOk)
       throw std::runtime_error("VST3 plugin setup failed: " + pluginUid);
     active = true;
+    latency = processor->getLatencySamples();
     // Steinberg's own AudioClient does not gate activation on this return
     // value: several compliant plug-ins return kResultFalse while still
     // processing normally. We still check the process() result per block.
@@ -288,7 +322,7 @@ public:
     data.numInputs = data.numOutputs = 1;
     data.inputs = &inputBus;
     data.outputs = &outputBus;
-    data.inputParameterChanges = overrides.empty() ? nullptr : parameterChanges.get();
+    data.inputParameterChanges = nullptr;
   }
 
   ~VST3Instance() override {
@@ -297,12 +331,22 @@ public:
   }
 
   const std::string &uri() const noexcept override { return pluginUid; }
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginUid;
+  }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
   }
-  std::vector<std::wstring> initialize(float, unsigned,
-      const std::vector<std::wstring> &channels) override { return channels; }
-  void process(float **output, float **input, unsigned frames) noexcept override {
+  uint32_t latencySamples() const noexcept override {
+    return latency;
+  }
+  std::vector<std::wstring>
+  initialize(float, unsigned,
+             const std::vector<std::wstring> &channels) override {
+    return channels;
+  }
+  void process(float **output, float **input,
+               unsigned frames) noexcept override {
     if (frames > maxFrameCount ||
         processingError.load(std::memory_order_acquire)) {
       for (unsigned c = 0; c < channelCount; ++c)
@@ -314,6 +358,7 @@ public:
       outputs[c] = output[c];
     }
     data.numSamples = static_cast<int32_t>(frames);
+    buildParameterChanges();
     if (processor->process(data) != Steinberg::kResultOk) {
       processingError.store(true, std::memory_order_release);
       for (size_t c = 0; c < channelCount; ++c)
@@ -325,11 +370,51 @@ public:
     return processingError.load(std::memory_order_acquire);
   }
 
+  void setParameterValue(const std::string &symbol, float value) override {
+    const auto id = parseParameterId(symbol);
+    if (!std::isfinite(value) || value < 0.0f || value > 1.0f)
+      throw std::runtime_error("VST3 parameter '" + symbol +
+                               "' must be in normalized range [0, 1]");
+    const auto found = std::find(parameterIds.begin(), parameterIds.end(), id);
+    if (found == parameterIds.end())
+      throw std::runtime_error("unknown or read-only VST3 parameter '" +
+                               symbol + "' in " + pluginUid);
+    const size_t index = static_cast<size_t>(found - parameterIds.begin());
+    // The serialized control thread is the sole writer. The audio thread reads
+    // the published value after acquiring the revision and emits it as a VST3
+    // automation point; controller calls are deliberately excluded here.
+    liveParameters[index].value.store(value, std::memory_order_relaxed);
+    liveParameters[index].revision.fetch_add(1, std::memory_order_release);
+  }
+
 private:
+  void buildParameterChanges() noexcept {
+    parameterChanges->clearQueue();
+    bool hasChanges = false;
+    for (size_t i = 0; i < parameterInfos.size(); ++i) {
+      const uint64_t revision =
+          liveParameters[i].revision.load(std::memory_order_acquire);
+      if (!revision || revision == liveParameters[i].consumedRevision)
+        continue;
+      Steinberg::int32 queueIndex = 0;
+      auto *queue = parameterChanges->addParameterData(parameterIds[i], queueIndex);
+      if (!queue)
+        continue; // Capacity was reserved for every writable parameter.
+      Steinberg::int32 pointIndex = 0;
+      const double value = liveParameters[i].value.load(std::memory_order_relaxed);
+      if (queue->addPoint(0, value, pointIndex) != Steinberg::kResultTrue)
+        continue; // Each queue was primed and has reserved point capacity.
+      liveParameters[i].consumedRevision = revision;
+      hasChanges = true;
+    }
+    data.inputParameterChanges = hasChanges ? parameterChanges.get() : nullptr;
+  }
+
   Module::Ptr module;
   std::string pluginUid;
   size_t channelCount{};
   unsigned maxFrameCount{};
+  uint32_t latency{};
   std::unique_ptr<Steinberg::Vst::PlugProvider> provider;
   Steinberg::IPtr<Steinberg::Vst::IComponent> component;
   Steinberg::FUnknownPtr<Steinberg::Vst::IAudioProcessor> processor;
@@ -338,12 +423,18 @@ private:
   Steinberg::Vst::ProcessData data{};
   Steinberg::IPtr<Steinberg::Vst::IEditController> parameterController;
   std::vector<PluginParameterInfo> parameterInfos;
+  std::vector<Steinberg::Vst::ParamID> parameterIds;
+  std::unique_ptr<LiveParameter[]> liveParameters;
   std::unique_ptr<Steinberg::Vst::ParameterChanges> parameterChanges;
   bool active = false, processing = false;
   std::atomic<bool> processingError{false};
 };
 
-class VST3PluginFilter final : public IFilter, public IPluginFailureState {
+class VST3PluginFilter final : public IFilter,
+                               public AtomicPluginBypass,
+                               public IPluginParameterControl,
+                               public IPluginFailureState,
+                               public IPluginLatencyState {
 public:
   VST3PluginFilter(VST3PluginHost &owner, std::string uid,
                    std::vector<PluginParameterValue> overrides)
@@ -352,10 +443,13 @@ public:
   bool getInPlace() override { return false; }
   std::vector<std::wstring> initialize(float rate, unsigned maxFrames,
                                        std::vector<std::wstring> channels) override {
+    channelCount = static_cast<unsigned>(channels.size());
     instance = host.create(pluginUid, rate, maxFrames, channels, parameterOverrides);
     return instance->initialize(rate, maxFrames, channels);
   }
   void process(float **output, float **input, unsigned frames) override {
+    if (copyInputWhenBypassed(output, input, frames, channelCount))
+      return;
     instance->process(output, input, frames);
   }
   bool processingFailed() const noexcept override {
@@ -364,12 +458,25 @@ public:
   const std::string &failureIdentifier() const noexcept override {
     return pluginUid;
   }
+  uint32_t latencySamples() const noexcept override {
+    return instance ? instance->latencySamples() : 0;
+  }
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginUid;
+  }
+  void setParameterValue(const std::string &symbol, float value) override {
+    auto *control = dynamic_cast<IPluginParameterControl *>(instance.get());
+    if (!control)
+      throw std::runtime_error("VST3 plugin is not active: " + pluginUid);
+    control->setParameterValue(symbol, value);
+  }
 
 private:
   VST3PluginHost &host;
   std::string pluginUid;
   std::vector<PluginParameterValue> parameterOverrides;
   std::unique_ptr<IPluginInstance> instance;
+  unsigned channelCount{};
 };
 
 IFilter *allocateFilter(VST3PluginHost &host, std::string uid,

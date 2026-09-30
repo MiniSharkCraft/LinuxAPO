@@ -6,6 +6,7 @@
 #include "DefaultSinkVolumeMonitor.h"
 #include "Engine.h"
 #include "LoudnessVolumeProvider.h"
+#include "../platform/ConfigWatcher.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
@@ -22,7 +24,6 @@
 #include <spa/param/port-config.h>
 #include <spa/param/props.h>
 #include <sstream>
-#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -107,7 +108,7 @@ struct Runtime {
   spa_hook coreHook{}, registryHook{}, filterHook{};
   spa_source *rateEvent{}, *statusEvent{}, *sigint{}, *sigterm{},
       *selectionTimer{}, *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
-  int configWatch = -1;
+  std::unique_ptr<skyapo::platform::ConfigWatcher> configWatcher;
   int server = -1;
   bool ownsSocket = false;
   bool cleaning = false;
@@ -166,8 +167,6 @@ struct Runtime {
         if (s)
           pw_loop_destroy_source(l, s);
     }
-    if (configWatch >= 0)
-      close(configWatch);
     if (server >= 0)
       close(server);
     if (ownsSocket)
@@ -199,6 +198,7 @@ struct Runtime {
     auto engine =
         std::make_unique<Engine>(hz, channels, blockFrames, names, true);
     engine->loadConfig(config);
+    configWatcher->update(engine->configFiles());
     installEngine(std::move(engine));
     auto *pointer = active.load(std::memory_order_acquire);
     std::cerr << "skyapod: DSP ready at " << hz << " Hz, " << channels
@@ -231,6 +231,7 @@ struct Runtime {
     auto replacement =
         std::make_unique<Engine>(hz, channels, blockFrames, names, true);
     replacement->loadConfig(config);
+    configWatcher->update(replacement->configFiles());
     const unsigned count = replacement->filterCount();
     installEngine(std::move(replacement));
     resetMetrics.store(true, std::memory_order_release);
@@ -239,22 +240,7 @@ struct Runtime {
   }
   static void configReady(void *data, int, uint32_t) {
     auto &r = *static_cast<Runtime *>(data);
-    alignas(inotify_event) char buffer[4096];
-    bool relevant = false;
-    for (;;) {
-      const ssize_t length = read(r.configWatch, buffer, sizeof(buffer));
-      if (length <= 0)
-        break;
-      for (size_t offset = 0; offset < static_cast<size_t>(length);) {
-        const auto *event =
-            reinterpret_cast<const inotify_event *>(buffer + offset);
-        if (!event->len ||
-            std::filesystem::path(r.config).filename() == event->name)
-          relevant = true;
-        offset += sizeof(inotify_event) + event->len;
-      }
-    }
-    if (relevant) {
+    if (r.configWatcher->consumeEvents()) {
       timespec debounce{0, 150000000};
       pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.reloadTimer,
                            &debounce, nullptr, false);
@@ -583,6 +569,13 @@ struct Runtime {
     else
       for (const auto &filter : e->filterDescriptions())
         s << "\n  " << filter;
+    s << "\nPlugin-reported latency sum: ";
+    const auto pluginLatency =
+        e ? e->pluginLatencySamples() : std::optional<uint64_t>{};
+    if (pluginLatency)
+      s << *pluginLatency << " samples (no delay compensation)";
+    else
+      s << "unknown";
     s << "\nConfig: " << config << "\nProcessed blocks: " << b
       << "\nOverruns: " << overruns.load();
     s << "\nActive capture links: "
@@ -650,6 +643,36 @@ struct Runtime {
           text = std::string("Config reload failed; keeping last valid graph: ") +
                  e.what() + "\n";
         }
+      } else if (request.command ==
+                 settings::ipc::Command::SetPluginParameter) {
+        try {
+          auto *engine = r.active.load(std::memory_order_acquire);
+          if (!engine)
+            throw std::runtime_error("audio graph is not active");
+          engine->setPluginParameter(request.pluginId, request.parameter,
+                                     request.value);
+          text = "Updated " + request.pluginId + " parameter " +
+                 request.parameter + " to " + std::to_string(request.value) +
+                 "\n";
+        } catch (const std::exception &e) {
+          sendControlResponse(client, false, std::string(e.what()) + "\n");
+          close(client);
+          continue;
+        }
+      } else if (request.command ==
+                 settings::ipc::Command::SetPluginBypass) {
+        try {
+          auto *engine = r.active.load(std::memory_order_acquire);
+          if (!engine)
+            throw std::runtime_error("audio graph is not active");
+          engine->setPluginBypass(request.pluginId, request.bypassed);
+          text = std::string(request.bypassed ? "Bypassed " : "Unbypassed ") +
+                 request.pluginId + "\n";
+        } catch (const std::exception &e) {
+          sendControlResponse(client, false, std::string(e.what()) + "\n");
+          close(client);
+          continue;
+        }
       } else if (request.command == settings::ipc::Command::Stop) {
         r.stopping = 1;
         text = "Stopping skyapod\n";
@@ -712,17 +735,9 @@ struct Runtime {
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
     reloadTimer = pw_loop_add_timer(loop, reloadReady, this);
     linkRetryTimer = pw_loop_add_timer(loop, retryLinks, this);
-    configWatch = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-    if (configWatch < 0)
-      throw std::runtime_error("cannot create config file watcher");
-    const auto parent = std::filesystem::path(config).parent_path();
-    if (inotify_add_watch(configWatch, parent.c_str(),
-                          IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_ATTRIB |
-                              IN_DELETE | IN_Q_OVERFLOW) < 0)
-      throw std::runtime_error("cannot watch config directory: " +
-                               parent.string());
-    configEvent =
-        pw_loop_add_io(loop, configWatch, SPA_IO_IN, false, configReady, this);
+    configWatcher = std::make_unique<skyapo::platform::ConfigWatcher>(config);
+    configEvent = pw_loop_add_io(loop, configWatcher->fileDescriptor(),
+                                 SPA_IO_IN, false, configReady, this);
     if (!rateEvent || !sigint || !sigterm || !selectionTimer || !reloadTimer ||
         !linkRetryTimer || !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");

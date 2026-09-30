@@ -1,8 +1,10 @@
 #include "VST2PluginHost.h"
 
 #include "fst.h"
+#include "IPluginParameterControl.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -13,8 +15,14 @@
 #include <vector>
 
 namespace {
-static_assert(std::atomic<bool>::is_always_lock_free,
-              "VST2 prototype failure latch must be lock-free on the audio thread");
+static_assert(
+    std::atomic<bool>::is_always_lock_free,
+    "VST2 prototype failure latch must be lock-free on the audio thread");
+static_assert(std::atomic<size_t>::is_always_lock_free,
+              "VST2 parameter queue indices must be lock-free");
+static_assert(std::atomic<uint64_t>::is_always_lock_free &&
+                  std::atomic<float>::is_always_lock_free,
+              "VST2 parameter mailboxes must be lock-free");
 
 struct HostContext {
   float sampleRate{};
@@ -23,8 +31,8 @@ struct HostContext {
 
 thread_local HostContext *constructingContext = nullptr;
 
-t_fstPtrInt audioMaster(AEffect *effect, int opcode, int, t_fstPtrInt,
-                        void *, float) {
+t_fstPtrInt audioMaster(AEffect *effect, int opcode, int, t_fstPtrInt, void *,
+                        float) {
   if (opcode == audioMasterVersion)
     return kVstVersion;
   if (opcode == audioMasterGetCurrentProcessLevel)
@@ -95,7 +103,8 @@ std::string parameterName(AEffect *effect, int index) {
   return "Parameter " + std::to_string(index);
 }
 
-class VST2Instance final : public IPluginInstance {
+class VST2Instance final : public IPluginInstance,
+                           public IPluginParameterControl {
 public:
   VST2Instance(std::string path, float rate, unsigned maxFrames,
                const std::vector<std::wstring> &channels,
@@ -109,10 +118,13 @@ public:
 
     module = std::make_unique<DynamicModule>(modulePath);
     struct ContextGuard {
-      explicit ContextGuard(HostContext *value) : previous(constructingContext) {
+      explicit ContextGuard(HostContext *value)
+          : previous(constructingContext) {
         constructingContext = value;
       }
-      ~ContextGuard() { constructingContext = previous; }
+      ~ContextGuard() {
+        constructingContext = previous;
+      }
       HostContext *previous;
     } guard(&context);
     effect = module->entryPoint()(&audioMaster);
@@ -139,14 +151,20 @@ public:
 
       if (effect->numParams < 0 || effect->numParams > 4096)
         throw std::runtime_error("VST2: unreasonable parameter count");
+      parameterCount = static_cast<size_t>(effect->numParams);
+      if (parameterCount)
+        pendingValues = std::make_unique<std::atomic<float>[]>(parameterCount);
+      for (auto &word : pendingMask)
+        word.store(0, std::memory_order_relaxed);
       parameterInfos.reserve(static_cast<size_t>(effect->numParams));
       for (int index = 0; index < effect->numParams; ++index) {
-        const float value = effect->getParameter
-            ? effect->getParameter(effect, index)
-            : 0.0f;
+        const float value =
+            effect->getParameter ? effect->getParameter(effect, index) : 0.0f;
         parameterInfos.push_back({std::to_string(index),
-                                  parameterName(effect, index), value,
-                                  0.0f, 1.0f, value});
+                                  parameterName(effect, index), value, 0.0f,
+                                  1.0f, value});
+        pendingValues[static_cast<size_t>(index)].store(
+            value, std::memory_order_relaxed);
       }
       std::vector<bool> assigned(parameterInfos.size(), false);
       for (const auto &overrideValue : overrides) {
@@ -192,21 +210,67 @@ public:
     active = false;
   }
 
-  const std::string &uri() const noexcept override { return modulePath; }
+  const std::string &uri() const noexcept override {
+    return modulePath;
+  }
+  const std::string &pluginIdentifier() const noexcept override {
+    return modulePath;
+  }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
   }
-  std::vector<std::wstring> initialize(float rate, unsigned maxFrames,
-      const std::vector<std::wstring> &channels) override {
+  void setParameterValue(const std::string &symbol, float value) override {
+    if (!effect || !effect->setParameter || !std::isfinite(value))
+      throw std::runtime_error("VST2: live parameter control is unavailable");
+
+    size_t parameterIndex = parameterCount;
+    size_t consumed = 0;
+    try {
+      const auto numericIndex = std::stoul(symbol, &consumed);
+      if (consumed == symbol.size())
+        parameterIndex = static_cast<size_t>(numericIndex);
+    } catch (const std::exception &) {
+      // Fall back to a unique display-name match.
+    }
+    if (parameterIndex == parameterCount) {
+      for (size_t index = 0; index < parameterInfos.size(); ++index) {
+        if (parameterInfos[index].name != symbol)
+          continue;
+        if (parameterIndex != parameterCount)
+          throw std::runtime_error("VST2: parameter name is ambiguous: " +
+                                   symbol);
+        parameterIndex = index;
+      }
+    }
+    if (parameterIndex >= parameterCount ||
+        value < parameterInfos[parameterIndex].minimum ||
+        value > parameterInfos[parameterIndex].maximum)
+      throw std::runtime_error("VST2: invalid parameter value for '" + symbol +
+                               "'");
+
+    pendingValues[parameterIndex].store(value, std::memory_order_relaxed);
+    pendingMask[parameterIndex / 64].fetch_or(
+        uint64_t{1} << (parameterIndex % 64), std::memory_order_release);
+  }
+  uint32_t latencySamples() const noexcept override {
+    return effect && effect->initialDelay > 0
+               ? static_cast<uint32_t>(effect->initialDelay)
+               : 0;
+  }
+  std::vector<std::wstring>
+  initialize(float rate, unsigned maxFrames,
+             const std::vector<std::wstring> &channels) override {
     if (rate != context.sampleRate || maxFrames != maxFrameCount ||
         channels.size() != channelCount)
-      throw std::runtime_error("VST2: initialize arguments differ from create()");
+      throw std::runtime_error(
+          "VST2: initialize arguments differ from create()");
     return channels;
   }
 
-  void process(float **output, float **input, unsigned frames) noexcept override {
-    if (!effect || failed.load(std::memory_order_acquire) ||
-        !output || !input || frames > maxFrameCount ||
+  void process(float **output, float **input,
+               unsigned frames) noexcept override {
+    if (!effect || failed.load(std::memory_order_acquire) || !output ||
+        !input || frames > maxFrameCount ||
         frames > static_cast<unsigned>(INT32_MAX)) {
       silence(output, frames);
       if (!output || !input || frames > maxFrameCount ||
@@ -222,6 +286,7 @@ public:
       }
     }
     try {
+      applyPendingParameters();
       effect->processReplacing(effect, input, output, static_cast<int>(frames));
     } catch (...) {
       failed.store(true, std::memory_order_release);
@@ -233,6 +298,22 @@ public:
   }
 
 private:
+  void applyPendingParameters() {
+    const size_t maskWords = (parameterCount + 63) / 64;
+    for (size_t word = 0; word < maskWords; ++word) {
+      uint64_t pending =
+          pendingMask[word].exchange(0, std::memory_order_acquire);
+      while (pending) {
+        const unsigned bit = static_cast<unsigned>(__builtin_ctzll(pending));
+        const size_t index = word * 64 + bit;
+        effect->setParameter(
+            effect, static_cast<int>(index),
+            pendingValues[index].load(std::memory_order_relaxed));
+        pending &= pending - 1;
+      }
+    }
+  }
+
   void silence(float **output, unsigned frames) noexcept {
     if (!output)
       return;
@@ -248,20 +329,27 @@ private:
   HostContext context;
   size_t channelCount{};
   unsigned maxFrameCount{};
+  size_t parameterCount{};
   std::unique_ptr<DynamicModule> module;
   AEffect *effect{};
   bool opened = false;
   bool active = false;
   std::atomic<bool> failed{false};
   std::vector<PluginParameterInfo> parameterInfos;
+  // Values are allocated at construction. The serialized control thread
+  // publishes latest-value mailboxes; the audio thread applies changes at a
+  // block boundary without allocating or waiting on a lock.
+  std::unique_ptr<std::atomic<float>[]> pendingValues;
+  std::array<std::atomic<uint64_t>, 64> pendingMask{};
 };
+
 } // namespace
 
 std::unique_ptr<IPluginInstance>
 VST2PluginHost::create(const std::string &modulePath, float sampleRate,
                        unsigned maxFrames,
                        const std::vector<std::wstring> &channels,
-                       const std::vector<PluginParameterValue> &parameters) const {
+                       const std::vector<PluginParameterValue> &parameters) {
   return std::make_unique<VST2Instance>(modulePath, sampleRate, maxFrames,
                                         channels, parameters);
 }

@@ -1,5 +1,8 @@
 #include "CLAPPluginHost.h"
 #include "IPluginFailureState.h"
+#include "IPluginLatencyState.h"
+#include "IPluginParameterControl.h"
+#include "IPluginBypassControl.h"
 
 #include "IFilter.h"
 #include "helpers/MemoryHelper.h"
@@ -26,6 +29,10 @@
 namespace fs = std::filesystem;
 static_assert(std::atomic<bool>::is_always_lock_free,
               "CLAP failure latch must be lock-free on the audio thread");
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "CLAP parameter revisions must be lock-free on the audio thread");
+static_assert(std::atomic<float>::is_always_lock_free,
+              "CLAP parameter values must be lock-free on the audio thread");
 
 namespace {
 struct ClapLibrary {
@@ -136,7 +143,8 @@ bool CLAP_ABI rejectEvent(const clap_output_events_t *,
   return false;
 }
 
-class CLAPInstance final : public IPluginInstance {
+class CLAPInstance final : public IPluginInstance,
+                           public IPluginParameterControl {
 public:
   CLAPInstance(std::shared_ptr<ClapLibrary> lib,
                const clap_plugin_descriptor_t *descriptor, std::string id,
@@ -213,6 +221,9 @@ public:
       }
       clapParameters.reserve(count);
       parameterInfo.reserve(count);
+      liveParameters = std::make_unique<LiveParameter[]>(count);
+      consumedRevisions = std::make_unique<uint32_t[]>(count);
+      hasStaticOverride.assign(count, false);
       for (uint32_t i = 0; i < count; ++i) {
         clap_param_info_t info{};
         if (!parameterExtension->get_info(plugin, i, &info) ||
@@ -279,11 +290,17 @@ public:
       event.value = override.value;
       parameterEvents.push_back(event);
       parameterInfo[match].value = override.value;
+      hasStaticOverride[match] = true;
+      staticOverrideIndices.push_back(match);
     }
+    eventBatch.resize(parameterEvents.size() + clapParameters.size());
     if (!plugin->activate(plugin, sampleRate, 1, maxFrames)) {
       throw std::runtime_error("CLAP plugin activation failed: " + pluginId);
     }
     active = true;
+    latencyExtension = static_cast<const clap_plugin_latency_t *>(
+        plugin->get_extension(plugin, CLAP_EXT_LATENCY));
+    latency = latencyExtension ? latencyExtension->get(plugin) : 0;
     if (!plugin->start_processing(plugin)) {
       throw std::runtime_error("CLAP plugin start_processing failed: " +
                                pluginId);
@@ -325,6 +342,9 @@ public:
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfo;
   }
+  uint32_t latencySamples() const noexcept override {
+    return latency;
+  }
   std::vector<std::wstring>
   initialize(float, unsigned,
              const std::vector<std::wstring> &channels) override {
@@ -341,6 +361,7 @@ public:
       inputChannels[c] = input[c];
       outputChannels[c] = output[c];
     }
+    buildParameterEvents();
     clapProcess.frames_count = frames;
     currentClapAudioHost = &host;
     const auto result = plugin->process(plugin, &clapProcess);
@@ -356,16 +377,93 @@ public:
     return processingError.load(std::memory_order_acquire);
   }
 
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginId;
+  }
+
+  void setParameterValue(const std::string &symbol, float value) override {
+    if (!std::isfinite(value))
+      throw std::runtime_error("CLAP parameter value must be finite");
+    size_t match = clapParameters.size();
+    for (size_t i = 0; i < clapParameters.size(); ++i) {
+      const auto &info = clapParameters[i];
+      if (symbol == std::to_string(info.id) || symbol == info.name) {
+        if (match != clapParameters.size())
+          throw std::runtime_error("ambiguous CLAP parameter '" + symbol +
+                                   "' (use its numeric id)");
+        match = i;
+      }
+    }
+    if (match == clapParameters.size())
+      throw std::runtime_error("unknown CLAP parameter '" + symbol + "'");
+    const auto &info = clapParameters[match];
+    if (info.flags & CLAP_PARAM_IS_READONLY)
+      throw std::runtime_error("CLAP parameter '" + symbol + "' is read-only");
+    if (value < info.min_value || value > info.max_value)
+      throw std::runtime_error("CLAP parameter '" + symbol +
+                               "' value is outside its declared range");
+    // Single-writer control-thread mailbox: publish the value before its
+    // revision. The audio thread only loads lock-free atomics and consumes the
+    // newest value when preparing its already allocated CLAP event array.
+    liveParameters[match].value.store(value, std::memory_order_relaxed);
+    liveParameters[match].revision.fetch_add(1, std::memory_order_release);
+  }
+
 private:
+  struct LiveParameter {
+    std::atomic<float> value{0.0f};
+    std::atomic<uint32_t> revision{0};
+  };
+
+  void buildParameterEvents() noexcept {
+    size_t count = 0;
+    for (size_t i = 0; i < parameterEvents.size(); ++i) {
+      auto event = parameterEvents[i];
+      const auto paramIndex = staticOverrideIndices[i];
+      if (paramIndex < clapParameters.size()) {
+        const auto revision = liveParameters[paramIndex].revision.load(
+            std::memory_order_acquire);
+        if (revision != 0)
+          event.value = liveParameters[paramIndex].value.load(
+              std::memory_order_relaxed);
+      }
+      eventBatch[count++] = event;
+    }
+    for (size_t i = 0; i < clapParameters.size(); ++i) {
+      if (hasStaticOverride[i])
+        continue;
+      const auto revision =
+          liveParameters[i].revision.load(std::memory_order_acquire);
+      if (!revision || revision == consumedRevisions[i])
+        continue;
+      clap_event_param_value_t event{};
+      event.header.size = sizeof(event);
+      event.header.time = 0;
+      event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+      event.header.type = CLAP_EVENT_PARAM_VALUE;
+      event.header.flags = CLAP_EVENT_DONT_RECORD;
+      event.param_id = clapParameters[i].id;
+      event.cookie = clapParameters[i].cookie;
+      event.note_id = -1;
+      event.port_index = -1;
+      event.channel = -1;
+      event.key = -1;
+      event.value = liveParameters[i].value.load(std::memory_order_relaxed);
+      eventBatch[count++] = event;
+      consumedRevisions[i] = revision;
+    }
+    eventBatchCount = static_cast<uint32_t>(count);
+  }
+
   static uint32_t CLAP_ABI parameterEventCount(const clap_input_events_t *list) {
     const auto *self = static_cast<const CLAPInstance *>(list->ctx);
-    return static_cast<uint32_t>(self->parameterEvents.size());
+    return self->eventBatchCount;
   }
   static const clap_event_header_t *CLAP_ABI
   parameterEventAt(const clap_input_events_t *list, uint32_t index) {
     const auto *self = static_cast<const CLAPInstance *>(list->ctx);
-    return index < self->parameterEvents.size()
-               ? &self->parameterEvents[index].header
+    return index < self->eventBatchCount
+               ? &self->eventBatch[index].header
                : nullptr;
   }
 
@@ -377,11 +475,19 @@ private:
   const clap_plugin_t *plugin{};
   const clap_plugin_audio_ports_t *ports{};
   const clap_plugin_params_t *parameterExtension{};
+  const clap_plugin_latency_t *latencyExtension{};
   std::vector<clap_param_info_t> clapParameters;
   std::vector<clap_event_param_value_t> parameterEvents;
+  std::vector<clap_event_param_value_t> eventBatch;
+  std::unique_ptr<LiveParameter[]> liveParameters;
+  std::unique_ptr<uint32_t[]> consumedRevisions;
+  std::vector<bool> hasStaticOverride;
+  std::vector<size_t> staticOverrideIndices;
+  uint32_t eventBatchCount{};
   clap_audio_port_info_t inputInfo{}, outputInfo{};
   bool active = false, processing = false;
   std::atomic<bool> processingError{false};
+  uint32_t latency{};
   std::vector<float *> inputChannels, outputChannels;
   clap_audio_buffer_t inputBuffer{}, outputBuffer{};
   clap_input_events_t emptyInputEvents{};
@@ -390,7 +496,11 @@ private:
   std::vector<PluginParameterInfo> parameterInfo;
 };
 
-class CLAPPluginFilter final : public IFilter, public IPluginFailureState {
+class CLAPPluginFilter final : public IFilter,
+                               public AtomicPluginBypass,
+                               public IPluginParameterControl,
+                               public IPluginFailureState,
+                               public IPluginLatencyState {
 public:
   CLAPPluginFilter(CLAPPluginHost &host, std::string id,
                    std::vector<PluginParameterValue> overrides)
@@ -399,11 +509,14 @@ public:
   bool getInPlace() override { return false; }
   std::vector<std::wstring> initialize(float sampleRate, unsigned maxFrames,
                                       std::vector<std::wstring> channels) override {
+    channelCount = static_cast<unsigned>(channels.size());
     instance = host.create(pluginId, sampleRate, maxFrames, channels,
                            parameterOverrides);
     return instance->initialize(sampleRate, maxFrames, channels);
   }
   void process(float **output, float **input, unsigned frames) override {
+    if (copyInputWhenBypassed(output, input, frames, channelCount))
+      return;
     instance->process(output, input, frames);
   }
   bool processingFailed() const noexcept override {
@@ -412,12 +525,28 @@ public:
   const std::string &failureIdentifier() const noexcept override {
     return pluginId;
   }
+  uint32_t latencySamples() const noexcept override {
+    return instance ? instance->latencySamples() : 0;
+  }
+  const std::string &pluginIdentifier() const noexcept override {
+    return pluginId;
+  }
+  void setParameterValue(const std::string &symbol, float value) override {
+    if (!instance)
+      throw std::runtime_error("CLAP plugin is not active: " + pluginId);
+    auto *control = dynamic_cast<IPluginParameterControl *>(instance.get());
+    if (!control)
+      throw std::runtime_error("CLAP plugin does not support live parameters: " +
+                               pluginId);
+    control->setParameterValue(symbol, value);
+  }
 
 private:
   CLAPPluginHost &host;
   std::string pluginId;
   std::vector<PluginParameterValue> parameterOverrides;
   std::unique_ptr<IPluginInstance> instance;
+  unsigned channelCount{};
 };
 
 IFilter *allocateFilter(CLAPPluginHost &host, std::string id,

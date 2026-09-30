@@ -10,10 +10,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
+option(SKYAPO_ENABLE_FFTW3F "Enable upstream GraphicEQ and convolution through FFTW3f" ON)
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
 option(SKYAPO_ENABLE_MUPARSERX "Fetch and use Equalizer APO's legacy MuParserX 3.0.1 parser" ON)
 option(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS
   "Build tests for the experimental FST-based VST2-compatible host" OFF)
+option(SKYAPO_ENABLE_FST_VST2_HOST
+  "Enable the experimental in-process FST-based legacy plugin host" OFF)
 option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
   "Run an isolated PipeWire server and verify captured SkyAPO DSP output" OFF)
 
@@ -21,7 +24,12 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
+if(SKYAPO_ENABLE_FFTW3F)
+  pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
+else()
+  set(FFTW3F_FOUND FALSE)
+  message(STATUS "FFTW3f explicitly disabled: GraphicEQ/Convolution support is off")
+endif()
 pkg_check_modules(LILV QUIET IMPORTED_TARGET lilv-0)
 pkg_check_modules(LV2 QUIET IMPORTED_TARGET lv2)
 if(SKYAPO_ENABLE_MUPARSER)
@@ -148,7 +156,8 @@ add_library(skyapo-eapo-dsp STATIC
   src/platform/linux/ChannelHelper.cpp
   src/platform/linux/MemoryHelper.cpp
 )
-target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO_PORT} ${EAPO})
+target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE
+  src/platform/linux src/core ${EAPO_PORT} ${EAPO})
 target_compile_definitions(skyapo-eapo-dsp PRIVATE __forceinline=inline)
 target_compile_options(skyapo-eapo-dsp PRIVATE -Wno-write-strings)
 target_link_libraries(skyapo-eapo-dsp PUBLIC Threads::Threads)
@@ -185,6 +194,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_CLAP=1)
 else()
   message(STATUS "CLAP headers not present: initialize upstream/clap to enable CLAP")
+endif()
+if(SKYAPO_ENABLE_FST_VST2_HOST)
+  set(SKYAPO_FST_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/upstream/fst/fst")
+  if(NOT EXISTS "${SKYAPO_FST_INCLUDE}/fst.h")
+    message(FATAL_ERROR
+      "SKYAPO_ENABLE_FST_VST2_HOST requires the upstream/fst submodule")
+  endif()
+  target_sources(skyapo-core PRIVATE src/plugin/VST2PluginHost.cpp
+    src/plugin/VST2PluginFilter.cpp)
+  target_include_directories(skyapo-core SYSTEM PRIVATE "${SKYAPO_FST_INCLUDE}")
+  target_link_libraries(skyapo-core PUBLIC ${CMAKE_DL_LIBS})
+  target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_FST_VST2=1)
 endif()
 if(SKYAPO_HAVE_VST3)
   target_sources(skyapo-core PRIVATE src/plugin/VST3PluginHost.cpp)
@@ -249,6 +270,7 @@ if(PIPEWIRE_FOUND)
     src/pipewire/DeviceManager.cpp
     src/pipewire/DefaultSinkVolumeMonitor.cpp
     src/pipewire/Runtime.cpp
+    src/platform/ConfigWatcher.cpp
     src/platform/RealtimeAudit.cpp)
   target_link_libraries(skyapo-pipewire PUBLIC skyapo-core PkgConfig::PIPEWIRE)
   target_include_directories(skyapo-pipewire PRIVATE src/platform/linux)
@@ -294,9 +316,18 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmark_test.py
       $<TARGET_FILE:skyapo-bench>)
+  if(FFTW3F_FOUND)
+    add_test(NAME skyapo-benchmark-convolution
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmark_test.py
+        $<TARGET_FILE:skyapo-bench> --convolution)
+  endif()
 endif()
 add_executable(skyapo-ipc-protocol-tests tests/ipc_protocol_test.cpp)
 add_test(NAME skyapo-ipc-protocol COMMAND skyapo-ipc-protocol-tests)
+add_executable(skyapo-config-watcher-tests
+  tests/config_watcher_test.cpp src/platform/ConfigWatcher.cpp)
+add_test(NAME skyapo-config-watcher COMMAND skyapo-config-watcher-tests)
 add_test(NAME skyapo-default-sink-volume
   COMMAND skyapo-default-sink-volume-tests)
 if(Python3_Interpreter_FOUND)
@@ -308,6 +339,19 @@ endif()
 if(SKYAPO_BUILD_UI)
   find_package(Qt6 QUIET COMPONENTS Widgets)
   if(Qt6Widgets_FOUND)
+    # Qt Widgets can be used under LGPL-3.0 or GPL-2.0. SkyAPO keeps the
+    # upstream GPL-2.0-or-later application license and dynamically links Qt;
+    # ship the LGPL notice text with installed builds.
+    find_file(SKYAPO_QT_LGPL3_LICENSE
+      NAMES LGPL-3.0-only.txt LGPL-3.0.txt LGPL3.txt LGPL3 LGPL-3
+      PATH_SUFFIXES share/licenses/qt6-base share/licenses/qt6
+        share/licenses/spdx share/licenses/licenses share/licenses
+        share/common-licenses)
+    if(NOT SKYAPO_QT_LGPL3_LICENSE)
+      message(FATAL_ERROR
+        "Qt 6 Widgets is enabled but its LGPL-3.0 license text was not found. "
+        "Set SKYAPO_QT_LGPL3_LICENSE to the license file from the Qt package.")
+    endif()
     set(SKYAPO_EDITOR ${EAPO}/Editor)
     # The upstream row includes "FilterTable.h" relative to its source tree.
     # Build a copy beside the row with a narrow Linux adapter instead of
@@ -326,7 +370,7 @@ if(SKYAPO_BUILD_UI)
       ${EAPO_PORT}/Editor/FilterTableRow.h
       ${EAPO_PORT}/Editor/FilterTableRow.ui
       ${EAPO_PORT}/Editor/FilterTable.h
-      ${SKYAPO_EDITOR}/Editor.qrc
+      src/ui/resources/skyapo_editor.qrc
       ${SKYAPO_EDITOR}/widgets/CompactToolBar.cpp
       ${SKYAPO_EDITOR}/widgets/CompactToolBar.h
       ${SKYAPO_EDITOR}/widgets/EscapableLineEdit.cpp
@@ -360,6 +404,13 @@ if(SKYAPO_BUILD_UI)
       ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.cpp
       ${SKYAPO_EDITOR}/guis/StageFilterGUIFactory.h
     )
+    if(FFTW3F_FOUND)
+      target_sources(skyapo-eapo-editor PRIVATE src/ui/ResponseAnalysis.cpp
+        src/ui/ResponseAnalysis.h src/ui/resources/skyapo_graphiceq.qrc)
+      target_link_libraries(skyapo-eapo-editor PRIVATE PkgConfig::FFTW3F)
+      target_compile_definitions(skyapo-eapo-editor PUBLIC
+        SKYAPO_UI_HAVE_RESPONSE_ANALYSIS=1)
+    endif()
     set_target_properties(skyapo-eapo-editor PROPERTIES
       AUTOMOC ON AUTOUIC ON AUTORCC ON)
     set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS
@@ -410,7 +461,8 @@ if(SKYAPO_BUILD_UI)
       src/ui/IncludeEditor.cpp src/ui/IncludeEditor.h
       src/ui/ConvolutionEditor.cpp src/ui/ConvolutionEditor.h
       src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h
-      src/ui/IIRFilterEditor.cpp src/ui/IIRFilterEditor.h)
+      src/ui/IIRFilterEditor.cpp src/ui/IIRFilterEditor.h
+      src/ui/ResponseAnalysis.h)
     set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
@@ -422,7 +474,7 @@ if(SKYAPO_BUILD_UI)
       src/ui/IncludeEditor.h src/ui/ConvolutionEditor.cpp
       src/ui/ConvolutionEditor.h src/ui/ChannelCopyEditor.cpp
       src/ui/ChannelCopyEditor.h src/ui/IIRFilterEditor.cpp
-      src/ui/IIRFilterEditor.h)
+      src/ui/IIRFilterEditor.h src/ui/ResponseAnalysis.h)
     set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
@@ -434,6 +486,12 @@ if(SKYAPO_BUILD_UI)
     target_link_libraries(skyapo-ui-tests PRIVATE skyapo-eapo-editor)
     add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests
       $<TARGET_FILE:skyapo-ui-test-cli> $<TARGET_FILE:skyapo>)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME skyapo-ui-resource-audit
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_resource_audit_test.py
+          ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW3F_FOUND})
+    endif()
     set_tests_properties(skyapo-ui-editor PROPERTIES
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -464,16 +522,35 @@ if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
 endif()
 add_test(NAME skyapo-core COMMAND skyapo-tests)
+if(SKYAPO_ENABLE_FST_VST2_HOST)
+  add_library(skyapo-test-vst2-plugin SHARED
+    tests/plugins/vst2_gain_fixture.c)
+  target_include_directories(skyapo-test-vst2-plugin SYSTEM PRIVATE
+    "${SKYAPO_FST_INCLUDE}")
+  add_library(skyapo-test-vst2-mono-plugin SHARED
+    tests/plugins/vst2_gain_fixture.c)
+  target_include_directories(skyapo-test-vst2-mono-plugin SYSTEM PRIVATE
+    "${SKYAPO_FST_INCLUDE}")
+  target_compile_definitions(skyapo-test-vst2-mono-plugin PRIVATE
+    SKYAPO_VST2_FIXTURE_MONO=1)
+  target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST2=1
+    SKYAPO_TEST_VST2_PATH="$<TARGET_FILE:skyapo-test-vst2-plugin>"
+    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>")
+  add_dependencies(skyapo-tests skyapo-test-vst2-plugin
+    skyapo-test-vst2-mono-plugin)
+endif()
 if(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS)
   set(SKYAPO_FST_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/upstream/fst/fst")
   if(NOT EXISTS "${SKYAPO_FST_INCLUDE}/fst.h")
     message(FATAL_ERROR
       "SKYAPO_BUILD_VST2_PROTOTYPE_TESTS requires the upstream/fst submodule")
   endif()
-  add_library(skyapo-test-vst2-plugin SHARED
-    tests/plugins/vst2_gain_fixture.c)
-  target_include_directories(skyapo-test-vst2-plugin SYSTEM PRIVATE
-    "${SKYAPO_FST_INCLUDE}")
+  if(NOT TARGET skyapo-test-vst2-plugin)
+    add_library(skyapo-test-vst2-plugin SHARED
+      tests/plugins/vst2_gain_fixture.c)
+    target_include_directories(skyapo-test-vst2-plugin SYSTEM PRIVATE
+      "${SKYAPO_FST_INCLUDE}")
+  endif()
   add_executable(skyapo-vst2-host-prototype-tests
     src/plugin/VST2PluginHost.cpp tests/vst2_host_prototype_test.cpp)
   target_include_directories(skyapo-vst2-host-prototype-tests PRIVATE src/plugin)
@@ -488,6 +565,14 @@ if(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS)
 endif()
 add_executable(skyapo-realtime-safety-tests tests/realtime_safety_tests.cpp src/platform/RealtimeAudit.cpp)
 target_link_libraries(skyapo-realtime-safety-tests PRIVATE skyapo-core)
+if(SKYAPO_ENABLE_FST_VST2_HOST)
+  target_compile_definitions(skyapo-realtime-safety-tests PRIVATE
+    SKYAPO_TEST_VST2=1
+    SKYAPO_TEST_VST2_PATH="$<TARGET_FILE:skyapo-test-vst2-plugin>"
+    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>")
+  add_dependencies(skyapo-realtime-safety-tests skyapo-test-vst2-plugin
+    skyapo-test-vst2-mono-plugin)
+endif()
 if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
   target_link_libraries(skyapo-realtime-safety-tests PRIVATE PkgConfig::SNDFILE)
@@ -530,6 +615,18 @@ if(LILV_FOUND AND LV2_FOUND)
     ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   if(SKYAPO_SANITIZERS)
     set_property(TEST skyapo-lv2-oversize-block APPEND PROPERTY ENVIRONMENT
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+  endif()
+  add_executable(skyapo-lv2-live-control-test
+    tests/lv2_live_control_test.cpp)
+  target_include_directories(skyapo-lv2-live-control-test PRIVATE src/plugin)
+  target_link_libraries(skyapo-lv2-live-control-test PRIVATE skyapo-core)
+  add_dependencies(skyapo-lv2-live-control-test skyapo-test-lv2)
+  add_test(NAME skyapo-lv2-live-control COMMAND skyapo-lv2-live-control-test)
+  set_tests_properties(skyapo-lv2-live-control PROPERTIES
+    ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+  if(SKYAPO_SANITIZERS)
+    set_property(TEST skyapo-lv2-live-control APPEND PROPERTY ENVIRONMENT
       "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
   endif()
   set_tests_properties(skyapo-core skyapo-realtime-safety PROPERTIES
@@ -679,6 +776,180 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     set_tests_properties(skyapo-pipewire-e2e-${channel_mode}
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
   endforeach()
+  add_test(NAME skyapo-pipewire-e2e-source-replug
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      source-replug)
+  set_tests_properties(skyapo-pipewire-e2e-source-replug
+    PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;recovery")
+  add_test(NAME skyapo-pipewire-e2e-server-restart
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      server-restart)
+  set_tests_properties(skyapo-pipewire-e2e-server-restart
+    PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;recovery")
+  add_test(NAME skyapo-pipewire-e2e-include-reload
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      include-reload)
+  set_tests_properties(skyapo-pipewire-e2e-include-reload
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
+  if(SKYAPO_TEST_CLAP_DIR)
+    add_test(NAME skyapo-pipewire-e2e-plugin-bypass
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_realtime.txt
+        plugin-bypass)
+    set_tests_properties(skyapo-pipewire-e2e-plugin-bypass
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-plugin-live-parameter
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_realtime.txt
+        plugin-live-param)
+    set_tests_properties(skyapo-pipewire-e2e-plugin-live-parameter
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-plugin-latency
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_latency_realtime.txt
+        latency)
+    set_tests_properties(skyapo-pipewire-e2e-plugin-latency
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
+  endif()
+  if(LILV_FOUND AND LV2_FOUND)
+    add_test(NAME skyapo-pipewire-e2e-lv2-live-parameter
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt
+        lv2-live-param)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-live-parameter
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+  endif()
+  if(SKYAPO_HAVE_VST3 AND TARGET skyapo-test-vst3)
+    add_test(NAME skyapo-pipewire-e2e-vst3-live-parameter
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_realtime_chain.txt
+        vst3-live-param)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-live-parameter
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+  endif()
+  if(SKYAPO_ENABLE_FST_VST2_HOST)
+    set(SKYAPO_TEST_VST2_CONFIG
+      "${CMAKE_CURRENT_BINARY_DIR}/tests/vst2_realtime_chain.txt")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    file(GENERATE OUTPUT "${SKYAPO_TEST_VST2_CONFIG}"
+      CONTENT "Plugin: VST2 \"$<TARGET_FILE:skyapo-test-vst2-plugin>\" 0=0.25\n")
+    add_test(NAME skyapo-pipewire-e2e-vst2-live-parameter
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${SKYAPO_TEST_VST2_CONFIG}
+        vst2-live-param)
+    set_tests_properties(skyapo-pipewire-e2e-vst2-live-parameter
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "SKYAPO_TEST_VST2_PATH=$<TARGET_FILE:skyapo-test-vst2-plugin>")
+  endif()
+endif()
+
+# PipeWire's pw_context_load_module currently retains allocations from external
+# modules at process exit. Keep LeakSanitizer enabled for independent tests and
+# suppress only these integration tests; ASan/UBSan remain active throughout.
+if(SKYAPO_SANITIZERS AND SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  get_property(SKYAPO_CONFIGURED_TESTS DIRECTORY PROPERTY TESTS)
+  foreach(test_name IN LISTS SKYAPO_CONFIGURED_TESTS)
+    if(test_name MATCHES "^skyapo-pipewire-e2e-")
+      get_property(test_environment TEST ${test_name} PROPERTY ENVIRONMENT)
+      list(APPEND test_environment "ASAN_OPTIONS=detect_leaks=0")
+      set_tests_properties(${test_name} PROPERTIES
+        ENVIRONMENT "${test_environment}")
+    endif()
+  endforeach()
 endif()
 
 configure_file(packaging/skyapod.service.in
@@ -694,6 +965,11 @@ install(FILES README.md ROADMAP.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md
 install(FILES upstream/equalizerapo/License.txt
   DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
   RENAME EqualizerAPO-License.txt)
+if(SKYAPO_BUILD_UI AND Qt6Widgets_FOUND AND SKYAPO_QT_LGPL3_LICENSE)
+  install(FILES "${SKYAPO_QT_LGPL3_LICENSE}"
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+    RENAME Qt-LGPL-3.0-License.txt)
+endif()
 install(FILES upstream/clap/LICENSE
   DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
   RENAME CLAP-License.txt)
@@ -706,6 +982,11 @@ install(FILES upstream/vst3/pluginterfaces/LICENSE.txt
 install(FILES upstream/vst3/public.sdk/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
   RENAME Steinberg-VST3-public-sdk-License.txt)
+if(SKYAPO_ENABLE_FST_VST2_HOST)
+  install(FILES upstream/fst/LICENSE
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+    RENAME FST-GPL-3.0-or-later-License.txt)
+endif()
 if(SKYAPO_HAVE_MUPARSERX)
   install(FILES "${SKYAPO_MUPARSERX_ROOT}/License.txt"
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses

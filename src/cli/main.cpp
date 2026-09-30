@@ -195,6 +195,8 @@ void printUsage(std::ostream &out) {
          "  config reload                  Reload the active configuration\n"
          "  filters                        Show active filters\n"
          "  plugin list                    List discovered plugins\n"
+         "  plugin set <PLUGIN-ID> <param> <value>  Set a live plugin parameter\n"
+         "  plugin bypass <PLUGIN-ID> on|off        Set host-level bypass\n"
          "  plugin info <URI>              Show plugin metadata\n"
          "  help                           Show this help\n"
          "  --version                      Show SkyAPO and upstream versions\n";
@@ -214,12 +216,13 @@ struct ConfigDiagnostic {
   std::optional<std::string> directive;
   std::optional<std::string> command;
   std::string reason;
+  std::vector<Engine::IncludeSite> includeChain;
 };
 
 ConfigDiagnostic parseConfigDiagnostic(const std::string &message,
                                        const std::string &requestedFile) {
   ConfigDiagnostic diagnostic{requestedFile, std::nullopt, std::nullopt,
-                              std::nullopt, message};
+                              std::nullopt, message, {}};
   const std::string openError = "cannot open config: ";
   if (message.rfind(openError, 0) == 0) {
     diagnostic.file = message.substr(openError.size());
@@ -294,7 +297,16 @@ void writeConfigCheckJson(const std::string &file, Engine *engine,
     else
       std::cout << "null";
     std::cout << ",\n      \"reason\": " << jsonString(diagnostic->reason)
-              << "\n    }\n  ";
+              << ",\n      \"include_chain\": [";
+    for (size_t i = 0; i < diagnostic->includeChain.size(); ++i) {
+      const auto &site = diagnostic->includeChain[i];
+      std::cout << (i ? "," : "") << "\n        {\"file\": "
+                << jsonString(site.file.string()) << ", \"line\": "
+                << site.line << "}";
+    }
+    if (!diagnostic->includeChain.empty())
+      std::cout << "\n      ";
+    std::cout << "]\n    }\n  ";
   }
   std::cout << "]\n}\n";
 }
@@ -327,6 +339,8 @@ void writeDiagnosticsJson(const std::string &status) {
   const auto sampleRate = statusUnsigned(status, "Sample rate");
   const auto quantum = statusUnsigned(status, "Quantum");
   const auto filters = statusUnsigned(status, "Filters");
+  const auto pluginLatency =
+      statusUnsigned(status, "Plugin-reported latency sum");
   const auto blocks = statusUnsigned(status, "Processed blocks");
   const auto overruns = statusUnsigned(status, "Overruns");
   const auto activeLinks = statusValue(status, "Active capture links");
@@ -437,6 +451,14 @@ void writeDiagnosticsJson(const std::string &status) {
   writeJsonUnsigned(out, quantum);
   out << ",\n  \"filter_count\": ";
   writeJsonUnsigned(out, filters);
+  out << ",\n  \"plugin_reported_latency_sum_samples\": ";
+  writeJsonUnsigned(out, pluginLatency);
+  out << ",\n  \"plugin_reported_latency_sum_ms\": ";
+  if (pluginLatency && sampleRate && *sampleRate)
+    writeJsonNumber(out, 1000.0 * static_cast<double>(*pluginLatency) /
+                             static_cast<double>(*sampleRate));
+  else
+    out << "null";
   out << ",\n  \"filter_chain\": ";
   if (filters) {
     out << '[';
@@ -682,6 +704,34 @@ int main(int argc, char **argv) {
         return 0;
       throw std::runtime_error("no plugin host was built");
     }
+    if (cmd == "plugin" && argc == 6 && std::string(argv[2]) == "set") {
+      size_t consumed = 0;
+      float value = 0.0f;
+      try {
+        value = std::stof(argv[5], &consumed);
+      } catch (const std::exception &) {
+        throw std::runtime_error("plugin parameter value must be numeric");
+      }
+      if (consumed != std::string(argv[5]).size() || !std::isfinite(value))
+        throw std::runtime_error("plugin parameter value must be finite");
+      const auto command =
+          "PLUGIN_SET " + settings::ipc::lengthPrefixed(argv[3]) + " " +
+          settings::ipc::lengthPrefixed(argv[4]) + " " +
+          std::to_string(value);
+      std::cout << settings::daemonRequest(command);
+      return 0;
+    }
+    if (cmd == "plugin" && argc == 5 &&
+        std::string(argv[2]) == "bypass") {
+      const std::string state(argv[4]);
+      if (state != "on" && state != "off")
+        throw std::runtime_error("plugin bypass state must be 'on' or 'off'");
+      const auto command =
+          "PLUGIN_BYPASS " + settings::ipc::lengthPrefixed(argv[3]) + " " +
+          settings::ipc::lengthPrefixed(state);
+      std::cout << settings::daemonRequest(command);
+      return 0;
+    }
     if (cmd == "plugin" && argc == 4 && std::string(argv[2]) == "info") {
 #ifdef SKYAPO_HAVE_CLAP
       {
@@ -825,8 +875,11 @@ int main(int argc, char **argv) {
         engine = std::make_unique<Engine>(48000, 2, 8192);
         engine->loadConfig(file);
       } catch (const std::exception &error) {
-        writeConfigCheckJson(
-            file, nullptr, parseConfigDiagnostic(error.what(), file));
+        auto diagnostic = parseConfigDiagnostic(error.what(), file);
+        if (const auto *configError =
+                dynamic_cast<const Engine::ConfigError *>(&error))
+          diagnostic.includeChain = configError->includeSites();
+        writeConfigCheckJson(file, nullptr, diagnostic);
         return 1;
       }
       writeConfigCheckJson(file, engine.get(), std::nullopt);

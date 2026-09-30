@@ -6,6 +6,9 @@
 typedef struct gain_data {
   const clap_host_t *host;
   double gain;
+  uint32_t latency_samples;
+  uint32_t latency_cursor;
+  float latency_history[2][64];
   bool failFirstProcess;
   unsigned processCalls;
 } gain_data;
@@ -60,10 +63,22 @@ static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
         data->gain = event->value;
     }
   }
-  for (uint32_t c = 0; c < 2; ++c)
-    for (uint32_t i = 0; i < process->frames_count; ++i)
-      process->audio_outputs[0].data32[c][i] =
-          (float)(process->audio_inputs[0].data32[c][i] * data->gain);
+  if (!data->latency_samples) {
+    for (uint32_t c = 0; c < 2; ++c)
+      for (uint32_t i = 0; i < process->frames_count; ++i)
+        process->audio_outputs[0].data32[c][i] =
+            (float)(process->audio_inputs[0].data32[c][i] * data->gain);
+  } else {
+    for (uint32_t i = 0; i < process->frames_count; ++i) {
+      for (uint32_t c = 0; c < 2; ++c) {
+        process->audio_outputs[0].data32[c][i] =
+            data->latency_history[c][data->latency_cursor] * data->gain;
+        data->latency_history[c][data->latency_cursor] =
+            process->audio_inputs[0].data32[c][i];
+      }
+      data->latency_cursor = (data->latency_cursor + 1) % data->latency_samples;
+    }
+  }
   return CLAP_PROCESS_CONTINUE;
 }
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
@@ -143,8 +158,12 @@ static void CLAP_ABI param_flush(const clap_plugin_t *plugin,
   (void)output;
 }
 static const clap_plugin_params_t plugin_params = {
-    param_count, param_info, param_value, param_value_to_text,
-    param_text_to_value, param_flush};
+    param_count,         param_info,          param_value,
+    param_value_to_text, param_text_to_value, param_flush};
+static uint32_t CLAP_ABI plugin_latency_get(const clap_plugin_t *plugin) {
+  return ((const gain_data *)plugin->plugin_data)->latency_samples;
+}
+static const clap_plugin_latency_t plugin_latency = {plugin_latency_get};
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
                                              const char *id) {
   (void)plugin;
@@ -152,6 +171,8 @@ static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
     return &audio_ports;
   if (strcmp(id, CLAP_EXT_PARAMS) == 0)
     return &plugin_params;
+  if (strcmp(id, CLAP_EXT_LATENCY) == 0)
+    return &plugin_latency;
   return NULL;
 }
 
@@ -179,13 +200,27 @@ static const clap_plugin_descriptor_t error_descriptor = {
     .description = "Test-only CLAP effect that errors on its first process call",
     .features = NULL};
 
+static const clap_plugin_descriptor_t latency_descriptor = {
+    .clap_version = CLAP_VERSION,
+    .id = "org.skyapo.test.latency",
+    .name = "SkyAPO CLAP Test 64-Sample Delay",
+    .vendor = "SkyAPO tests",
+    .url = "https://example.invalid/skyapo-test-latency",
+    .manual_url = "",
+    .support_url = "",
+    .version = "1.0.0",
+    .description = "Test-only CLAP stereo effect with 64 samples of latency",
+    .features = NULL};
+
 static const clap_plugin_t *CLAP_ABI create_plugin(
     const clap_plugin_factory_t *factory, const clap_host_t *host,
     const char *plugin_id) {
   (void)factory;
   const bool failFirstProcess =
       strcmp(plugin_id, error_descriptor.id) == 0;
-  if (!failFirstProcess && strcmp(plugin_id, descriptor.id) != 0)
+  const bool reportsLatency = strcmp(plugin_id, latency_descriptor.id) == 0;
+  if (!failFirstProcess && !reportsLatency &&
+      strcmp(plugin_id, descriptor.id) != 0)
     return NULL;
   clap_plugin_t *plugin = calloc(1, sizeof(*plugin));
   gain_data *data = calloc(1, sizeof(*data));
@@ -196,8 +231,11 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
   }
   data->host = host;
   data->gain = 0.5;
+  data->latency_samples = reportsLatency ? 64 : 0;
   data->failFirstProcess = failFirstProcess;
-  plugin->desc = failFirstProcess ? &error_descriptor : &descriptor;
+  plugin->desc = failFirstProcess
+                     ? &error_descriptor
+                     : (reportsLatency ? &latency_descriptor : &descriptor);
   plugin->plugin_data = data;
   plugin->init = plugin_init;
   plugin->destroy = plugin_destroy;
@@ -213,12 +251,15 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
 }
 static uint32_t CLAP_ABI plugin_count(const clap_plugin_factory_t *factory) {
   (void)factory;
-  return 2;
+  return 3;
 }
 static const clap_plugin_descriptor_t *CLAP_ABI plugin_descriptor(
     const clap_plugin_factory_t *factory, uint32_t index) {
   (void)factory;
-  return index == 0 ? &descriptor : index == 1 ? &error_descriptor : NULL;
+  return index == 0   ? &descriptor
+         : index == 1 ? &error_descriptor
+         : index == 2 ? &latency_descriptor
+                      : NULL;
 }
 static const clap_plugin_factory_t factory = {plugin_count, plugin_descriptor,
                                                create_plugin};

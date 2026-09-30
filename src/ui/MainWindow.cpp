@@ -1,4 +1,7 @@
 #include "MainWindow.h"
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+#include "ResponseAnalysis.h"
+#endif
 #include "ChannelCopyEditor.h"
 #include "ConvolutionEditor.h"
 #include "IncludeEditor.h"
@@ -17,7 +20,9 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QAction>
 #include <QDir>
+#include <QDialog>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -25,14 +30,26 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QProcess>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPointer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSaveFile>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QTemporaryFile>
 #include <QStandardPaths>
+#include <QSettings>
 #include <QTimer>
+#include <QThread>
+#include <algorithm>
 #include <QVBoxLayout>
 #include <memory>
 #include <utility>
@@ -43,10 +60,129 @@ QString defaultCliProgram() {
   return QFileInfo::exists(sibling) ? sibling : QStringLiteral("skyapo");
 }
 
+QString runtimeStatusText(int result, const QByteArray &output,
+                          const QByteArray &error) {
+  const QString details = QString::fromUtf8(output).trimmed();
+  if (result != 0) {
+    const QString reason = QString::fromUtf8(error).trimmed();
+    return QObject::tr("Daemon offline or unresponsive") +
+           (reason.isEmpty() ? QString{} : QStringLiteral("\n") + reason);
+  }
+
+  QString state;
+  for (const auto &line : details.split(QLatin1Char('\n'))) {
+    if (line.startsWith(QStringLiteral("Daemon: "))) {
+      state = line.mid(8).trimmed().toLower();
+      break;
+    }
+  }
+
+  QString summary;
+  if (state == QStringLiteral("streaming")) {
+    summary = QObject::tr("Streaming — audio processing active");
+  } else if (state == QStringLiteral("connecting") ||
+             state == QStringLiteral("unconnected")) {
+    summary = QObject::tr("Waiting for PipeWire (filter state: %1)")
+                  .arg(state);
+  } else if (state == QStringLiteral("paused")) {
+    summary = QObject::tr("PipeWire connected but paused (not streaming)");
+  } else if (state == QStringLiteral("error")) {
+    summary = QObject::tr(
+        "PipeWire reported an error (recovery is not confirmed)");
+  } else if (state == QStringLiteral("not reachable") ||
+             state == QStringLiteral("unresponsive")) {
+    summary = QObject::tr("Daemon offline or unresponsive");
+  } else if (!state.isEmpty()) {
+    summary = QObject::tr("Daemon state unknown: %1").arg(state);
+  } else {
+    summary = QObject::tr("Daemon state unavailable");
+  }
+
+  if (!details.isEmpty())
+    summary += QStringLiteral("\n") + details;
+  else
+    summary += QObject::tr("\nRuntime details unavailable");
+  return summary;
+}
+
 } // namespace
+
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+class ResponsePlot final : public QWidget {
+public:
+  explicit ResponsePlot(QVector<ResponseCurve> curves, QWidget *parent = nullptr)
+      : QWidget(parent), curves(std::move(curves)) {
+    setMinimumSize(700, 380);
+  }
+
+protected:
+  void paintEvent(QPaintEvent *) override {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.fillRect(rect(), palette().base());
+    const QRectF plot(68, 18, width() - 88, height() - 64);
+    constexpr double minHz = 20.0, maxHz = 24000.0;
+    constexpr double minDb = -24.0, maxDb = 12.0;
+    const auto xFor = [&plot](double hz) {
+      return plot.left() + std::log(hz / minHz) / std::log(maxHz / minHz) * plot.width();
+    };
+    const auto yFor = [&plot](double db) {
+      return plot.bottom() - (db - minDb) / (maxDb - minDb) * plot.height();
+    };
+    painter.setPen(QPen(palette().mid().color(), 1));
+    for (int db = -24; db <= 12; db += 6) {
+      const double y = yFor(db);
+      painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+      painter.drawText(QRectF(4, y - 9, 56, 18), Qt::AlignRight | Qt::AlignVCenter,
+                       QStringLiteral("%1 dB").arg(db));
+    }
+    for (const double hz : {20.0, 50.0, 100.0, 200.0, 500.0, 1000.0,
+                            2000.0, 5000.0, 10000.0, 20000.0}) {
+      const double x = xFor(hz);
+      painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
+      painter.drawText(QRectF(x - 30, plot.bottom() + 5, 60, 18), Qt::AlignHCenter,
+                       hz >= 1000.0 ? QStringLiteral("%1k").arg(hz / 1000.0)
+                                    : QString::number(static_cast<int>(hz)));
+    }
+    painter.setPen(palette().text().color());
+    painter.drawText(QRectF(plot.left(), height() - 22, plot.width(), 18),
+                     Qt::AlignHCenter, tr("Frequency (Hz, logarithmic)"));
+    const QList<QColor> colors{QColor(40, 120, 220), QColor(220, 90, 65),
+                               QColor(50, 160, 100), QColor(150, 80, 180)};
+    int curveIndex = 0;
+    for (const auto &curve : curves) {
+      QPainterPath path;
+      bool started = false;
+      for (const auto &point : curve.points) {
+        if (point.x() < minHz || point.x() > maxHz)
+          continue;
+        const QPointF mapped(xFor(point.x()), yFor(std::clamp(point.y(), minDb, maxDb)));
+        if (!started) {
+          path.moveTo(mapped);
+          started = true;
+        } else {
+          path.lineTo(mapped);
+        }
+      }
+      painter.setPen(QPen(colors[curveIndex % colors.size()], 2));
+      painter.drawPath(path);
+      painter.drawText(QPointF(plot.left() + curveIndex * 110, plot.top() + 14),
+                       curve.channel);
+      ++curveIndex;
+    }
+  }
+
+private:
+  QVector<ResponseCurve> curves;
+};
+#endif
 
 MainWindow::MainWindow(QString path, QString cliExecutable)
     : cliExecutable(std::move(cliExecutable)) {
+  Q_INIT_RESOURCE(skyapo_editor);
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  Q_INIT_RESOURCE(skyapo_graphiceq);
+#endif
   setWindowTitle(tr("Equalizer APO Configuration Editor — SkyAPO"));
   resize(1080, 760);
 
@@ -54,23 +190,36 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   auto *outer = new QVBoxLayout(root);
   auto *toolbar = new QHBoxLayout;
   pathEdit = new QLineEdit(root);
+  pathEdit->setObjectName(QStringLiteral("configPath"));
   pathEdit->setReadOnly(true);
   auto *openButton = new QPushButton(tr("Open…"), root);
   auto *saveButton = new QPushButton(tr("Save"), root);
   auto *checkButton = new QPushButton(tr("Save & Check"), root);
   auto *reloadButton = new QPushButton(tr("Save & Reload"), root);
   auto *addButton = new QPushButton(tr("Add filter"), root);
+  responseButton = new QPushButton(tr("Analyze response"), root);
+  responseButton->setObjectName(QStringLiteral("analyzeResponse"));
+#ifndef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  responseButton->setEnabled(false);
+  responseButton->setToolTip(tr("Requires FFTW3f support at build time"));
+#endif
   toolbar->addWidget(pathEdit, 1);
   toolbar->addWidget(openButton);
   toolbar->addWidget(saveButton);
   toolbar->addWidget(checkButton);
   toolbar->addWidget(reloadButton);
   toolbar->addWidget(addButton);
+  toolbar->addWidget(responseButton);
   outer->addLayout(toolbar);
 
   auto *deviceRow = new QHBoxLayout;
   deviceCombo = new QComboBox(root);
   deviceCombo->setMinimumWidth(380);
+  deviceCombo->setAccessibleName(tr("Selected PipeWire capture device"));
+  deviceCombo->setToolTip(
+      tr("The selected device is stored by its stable PipeWire node name. "
+         "Enumerated channel count and sample rate appear when available; "
+         "the negotiated runtime format is shown in daemon status."));
   auto *refreshButton = new QPushButton(tr("Refresh devices"), root);
   auto *startButton = new QPushButton(tr("Start daemon"), root);
   auto *stopButton = new QPushButton(tr("Stop daemon"), root);
@@ -121,9 +270,85 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   scroll->setWidget(rowTable);
   outer->addWidget(scroll, 1);
   statusLabel = new QLabel(tr("Checking daemon…"), root);
+  statusLabel->setObjectName(QStringLiteral("daemonStatus"));
+  statusLabel->setAccessibleName(tr("PipeWire and SkyAPO runtime status"));
+  statusLabel->setTextFormat(Qt::PlainText);
+  statusLabel->setWordWrap(true);
   statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
   outer->addWidget(statusLabel);
+  validationLabel = new QLabel(tr("Configuration not checked"), root);
+  validationLabel->setObjectName(QStringLiteral("liveConfigValidation"));
+  validationLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  auto *validationRow = new QHBoxLayout;
+  validationRow->addWidget(validationLabel, 1);
+  diagnosticSourceButton = new QPushButton(tr("Open error location"), root);
+  diagnosticSourceButton->setObjectName(QStringLiteral("openDiagnosticSource"));
+  diagnosticSourceButton->hide();
+  validationRow->addWidget(diagnosticSourceButton);
+  outer->addLayout(validationRow);
+  connect(diagnosticSourceButton, &QPushButton::clicked, this,
+          &MainWindow::openDiagnosticSource);
+  auto *fileMenu = menuBar()->addMenu(tr("File"));
+  recentFilesMenu = fileMenu->addMenu(tr("Open Recent"));
+  recentFilesMenu->setObjectName(QStringLiteral("recentFilesMenu"));
+  refreshRecentFilesMenu();
+  auto *toolsMenu = menuBar()->addMenu(tr("Tools"));
+  auto *pluginCatalogAction =
+      toolsMenu->addAction(tr("Browse installed plugins…"));
+  pluginCatalogAction->setObjectName(QStringLiteral("browsePlugins"));
+  connect(pluginCatalogAction, &QAction::triggered, this,
+          [this, pluginCatalogAction] {
+            if (pluginRequestPending)
+              return;
+            pluginRequestPending = true;
+            pluginCatalogAction->setEnabled(false);
+            runCli({"plugin", "list"},
+                   [this, pluginCatalogAction](int result, QByteArray output,
+                                               QByteArray error) {
+                     pluginRequestPending = false;
+                     pluginCatalogAction->setEnabled(true);
+                     if (result != 0) {
+                       QMessageBox::warning(
+                           this, tr("Plugin catalog"),
+                           QString::fromUtf8(error.isEmpty() ? output : error));
+                       return;
+                     }
+                     auto *dialog = new QDialog(this);
+                     dialog->setAttribute(Qt::WA_DeleteOnClose);
+                     dialog->setWindowTitle(tr("Installed plugins"));
+                     auto *layout = new QVBoxLayout(dialog);
+                     auto *catalog = new QPlainTextEdit(dialog);
+                     catalog->setObjectName(QStringLiteral("pluginCatalog"));
+                     catalog->setReadOnly(true);
+                     catalog->setLineWrapMode(QPlainTextEdit::NoWrap);
+                     catalog->setPlainText(QString::fromUtf8(output));
+                     layout->addWidget(catalog);
+                     auto *close = new QPushButton(tr("Close"), dialog);
+                     connect(close, &QPushButton::clicked, dialog,
+                             &QDialog::accept);
+                     layout->addWidget(close, 0, Qt::AlignRight);
+                     dialog->resize(760, 480);
+                     dialog->show();
+                   });
+          });
+  auto *helpMenu = menuBar()->addMenu(tr("Help"));
+  auto *aboutAction = helpMenu->addAction(tr("About SkyAPO"));
+  aboutAction->setObjectName(QStringLiteral("aboutSkyAPO"));
+  connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
   setCentralWidget(root);
+  QSettings settings;
+  const QByteArray savedGeometry = settings.value(QStringLiteral("ui/geometry")).toByteArray();
+  if (!savedGeometry.isEmpty())
+    restoreGeometry(savedGeometry);
+  const QByteArray savedState = settings.value(QStringLiteral("ui/state")).toByteArray();
+  if (!savedState.isEmpty())
+    restoreState(savedState);
+
+  validationTimer = new QTimer(this);
+  validationTimer->setSingleShot(true);
+  validationTimer->setInterval(350);
+  connect(validationTimer, &QTimer::timeout, this,
+          &MainWindow::validateLiveConfig);
 
   connect(openButton, &QPushButton::clicked, this, [this] {
     if (modified &&
@@ -132,8 +357,12 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
             tr("Discard unsaved edits and open another configuration?")) !=
             QMessageBox::Yes)
       return;
+    QSettings settings;
+    const QString initialDirectory = configPath.isEmpty()
+        ? settings.value(QStringLiteral("ui/lastDirectory")).toString()
+        : QFileInfo(configPath).absolutePath();
     const auto selected = QFileDialog::getOpenFileName(
-        this, tr("Open configuration"), configPath,
+        this, tr("Open configuration"), initialDirectory,
         tr("Configuration files (config.txt *.txt);;All files (*)"));
     if (!selected.isEmpty())
       openConfig(selected);
@@ -148,6 +377,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
             menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height()))))
       addFilter(action->data().value<FilterTemplate>().getLine());
   });
+  connect(responseButton, &QPushButton::clicked, this,
+          &MainWindow::analyzeResponse);
   connect(refreshButton, &QPushButton::clicked, this,
           &MainWindow::refreshDevices);
   connect(deviceCombo, qOverload<int>(&QComboBox::activated), this,
@@ -191,6 +422,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
 }
 
 MainWindow::~MainWindow() {
+  if (responseThread && responseThread->isRunning())
+    responseThread->wait();
   const auto processes = findChildren<QProcess *>();
   for (auto *process : processes) {
     QObject::disconnect(process, nullptr, this, nullptr);
@@ -199,8 +432,72 @@ MainWindow::~MainWindow() {
   }
 }
 
+void MainWindow::analyzeResponse() {
+#ifndef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  return;
+#else
+  if (configPath.isEmpty())
+    return;
+  const QString directory = QFileInfo(configPath).absolutePath();
+  auto snapshot = std::make_shared<QTemporaryFile>(
+      directory + QStringLiteral("/.skyapo-response-XXXXXX"));
+  const QByteArray contents = document.serialize();
+  if (!snapshot->open() || snapshot->write(contents) != contents.size() ||
+      !snapshot->flush()) {
+    QMessageBox::warning(this, tr("Response analysis"),
+                         tr("Could not create a config snapshot: %1")
+                             .arg(snapshot->errorString()));
+    return;
+  }
+  const QString snapshotPath = QFileInfo(snapshot->fileName()).absoluteFilePath();
+  snapshot->close();
+  responseButton->setEnabled(false);
+  responseButton->setText(tr("Analyzing…"));
+  QPointer<MainWindow> self(this);
+  auto *worker = QThread::create([self, snapshot, snapshotPath] {
+    auto result = analyzeConfigResponse(snapshotPath);
+    if (!self)
+      return;
+    QMetaObject::invokeMethod(
+        self, [self, snapshot, result = std::move(result)]() mutable {
+          Q_UNUSED(snapshot);
+          if (!self)
+            return;
+          self->responseButton->setEnabled(true);
+          self->responseButton->setText(self->tr("Analyze response"));
+          if (!result.error.isEmpty()) {
+            QMessageBox::warning(self, self->tr("Response analysis"),
+                                 result.error);
+            return;
+          }
+          QDialog dialog(self);
+          dialog.setWindowTitle(self->tr("Measured filter response"));
+          auto *layout = new QVBoxLayout(&dialog);
+          layout->addWidget(new QLabel(
+              self->tr("Actual Engine impulse response · 48 kHz stereo · 16,384 samples · all input/output channel paths"),
+              &dialog));
+          layout->addWidget(new ResponsePlot(std::move(result.curves), &dialog));
+          auto *close = new QPushButton(self->tr("Close"), &dialog);
+          QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+          layout->addWidget(close, 0, Qt::AlignRight);
+          dialog.resize(820, 500);
+          dialog.exec();
+        }, Qt::QueuedConnection);
+  });
+  responseThread = worker;
+  worker->setParent(this);
+  connect(worker, &QThread::finished, this, [this, worker] {
+    if (responseThread == worker)
+      responseThread = nullptr;
+    worker->deleteLater();
+  });
+  worker->start();
+#endif
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
   if (!modified) {
+    saveWindowPreferences();
     event->accept();
     return;
   }
@@ -214,8 +511,65 @@ void MainWindow::closeEvent(QCloseEvent *event) {
   } else if (choice == QMessageBox::Save && !saveConfig()) {
     event->ignore();
   } else {
+    saveWindowPreferences();
     event->accept();
   }
+}
+
+void MainWindow::saveWindowPreferences() {
+  QSettings settings;
+  settings.setValue(QStringLiteral("ui/geometry"), saveGeometry());
+  settings.setValue(QStringLiteral("ui/state"), saveState());
+  settings.setValue(QStringLiteral("ui/lastDirectory"),
+                    configPath.isEmpty() ? QString() : QFileInfo(configPath).absolutePath());
+}
+
+void MainWindow::rememberConfig(const QString &path) {
+  if (path.isEmpty())
+    return;
+  QSettings settings;
+  QStringList files = settings.value(QStringLiteral("ui/recentFiles")).toStringList();
+  const QString absolutePath = QFileInfo(path).absoluteFilePath();
+  files.removeAll(absolutePath);
+  files.prepend(absolutePath);
+  while (files.size() > 10)
+    files.removeLast();
+  settings.setValue(QStringLiteral("ui/recentFiles"), files);
+  refreshRecentFilesMenu();
+}
+
+void MainWindow::refreshRecentFilesMenu() {
+  if (!recentFilesMenu)
+    return;
+  recentFilesMenu->clear();
+  QSettings settings;
+  const QStringList files = settings.value(QStringLiteral("ui/recentFiles")).toStringList();
+  int count = 0;
+  for (const auto &path : files) {
+    if (!QFileInfo::exists(path))
+      continue;
+    auto *action = recentFilesMenu->addAction(QFileInfo(path).fileName());
+    action->setToolTip(path);
+    action->setData(path);
+    connect(action, &QAction::triggered, this, &MainWindow::openRecentFile);
+    if (++count == 10)
+      break;
+  }
+  if (count == 0) {
+    auto *empty = recentFilesMenu->addAction(tr("No recent configurations"));
+    empty->setEnabled(false);
+  }
+}
+
+void MainWindow::openRecentFile() {
+  auto *action = qobject_cast<QAction *>(sender());
+  if (!action)
+    return;
+  if (modified &&
+      QMessageBox::question(this, tr("Unsaved changes"),
+                            tr("Discard unsaved edits and open another configuration?")) != QMessageBox::Yes)
+    return;
+  openConfig(action->data().toString());
 }
 
 QString MainWindow::defaultConfigPath() const {
@@ -234,11 +588,16 @@ void MainWindow::runCli(const QStringList &arguments,
   };
   auto state = std::make_shared<CompletionState>();
   state->callback = std::move(completion);
-  const auto finish = [process, state](int result, QByteArray output,
+  auto *timeout = new QTimer(process);
+  timeout->setObjectName(QStringLiteral("cliTimeout"));
+  timeout->setSingleShot(true);
+  constexpr int cliTimeoutMilliseconds = 30000;
+  const auto finish = [process, timeout, state](int result, QByteArray output,
                                        QByteArray error) {
     if (state->delivered)
       return;
     state->delivered = true;
+    timeout->stop();
     process->deleteLater();
     if (state->callback)
       state->callback(result, std::move(output), std::move(error));
@@ -256,9 +615,20 @@ void MainWindow::runCli(const QStringList &arguments,
               finish(-1, process->readAllStandardOutput(),
                      process->errorString().toUtf8());
           });
+  connect(timeout, &QTimer::timeout, this, [process, finish, arguments] {
+    const QString command = arguments.join(QLatin1Char(' '));
+    const QByteArray detail =
+        tr("SkyAPO command timed out after %1 seconds: %2")
+            .arg(cliTimeoutMilliseconds / 1000)
+            .arg(command)
+            .toUtf8();
+    process->kill();
+    finish(-1, process->readAllStandardOutput(), detail);
+  });
   process->start(this->cliExecutable.isEmpty() ? defaultCliProgram()
                                                : this->cliExecutable,
                  arguments);
+  timeout->start(cliTimeoutMilliseconds);
 }
 
 void MainWindow::openConfig(const QString &path) {
@@ -268,14 +638,19 @@ void MainWindow::openConfig(const QString &path) {
     return;
   }
   configPath = QFileInfo(path).absoluteFilePath();
+  rememberConfig(configPath);
   document.load(file.readAll());
   modified = false;
+  ++configRevision;
   pathEdit->setText(configPath);
   rebuildRows();
   updateTitle();
+  validationLabel->setText(tr("Checking configuration…"));
+  scheduleLiveValidation();
 }
 
 void MainWindow::rebuildRows() {
+  clearRowDiagnostics();
   rowTable->clearRows();
   rowItems.clear();
 
@@ -429,7 +804,182 @@ void MainWindow::addFilter(const QString &line) {
 
 void MainWindow::markModified() {
   modified = true;
+  clearRowDiagnostics();
+  ++configRevision;
   updateTitle();
+  validationLabel->setText(tr("Checking unsaved configuration edits…"));
+  scheduleLiveValidation();
+}
+
+void MainWindow::scheduleLiveValidation() {
+  if (validationTimer)
+    validationTimer->start();
+}
+
+void MainWindow::clearRowDiagnostics() {
+  diagnosticSourcePath.clear();
+  diagnosticSourceLine = 0;
+  if (diagnosticSourceButton)
+    diagnosticSourceButton->hide();
+  for (const auto &item : rowItems) {
+    if (!item || !item->row)
+      continue;
+    item->row->setProperty("skyapoValidationError", false);
+    item->row->setToolTip({});
+    item->row->setAccessibleDescription({});
+    if (auto *number = item->row->findChild<QLabel *>("labelNumber")) {
+      number->setStyleSheet({});
+      number->setToolTip({});
+    }
+  }
+}
+
+void MainWindow::openDiagnosticSource() {
+  if (diagnosticSourcePath.isEmpty())
+    return;
+  auto *window = new MainWindow(diagnosticSourcePath, cliExecutable);
+  window->setAttribute(Qt::WA_DeleteOnClose);
+  window->show();
+  const int line = diagnosticSourceLine;
+  QTimer::singleShot(0, window, [window, line] {
+    if (line <= 0 || !window->rowTable)
+      return;
+    auto *item = window->rowTable->itemAt(line - 1);
+    if (!item)
+      return;
+    window->rowTable->setSelection(item);
+    if (auto *scroll = window->findChild<QScrollArea *>())
+      scroll->ensureWidgetVisible(item->row);
+  });
+}
+
+void MainWindow::showAbout() {
+  QMessageBox::about(
+      this, tr("About SkyAPO"),
+      tr("SkyAPO — Linux audio processing built around Equalizer APO.\n\n"
+         "SkyAPO and the reused Equalizer APO components are licensed under "
+         "GNU GPL-2.0-or-later.\n"
+         "This application uses Qt %1 Widgets through dynamic system-library "
+         "linking under LGPL-3.0. Qt license text and third-party notices are "
+         "included with the installed documentation.")
+          .arg(QString::fromLatin1(qVersion())));
+}
+
+void MainWindow::setRowDiagnostic(int index, const QString &diagnostic) {
+  if (index < 0 || static_cast<size_t>(index) >= rowItems.size())
+    return;
+  const auto &item = rowItems[static_cast<size_t>(index)];
+  if (!item || !item->row)
+    return;
+  item->row->setProperty("skyapoValidationError", true);
+  item->row->setToolTip(diagnostic);
+  item->row->setAccessibleDescription(diagnostic);
+  if (auto *number = item->row->findChild<QLabel *>("labelNumber")) {
+    number->setStyleSheet(QStringLiteral("color: #c62828; font-weight: bold"));
+    number->setToolTip(diagnostic);
+  }
+}
+
+void MainWindow::validateLiveConfig() {
+  if (configPath.isEmpty())
+    return;
+
+  const QString directory = QFileInfo(configPath).absolutePath();
+  auto snapshot = std::make_shared<QTemporaryFile>(
+      directory + QStringLiteral("/.skyapo-validation-XXXXXX"));
+  snapshot->setAutoRemove(true);
+  const QByteArray contents = document.serialize();
+  if (!snapshot->open() || snapshot->write(contents) != contents.size() ||
+      !snapshot->flush()) {
+    validationLabel->setText(
+        tr("Could not create a temporary config snapshot: %1")
+            .arg(snapshot->errorString()));
+    return;
+  }
+  const QString snapshotPath =
+      QFileInfo(snapshot->fileName()).absoluteFilePath();
+  snapshot->close();
+  const quint64 revision = configRevision;
+  runCli(
+      {"config", "check", "--json", snapshotPath},
+      [this, revision, snapshotPath, snapshot](int result, QByteArray output,
+                                               QByteArray error) {
+        Q_UNUSED(snapshot);
+        if (revision != configRevision)
+          return;
+
+        QJsonParseError parseError;
+        const auto json = QJsonDocument::fromJson(output, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !json.isObject()) {
+          const QString detail =
+              QString::fromUtf8(error.isEmpty() ? output : error).trimmed();
+          validationLabel->setText(
+              tr("Config validation failed: %1")
+                  .arg(detail.isEmpty() ? tr("invalid response") : detail));
+          return;
+        }
+
+        clearRowDiagnostics();
+        const QJsonObject report = json.object();
+        if (result == 0 && report.value(QStringLiteral("valid")).toBool()) {
+          validationLabel->setText(
+              tr("Valid config — %1 filters%2")
+                  .arg(report.value(QStringLiteral("filter_count")).toInt())
+                  .arg(modified ? tr(" (unsaved edits)") : QString{}));
+          return;
+        }
+
+        const QJsonArray diagnostics =
+            report.value(QStringLiteral("diagnostics")).toArray();
+        if (diagnostics.isEmpty()) {
+          validationLabel->setText(tr("Configuration is invalid"));
+          return;
+        }
+        const QJsonObject diagnostic = diagnostics.first().toObject();
+        QString source = diagnostic.value(QStringLiteral("file")).toString();
+        const QString actualSource = source;
+        const int line = diagnostic.value(QStringLiteral("line")).toInt();
+        const QJsonArray includeChain = diagnostic
+                                            .value(QStringLiteral("include_chain"))
+                                            .toArray();
+        QString rootIncludeFile;
+        int rootIncludeLine = 0;
+        if (!includeChain.isEmpty()) {
+          const QJsonObject rootSite = includeChain.first().toObject();
+          rootIncludeFile = rootSite.value(QStringLiteral("file")).toString();
+          rootIncludeLine = rootSite.value(QStringLiteral("line")).toInt();
+        }
+        if (source.isEmpty() ||
+            QFileInfo(source).absoluteFilePath() == snapshotPath)
+          source = configPath;
+        const QString location =
+            line > 0 ? QStringLiteral("%1:%2").arg(source).arg(line) : source;
+        const QString reason =
+            diagnostic.value(QStringLiteral("reason")).toString();
+        const bool includeFromSnapshot =
+            !rootIncludeFile.isEmpty() && rootIncludeLine > 0 &&
+            QFileInfo(rootIncludeFile).absoluteFilePath() ==
+                QFileInfo(snapshotPath).absoluteFilePath();
+        if (includeFromSnapshot) {
+          const QString detail = tr("Included file error — %1: %2")
+                                     .arg(location,
+                                          reason.isEmpty()
+                                              ? tr("unknown error")
+                                              : reason);
+          setRowDiagnostic(rootIncludeLine - 1, detail);
+          diagnosticSourcePath = actualSource;
+          diagnosticSourceLine = line;
+          diagnosticSourceButton->show();
+        } else if (QFileInfo(source).absoluteFilePath() ==
+                   QFileInfo(configPath).absoluteFilePath()) {
+          setRowDiagnostic(line - 1,
+                           reason.isEmpty() ? tr("Invalid configuration") : reason);
+        }
+        validationLabel->setText(tr("Invalid config — %1: %2")
+                                     .arg(location, reason.isEmpty()
+                                                        ? tr("unknown error")
+                                                        : reason));
+      });
 }
 
 void MainWindow::updateTitle() {
@@ -484,10 +1034,9 @@ void MainWindow::refreshStatus() {
   statusRequestPending = true;
   runCli({"status"}, [this](int result, QByteArray output, QByteArray error) {
     statusRequestPending = false;
-    statusLabel->setText(
-        result == 0
-            ? QString::fromUtf8(output).trimmed()
-            : tr("Daemon query failed: %1").arg(QString::fromUtf8(error)));
+    const QString status = runtimeStatusText(result, output, error);
+    statusLabel->setText(status);
+    statusLabel->setAccessibleDescription(status);
   });
 }
 

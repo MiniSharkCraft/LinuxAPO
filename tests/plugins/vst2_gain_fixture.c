@@ -8,6 +8,11 @@ static AEffect fixture;
 static float gain = 0.5f;
 static int reported_sample_rate;
 static int reported_block_size;
+#ifdef SKYAPO_VST2_FIXTURE_MONO
+#define FIXTURE_CHANNELS 1
+#else
+#define FIXTURE_CHANNELS 2
+#endif
 
 static t_fstPtrInt dispatch(AEffect *effect, int opcode, int index,
                             t_fstPtrInt value, void *pointer, float opt) {
@@ -49,7 +54,7 @@ static void process_replacing(AEffect *effect, float **input, float **output,
   int channel;
   int frame;
   (void)effect;
-  for (channel = 0; channel < 2; ++channel)
+  for (channel = 0; channel < effect->numOutputs; ++channel)
     for (frame = 0; frame < frames; ++frame)
       output[channel][frame] = input[channel][frame] * gain;
 }
@@ -61,8 +66,8 @@ AEffect *VSTPluginMain(audioMasterCallback callback) {
   fixture.setParameter = set_parameter;
   fixture.getParameter = get_parameter;
   fixture.numParams = 1;
-  fixture.numInputs = 2;
-  fixture.numOutputs = 2;
+  fixture.numInputs = FIXTURE_CHANNELS;
+  fixture.numOutputs = FIXTURE_CHANNELS;
   fixture.flags = effFlagsCanReplacing;
   fixture.processReplacing = process_replacing;
   if (callback) {

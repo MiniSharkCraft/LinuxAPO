@@ -46,12 +46,39 @@ int main() {
       return 1;
     }
   }
+  const auto pluginCommand =
+      "PLUGIN_SET " + settings::ipc::lengthPrefixed("org.example/gain") +
+      " " + settings::ipc::lengthPrefixed("Gain dB") + " 0.75";
+  const auto pluginFrame = settings::ipc::requestFrame(pluginCommand);
+  const auto pluginRequest = settings::ipc::decodeRequest(pluginFrame);
+  if (pluginRequest.command != Command::SetPluginParameter ||
+      pluginRequest.pluginId != "org.example/gain" ||
+      pluginRequest.parameter != "Gain dB" || pluginRequest.value != 0.75f) {
+    std::cerr << "live plugin parameter IPC request did not round-trip\n";
+    return 1;
+  }
+  const auto bypassRequest = settings::ipc::decodeRequest(
+      settings::ipc::requestFrame(
+          "PLUGIN_BYPASS " + settings::ipc::lengthPrefixed("org.example/gain") +
+          " " + settings::ipc::lengthPrefixed("on")));
+  if (bypassRequest.command != Command::SetPluginBypass ||
+      bypassRequest.pluginId != "org.example/gain" ||
+      !bypassRequest.bypassed) {
+    std::cerr << "plugin bypass IPC request did not round-trip\n";
+    return 1;
+  }
   if (!reject("STATUS\n", "protocol version") ||
       !reject("SKYAPO/2 STATUS\n", "protocol version") ||
       !reject("", "malformed") ||
       !reject("SKYAPO/1 STATUS", "malformed") ||
       !reject("SKYAPO/1 STATUS\nSTOP\n", "malformed") ||
-      !reject("SKYAPO/1 DELETE\n", "unsupported daemon command"))
+      !reject("SKYAPO/1 DELETE\n", "unsupported daemon command") ||
+      !reject("SKYAPO/1 PLUGIN_SET 3:abc 1:7 nan\n", "parameter value") ||
+      !reject("SKYAPO/1 PLUGIN_SET 5:short 1:7 0.1x\n", "parameter value") ||
+      !reject("SKYAPO/1 PLUGIN_SET 5:short 9:gain 0.5\n", "malformed"))
+    return 1;
+  if (!reject("SKYAPO/1 PLUGIN_BYPASS 3:abc 2:no\n", "must be on or off") ||
+      !reject("SKYAPO/1 PLUGIN_BYPASS 3:abc 2:on extra\n", "malformed"))
     return 1;
 
   const std::string payload("status\nnode\0tail", 16);

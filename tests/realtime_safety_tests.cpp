@@ -94,6 +94,10 @@ int main() {
     plugin.loadConfig(pluginPath);
     std::vector<float> audio(2 * 8192);
     for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      plugin.setPluginParameter("https://skyapo.example/plugins/test-gain",
+                                "gain", iteration % 2 == 0 ? 0.25f : 0.75f);
+      plugin.setPluginBypass("https://skyapo.example/plugins/test-gain",
+                             iteration % 2 == 0);
       const unsigned frames = (iteration * 59) % 8192 + 1;
       for (unsigned i = 0; i < frames * 2; ++i)
         audio[i] = .1f * std::sin(float(i + iteration));
@@ -120,6 +124,7 @@ int main() {
     plugin.loadConfig(pluginPath);
     std::vector<float> audio(2 * 8192);
     for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      plugin.setPluginBypass("org.skyapo.test.gain", iteration % 2 == 0);
       const unsigned frames = (iteration * 61) % 8192 + 1;
       for (unsigned i = 0; i < frames * 2; ++i)
         audio[i] = .1f * std::sin(float(i + iteration));
@@ -146,6 +151,12 @@ int main() {
     plugin.loadConfig(pluginPath);
     std::vector<float> audio(2 * 8192);
     for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      // Exercise a newly published VST3 automation point on each block.
+      plugin.setPluginParameter("534B5941504F00010000000000000001", "7",
+                                0.2f +
+                                    0.1f * static_cast<float>(iteration % 7));
+      plugin.setPluginBypass("534B5941504F00010000000000000001",
+                             iteration % 2 == 0);
       const unsigned frames = (iteration * 67) % 8192 + 1;
       for (unsigned i = 0; i < frames * 2; ++i)
         audio[i] = .1f * std::sin(float(i + iteration));
@@ -154,6 +165,57 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
+    unlink(pluginPath);
+  }
+#endif
+#ifdef SKYAPO_TEST_VST2
+  {
+    char pluginPath[] = "/tmp/skyapo-vst2-test-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 0=0.25\n";
+    }
+    Engine plugin(48000, 2, 8192, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 8192);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      plugin.setPluginParameter(SKYAPO_TEST_VST2_PATH, "Gain",
+                                iteration % 2 == 0 ? 0.25f : 0.75f);
+      plugin.setPluginBypass(SKYAPO_TEST_VST2_PATH, iteration % 2 == 0);
+      const unsigned frames = (iteration * 73) % 8192 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::sin(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+    }
+    char monoConfig[] = "/tmp/skyapo-vst2-mono-XXXXXX";
+    int monoFd = mkstemp(monoConfig);
+    if (monoFd < 0)
+      return 1;
+    close(monoFd);
+    {
+      std::ofstream f(monoConfig);
+      f << "Plugin: VST2 \"" SKYAPO_TEST_VST2_MONO_PATH "\"\n";
+    }
+    Engine monoPlugin(48000, 1, 8192, {L"C"});
+    monoPlugin.loadConfig(monoConfig);
+    std::vector<float> monoAudio(8192);
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      const unsigned frames = (iteration * 79) % 8192 + 1;
+      for (unsigned i = 0; i < frames; ++i)
+        monoAudio[i] = .1f * std::cos(float(i + iteration));
+      {
+        realtime::Scope scope;
+        monoPlugin.process(monoAudio.data(), frames);
+      }
+    }
+    unlink(monoConfig);
     unlink(pluginPath);
   }
 #endif
@@ -210,6 +272,9 @@ int main() {
 #endif
 #ifdef SKYAPO_TEST_VST3
                ", and VST3 plugin"
+#endif
+#ifdef SKYAPO_TEST_VST2
+               ", and FST-hosted VST2-compatible plugin"
 #endif
                " DSP blocks without heap allocation/freeing\n";
   return 0;

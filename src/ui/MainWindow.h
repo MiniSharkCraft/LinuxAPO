@@ -13,7 +13,10 @@ class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QMenu;
+class QPushButton;
 class QScrollArea;
+class QTimer;
+class QThread;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -35,6 +38,17 @@ private:
   void refreshStatus();
   void refreshDevices();
   void selectDevice(int index);
+  void scheduleLiveValidation();
+  void validateLiveConfig();
+  void clearRowDiagnostics();
+  void setRowDiagnostic(int index, const QString &diagnostic);
+  void openDiagnosticSource();
+  void analyzeResponse();
+  void showAbout();
+  void refreshRecentFilesMenu();
+  void openRecentFile();
+  void rememberConfig(const QString &path);
+  void saveWindowPreferences();
   void populateAddPopupMenu(QMenu *menu);
   void syncRowsToDocument();
   using CliCompletion = std::function<void(int, QByteArray, QByteArray)>;
@@ -48,10 +62,20 @@ private:
   bool modified{};
   QLineEdit *pathEdit{};
   QLabel *statusLabel{};
+  QLabel *validationLabel{};
+  QPushButton *diagnosticSourceButton{};
+  QString diagnosticSourcePath;
+  int diagnosticSourceLine{};
+  QPushButton *responseButton{};
+  QThread *responseThread{};
   QComboBox *deviceCombo{};
+  QMenu *recentFilesMenu{};
   FilterTable *rowTable{};
+  QTimer *validationTimer{};
   std::vector<std::shared_ptr<FilterTable::Item>> rowItems;
   bool statusRequestPending{};
   bool deviceRequestPending{};
   bool deviceSetPending{};
+  bool pluginRequestPending{};
+  quint64 configRevision{};
 };

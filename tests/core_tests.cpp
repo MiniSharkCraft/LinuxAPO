@@ -1,14 +1,20 @@
 #include "Engine.h"
 #include "BiQuad.h"
 #include "LoudnessVolumeProvider.h"
+#ifdef SKYAPO_TEST_CLAP
+#include "CLAPPluginHost.h"
+#include "IPluginParameterControl.h"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <thread>
 #include <sndfile.h>
 #include <unistd.h>
@@ -81,15 +87,14 @@ int main() {
       invalidNumeric.loadConfig(path);
     } catch (const std::exception &ex) {
       const std::string message = ex.what();
-      actionable = message.find(path + ":1:") != std::string::npos &&
-                   (message.find("finite float audio range") !=
-                        std::string::npos ||
-                    message.find("Nyquist") != std::string::npos ||
-                    message.find("finite and in range") !=
-                        std::string::npos);
+      actionable =
+          message.find(path + ":1:") != std::string::npos &&
+          (message.find("finite float audio range") != std::string::npos ||
+           message.find("Nyquist") != std::string::npos ||
+           message.find("finite and in range") != std::string::npos);
       if (!actionable)
-        std::cerr << "numeric range diagnostic was not actionable: "
-                  << message << '\n';
+        std::cerr << "numeric range diagnostic was not actionable: " << message
+                  << '\n';
     }
     if (!actionable) {
       std::cerr << "out-of-range DSP parameter was not diagnosed\n";
@@ -97,10 +102,9 @@ int main() {
     }
   }
 
-  if (!write(path,
-             "# Windows endpoint-volume dependent upstream filter\n"
-             "LoudnessCorrection: State 1 ReferenceLevel 0 "
-             "ReferenceOffset 0 Attenuation 1.0\n"))
+  if (!write(path, "# Windows endpoint-volume dependent upstream filter\n"
+                   "LoudnessCorrection: State 1 ReferenceLevel 0 "
+                   "ReferenceOffset 0 Attenuation 1.0\n"))
     return 1;
   bool loudnessSemanticsDiagnosed = false;
   try {
@@ -183,6 +187,23 @@ int main() {
       std::cerr << "LV2 test plugin output mismatch at " << i << '\n';
       return 1;
     }
+  plugin.setPluginBypass("https://skyapo.example/plugins/test-gain", true);
+  float lv2Bypassed[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float lv2Dry[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  plugin.process(lv2Bypassed, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(lv2Bypassed[i] - lv2Dry[i]) > 1e-6f) {
+      std::cerr << "LV2 host bypass did not preserve dry samples\n";
+      return 1;
+    }
+  plugin.setPluginBypass("https://skyapo.example/plugins/test-gain", false);
+  float lv2Reenabled[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  plugin.process(lv2Reenabled, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(lv2Reenabled[i] - pluginExpected[i]) > 1e-5f) {
+      std::cerr << "LV2 host unbypass did not resume plugin processing\n";
+      return 1;
+    }
 
   if (!write(
           path,
@@ -218,6 +239,117 @@ int main() {
   }
 #endif
 
+#ifdef SKYAPO_TEST_VST2
+  const std::string vst2Config =
+      "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 0=0.25\n";
+  if (!write(path, vst2Config))
+    return 1;
+  Engine vst2Plugin(48000, 2, 128, {L"L", L"R"});
+  vst2Plugin.loadConfig(path);
+  float vst2Samples[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float vst2Expected[8] = {.05f, -.1f,  .15f,  -.2f,
+                                 .25f, -.25f, .125f, -.125f};
+  vst2Plugin.process(vst2Samples, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst2Samples[i] - vst2Expected[i]) > 1e-6f) {
+      std::cerr << "VST2 config plugin parameter/output mismatch at " << i
+                << '\n';
+      return 1;
+    }
+  vst2Plugin.setPluginBypass(SKYAPO_TEST_VST2_PATH, true);
+  float vst2Dry[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  vst2Plugin.process(vst2Dry, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst2Dry[i] - vst2Expected[i] * 4.0f) > 1e-6f) {
+      std::cerr << "VST2 host bypass did not preserve dry samples at " << i
+                << '\n';
+      return 1;
+    }
+  vst2Plugin.setPluginBypass(SKYAPO_TEST_VST2_PATH, false);
+  float vst2Reenabled[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  vst2Plugin.process(vst2Reenabled, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst2Reenabled[i] - vst2Expected[i]) > 1e-6f) {
+      std::cerr << "VST2 plugin did not resume after host bypass at " << i
+                << '\n';
+      return 1;
+    }
+  // Multiple control writes before one process block coalesce to the latest
+  // value. Both numeric index and unique parameter-name lookup are supported.
+  vst2Plugin.setPluginParameter(SKYAPO_TEST_VST2_PATH, "0", 0.75f);
+  float vst2Live[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float vst2LiveExpected[8] = {.15f, -.3f,  .45f,  -.6f,
+                                     .75f, -.75f, .375f, -.375f};
+  vst2Plugin.process(vst2Live, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst2Live[i] - vst2LiveExpected[i]) > 1e-6f) {
+      std::cerr << "VST2 live numeric parameter update mismatch at " << i
+                << '\n';
+      return 1;
+    }
+  vst2Plugin.setPluginParameter(SKYAPO_TEST_VST2_PATH, "0", 0.5f);
+  vst2Plugin.setPluginParameter(SKYAPO_TEST_VST2_PATH, "Gain", 0.25f);
+  float vst2Latest[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float vst2LatestExpected[8] = {.05f, -.1f,  .15f,  -.2f,
+                                       .25f, -.25f, .125f, -.125f};
+  vst2Plugin.process(vst2Latest, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst2Latest[i] - vst2LatestExpected[i]) > 1e-6f) {
+      std::cerr << "VST2 latest live parameter update mismatch at " << i
+                << '\n';
+      return 1;
+    }
+  for (const auto &invalid :
+       {std::pair<const char *, float>{"missing", 0.5f},
+        {"0", -0.01f},
+        {"0", 1.01f},
+        {"Gain", std::numeric_limits<float>::quiet_NaN()}}) {
+    bool rejected = false;
+    try {
+      vst2Plugin.setPluginParameter(SKYAPO_TEST_VST2_PATH, invalid.first,
+                                    invalid.second);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    if (!rejected) {
+      std::cerr << "invalid VST2 live parameter was accepted: " << invalid.first
+                << '\n';
+      return 1;
+    }
+  }
+  if (!write(path, std::string("Plugin: VST2 \"") + SKYAPO_TEST_VST2_MONO_PATH +
+                       "\"\n"))
+    return 1;
+  Engine vst2Mono(48000, 1, 128, {L"C"});
+  vst2Mono.loadConfig(path);
+  float vst2MonoSamples[4] = {.2f, -.4f, .6f, -.8f};
+  vst2Mono.process(vst2MonoSamples, 4);
+  const float vst2MonoExpected[4] = {.1f, -.2f, .3f, -.4f};
+  for (unsigned i = 0; i < 4; ++i)
+    if (std::abs(vst2MonoSamples[i] - vst2MonoExpected[i]) > 1e-6f) {
+      std::cerr << "VST2 mono config processing mismatch at " << i << '\n';
+      return 1;
+    }
+  for (const auto *invalid :
+       {"Plugin: VST2 /not/a/plugin.so\n",
+        "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 1=0.25\n",
+        "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 0=1.25\n"}) {
+    if (!write(path, invalid))
+      return 1;
+    bool rejected = false;
+    try {
+      Engine invalidVst2(48000, 2, 128, {L"L", L"R"});
+      invalidVst2.loadConfig(path);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    if (!rejected) {
+      std::cerr << "invalid VST2 module/parameter was accepted\n";
+      return 1;
+    }
+  }
+#endif
+
 #ifdef SKYAPO_TEST_VST3
   const std::string vst3Uid = "534B5941504F00010000000000000001";
   if (!write(path, "Plugin: VST3 " + vst3Uid + "\n"))
@@ -232,6 +364,86 @@ int main() {
       std::cerr << "VST3 fixture default gain mismatch at " << i << '\n';
       return 1;
     }
+  const auto checkVst3GainBlock = [&](float gain, const char *context) {
+    float block[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+    vst3Plugin.process(block, 4);
+    for (unsigned i = 0; i < 8; ++i) {
+      const float expected = vst3Expected[i] * (gain / 0.5f);
+      if (std::abs(block[i] - expected) > 1e-5f) {
+        std::cerr << "VST3 " << context << " gain mismatch at " << i
+                  << ": expected " << expected << ", got " << block[i] << '\n';
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!checkVst3GainBlock(0.5f, "second-block default"))
+    return 1;
+  vst3Plugin.setPluginParameter(vst3Uid, "7", 0.75f);
+  if (!checkVst3GainBlock(0.75f, "live update") ||
+      !checkVst3GainBlock(0.75f, "persistent following-block"))
+    return 1;
+  vst3Plugin.setPluginParameter(vst3Uid, "7", 0.25f);
+  if (!checkVst3GainBlock(0.25f, "second live update"))
+    return 1;
+  vst3Plugin.setPluginBypass(vst3Uid, true);
+  float vst3Dry[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float vst3DryExpected[8] = {.2f,  -.4f,  .6f, -.8f,
+                                    1.0f, -1.0f, .5f, -.5f};
+  vst3Plugin.process(vst3Dry, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(vst3Dry[i] - vst3DryExpected[i]) > 1e-6f) {
+      std::cerr << "VST3 host bypass did not preserve dry samples\n";
+      return 1;
+    }
+  vst3Plugin.setPluginBypass(vst3Uid, false);
+  if (!checkVst3GainBlock(0.25f, "unbypassed"))
+    return 1;
+  for (const auto &invalid : {std::pair<const char *, float>{"999", 0.5f},
+                              {"bad", 0.5f},
+                              {"7", -0.01f},
+                              {"7", 1.01f},
+                              {"7", std::numeric_limits<float>::quiet_NaN()}}) {
+    bool rejected = false;
+    try {
+      vst3Plugin.setPluginParameter(vst3Uid, invalid.first, invalid.second);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    if (!rejected) {
+      std::cerr << "invalid VST3 live parameter was accepted: " << invalid.first
+                << '\n';
+      return 1;
+    }
+  }
+  if (vst3Plugin.pluginLatencySamples() != 0) {
+    std::cerr
+        << "zero-latency VST3 fixture was reported with nonzero latency\n";
+    return 1;
+  }
+  if (!write(path, "Plugin: VST3 534B5941504F00010000000000000003\n"))
+    return 1;
+  Engine vst3Latency(48000, 2, 128, {L"L", L"R"});
+  vst3Latency.loadConfig(path);
+  if (vst3Latency.pluginLatencySamples() != 64) {
+    std::cerr << "VST3-reported latency was not included in Engine snapshot\n";
+    return 1;
+  }
+  float delayInput[128]{};
+  delayInput[0] = 0.25f;
+  vst3Latency.process(delayInput, 64);
+  if (std::any_of(std::begin(delayInput), std::end(delayInput),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "VST3 latency fixture did not delay its first block\n";
+    return 1;
+  }
+  float delayedOutput[2] = {0.5f, -0.5f};
+  vst3Latency.process(delayedOutput, 1);
+  if (std::abs(delayedOutput[0] - 0.25f) > 1e-6f ||
+      std::abs(delayedOutput[1]) > 1e-6f) {
+    std::cerr << "VST3 latency fixture sample offset mismatch\n";
+    return 1;
+  }
   if (!write(path, "Plugin: VST3 " + vst3Uid + " 7=0.25\n"))
     return 1;
   Engine vst3Override(48000, 2, 128, {L"L", L"R"});
@@ -269,6 +481,10 @@ int main() {
     return 1;
   Engine clapPlugin(48000, 2, 128, {L"L", L"R"});
   clapPlugin.loadConfig(path);
+  if (clapPlugin.pluginLatencySamples() != 0) {
+    std::cerr << "zero-latency CLAP extension was not reported accurately\n";
+    return 1;
+  }
   float clapBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
   const float clapExpected[8] = {.1f, -.2f, .3f, -.4f, .5f, -.5f, .25f, -.25f};
   clapPlugin.process(clapBlock, 4);
@@ -278,12 +494,60 @@ int main() {
       return 1;
     }
 
+  if (!write(path, "Plugin: CLAP org.skyapo.test.latency\n"))
+    return 1;
+  Engine clapLatency(48000, 2, 128, {L"L", L"R"});
+  clapLatency.loadConfig(path);
+  if (clapLatency.pluginLatencySamples() != 64) {
+    std::cerr << "CLAP-reported latency was not included in Engine snapshot\n";
+    return 1;
+  }
+  float clapDelayInput[128]{};
+  clapDelayInput[0] = 0.25f;
+  clapLatency.process(clapDelayInput, 64);
+  if (std::any_of(std::begin(clapDelayInput), std::end(clapDelayInput),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "CLAP latency fixture did not delay its first block\n";
+    return 1;
+  }
+  float clapDelayedOutput[2] = {0.5f, -0.5f};
+  clapLatency.process(clapDelayedOutput, 1);
+  if (std::abs(clapDelayedOutput[0] - 0.125f) > 1e-6f ||
+      std::abs(clapDelayedOutput[1]) > 1e-6f) {
+    std::cerr << "CLAP latency fixture sample offset mismatch\n";
+    return 1;
+  }
+  if (!write(path, "Plugin: CLAP org.skyapo.test.latency\n"
+                   "Plugin: CLAP org.skyapo.test.latency\n"))
+    return 1;
+  Engine clapLatencySum(48000, 2, 128, {L"L", L"R"});
+  clapLatencySum.loadConfig(path);
+  if (clapLatencySum.pluginLatencySamples() != 128) {
+    std::cerr << "serial plugin latency snapshots were not summed\n";
+    return 1;
+  }
+  float clapSumInput[256]{};
+  clapSumInput[0] = 0.25f;
+  clapLatencySum.process(clapSumInput, 128);
+  if (std::any_of(std::begin(clapSumInput), std::end(clapSumInput),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "serial CLAP latency fixtures emitted audio too early\n";
+    return 1;
+  }
+  float clapSumOutput[2] = {0.5f, -0.5f};
+  clapLatencySum.process(clapSumOutput, 1);
+  if (std::abs(clapSumOutput[0] - 0.0625f) > 1e-6f ||
+      std::abs(clapSumOutput[1]) > 1e-6f) {
+    std::cerr << "serial CLAP latency fixture output mismatch\n";
+    return 1;
+  }
+
   if (!write(path, "Plugin: CLAP org.skyapo.test.gain Gain=0.25\n"))
     return 1;
   Engine clapOverride(48000, 2, 128, {L"L", L"R"});
   clapOverride.loadConfig(path);
   float clapOverriddenBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
-  const float overriddenExpected[8] = {.05f, -.1f, .15f, -.2f,
+  const float overriddenExpected[8] = {.05f, -.1f,  .15f,  -.2f,
                                        .25f, -.25f, .125f, -.125f};
   clapOverride.process(clapOverriddenBlock, 4);
   for (unsigned i = 0; i < 8; ++i)
@@ -291,6 +555,71 @@ int main() {
       std::cerr << "CLAP parameter override output mismatch at " << i << '\n';
       return 1;
     }
+  clapOverride.setPluginBypass("org.skyapo.test.gain", true);
+  float clapDry[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float clapDryExpected[8] = {.2f,  -.4f,  .6f, -.8f,
+                                    1.0f, -1.0f, .5f, -.5f};
+  clapOverride.process(clapDry, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(clapDry[i] - clapDryExpected[i]) > 1e-6f) {
+      std::cerr << "CLAP host bypass did not preserve dry samples\n";
+      return 1;
+    }
+  clapOverride.setPluginBypass("org.skyapo.test.gain", false);
+  float clapWetAgain[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  clapOverride.process(clapWetAgain, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(clapWetAgain[i] - overriddenExpected[i]) > 1e-5f) {
+      std::cerr << "CLAP host unbypass did not resume plugin processing\n";
+      return 1;
+    }
+
+  // Exercise the format-neutral live control API directly while the actual
+  // CLAP instance is processing. Its mailbox and event storage are allocated
+  // before this first process call.
+  CLAPPluginHost clapHost;
+  auto clapInstance = clapHost.create("org.skyapo.test.gain", 48000, 128,
+                                      {L"L", L"R"}, {{"Gain", 0.25f}});
+  auto *clapControl =
+      dynamic_cast<IPluginParameterControl *>(clapInstance.get());
+  if (!clapControl ||
+      clapControl->pluginIdentifier() != "org.skyapo.test.gain") {
+    std::cerr << "CLAP live parameter control interface is unavailable\n";
+    return 1;
+  }
+  float liveInputLeft[4] = {1, 1, 1, 1};
+  float liveInputRight[4] = {1, 1, 1, 1};
+  float liveOutputLeft[4]{};
+  float liveOutputRight[4]{};
+  float *liveInput[2] = {liveInputLeft, liveInputRight};
+  float *liveOutput[2] = {liveOutputLeft, liveOutputRight};
+  clapInstance->process(liveOutput, liveInput, 4);
+  if (std::abs(liveOutputLeft[0] - 0.25f) > 1e-6f) {
+    std::cerr << "CLAP static parameter override was not preserved\n";
+    return 1;
+  }
+  clapControl->setParameterValue("7", 0.75f);
+  std::fill(std::begin(liveOutputLeft), std::end(liveOutputLeft), 0.0f);
+  std::fill(std::begin(liveOutputRight), std::end(liveOutputRight), 0.0f);
+  clapInstance->process(liveOutput, liveInput, 4);
+  if (std::abs(liveOutputLeft[0] - 0.75f) > 1e-6f ||
+      std::abs(liveOutputRight[3] - 0.75f) > 1e-6f) {
+    std::cerr << "live CLAP parameter update did not change processed audio\n";
+    return 1;
+  }
+  for (const auto &invalid : std::vector<std::pair<std::string, float>>{
+           {"missing", 0.5f}, {"Gain", 3.0f}, {"Gain", INFINITY}}) {
+    bool rejectedLiveValue = false;
+    try {
+      clapControl->setParameterValue(invalid.first, invalid.second);
+    } catch (const std::exception &) {
+      rejectedLiveValue = true;
+    }
+    if (!rejectedLiveValue) {
+      std::cerr << "invalid live CLAP parameter update was accepted\n";
+      return 1;
+    }
+  }
   for (const auto *invalid : {
            "Plugin: CLAP org.skyapo.test.gain missing=0.25\n",
            "Plugin: CLAP org.skyapo.test.gain 7=3\n",
@@ -335,17 +664,17 @@ int main() {
     measured.loadConfig(path);
     if (measured.filterCount() != 1)
       return std::pair<double, double>{-1.0, 0.0};
-    BiQuad upstreamReference(BiQuad::PEAKING, 6.0, 1000.0, rate, 1.0,
-                             false);
+    BiQuad upstreamReference(BiQuad::PEAKING, 6.0, 1000.0, rate, 1.0, false);
     std::vector<float> tone(static_cast<size_t>(totalFrames) * 2);
     std::vector<float> referenceOutput(static_cast<size_t>(totalFrames) * 2);
     constexpr double twoPi = 6.28318530717958647692;
     for (int frame = 0; frame < totalFrames; ++frame) {
-      const float sample = static_cast<float>(
-          std::sin(twoPi * frequency * frame / rate));
+      const float sample =
+          static_cast<float>(std::sin(twoPi * frequency * frame / rate));
       tone[2 * frame] = sample;
       tone[2 * frame + 1] = sample;
-      const float expected = static_cast<float>(upstreamReference.process(sample));
+      const float expected =
+          static_cast<float>(upstreamReference.process(sample));
       referenceOutput[2 * frame] = expected;
       referenceOutput[2 * frame + 1] = expected;
     }
@@ -356,8 +685,8 @@ int main() {
           blocks[blockIndex++ % std::size(blocks)], totalFrames - frame);
       measured.process(tone.data() + 2 * frame, count);
       for (unsigned i = 0; i < count; ++i)
-        if (std::abs(tone[2 * (frame + i)] -
-                     referenceOutput[2 * (frame + i)]) > 2e-6f) {
+        if (std::abs(tone[2 * (frame + i)] - referenceOutput[2 * (frame + i)]) >
+            2e-6f) {
           std::cerr << "Engine BiQuad differs from upstream BiQuad at frame "
                     << frame + i << ", frequency " << frequency << " Hz\n";
           return std::pair<double, double>{-1.0, 0.0};
@@ -371,9 +700,8 @@ int main() {
       inputEnergy += reference * reference;
       outputEnergy += static_cast<double>(tone[2 * frame]) * tone[2 * frame];
     }
-    return std::pair<double, double>{
-        std::sqrt(outputEnergy / inputEnergy),
-        upstreamReference.gainAt(frequency, rate)};
+    return std::pair<double, double>{std::sqrt(outputEnergy / inputEnergy),
+                                     upstreamReference.gainAt(frequency, rate)};
   };
   const auto centerResponse = measureToneGain(1000.0);
   const auto remoteResponse = measureToneGain(100.0);
@@ -455,6 +783,21 @@ int main() {
     std::cerr << "upstream Copy channel swap mismatch\n";
     return 1;
   }
+  if (!write(path, "Copy: L=R R=L\nChannel: C\nPreamp: -6 dB\n"))
+    return 1;
+  Engine routed(48000, 3, 128, {L"R", L"C", L"L"});
+  routed.loadConfig(path);
+  float routedSamples[6] = {10.0f, 100.0f, 1.0f, 20.0f, 200.0f, 2.0f};
+  routed.process(routedSamples, 2);
+  const float routedExpected[6] = {1.0f, 100.0f * gain, 10.0f,
+                                   2.0f, 200.0f * gain, 20.0f};
+  for (size_t sample = 0; sample < 6; ++sample)
+    if (std::abs(routedSamples[sample] - routedExpected[sample]) > 1e-4f) {
+      std::cerr << "upstream Copy/Channel routing mismatch at sample " << sample
+                << ": got " << routedSamples[sample] << ", expected "
+                << routedExpected[sample] << '\n';
+      return 1;
+    }
   if (!write(path, "Copy: L=unknown\n"))
     return 1;
   bool badCopyRejected = false;
@@ -606,6 +949,14 @@ int main() {
     std::cerr << "nested Include did not preserve directive order/count\n";
     return 1;
   }
+  const std::vector<fs::path> expectedConfigFiles = {
+      fs::weakly_canonical(root),
+      fs::weakly_canonical(dir / "sub#dir/child # file.txt"),
+      fs::weakly_canonical(dir / "nested.txt")};
+  if (included.configFiles() != expectedConfigFiles) {
+    std::cerr << "Engine did not expose all active Include dependencies\n";
+    return 1;
+  }
   float includedSample[2] = {1, -1};
   included.process(includedSample, 1);
   if (std::abs(includedSample[0] - 1.0f) > 1e-5f ||
@@ -626,6 +977,10 @@ int main() {
   }
   if (!cycleRejected) {
     std::cerr << "Include cycle was not diagnosed\n";
+    return 1;
+  }
+  if (included.configFiles() != expectedConfigFiles) {
+    std::cerr << "failed config changed the active Include dependencies\n";
     return 1;
   }
   float retained[2] = {1, -1};
@@ -675,28 +1030,25 @@ int main() {
 
 #ifdef SKYAPO_TEST_MUPARSER
 #ifdef SKYAPO_TEST_MUPARSERX
-#define SKYAPO_TEST_CONDITIONAL_ELSEIF \
+#define SKYAPO_TEST_CONDITIONAL_ELSEIF                                         \
   "ElseIf: inputChannelCount == 2; sampleRate == 48000\n"
 #else
-#define SKYAPO_TEST_CONDITIONAL_ELSEIF \
+#define SKYAPO_TEST_CONDITIONAL_ELSEIF                                         \
   "ElseIf: inputChannelCount == 2 && sampleRate == 48000\n"
 #endif
   const auto conditional = dir / "conditional.txt";
-  if (!write(conditional,
-             "If: sampleRate < 0\n"
-             "If: invalid (\n"
-             "UnsupportedInsideFalseBranch: skipped\n"
-             "Include: missing-only-in-false-branch.txt\n"
-             "EndIf:\n"
-             SKYAPO_TEST_CONDITIONAL_ELSEIF
-             "If: 1\n"
-             "Preamp: -6 dB\n"
-             "Else:\n"
-             "UnsupportedInsideNestedElse: skipped\n"
-             "EndIf:\n"
-             "Else:\n"
-             "UnsupportedInsideElse: skipped\n"
-             "EndIf:\n"))
+  if (!write(conditional, "If: sampleRate < 0\n"
+                          "If: invalid (\n"
+                          "UnsupportedInsideFalseBranch: skipped\n"
+                          "Include: missing-only-in-false-branch.txt\n"
+                          "EndIf:\n" SKYAPO_TEST_CONDITIONAL_ELSEIF "If: 1\n"
+                          "Preamp: -6 dB\n"
+                          "Else:\n"
+                          "UnsupportedInsideNestedElse: skipped\n"
+                          "EndIf:\n"
+                          "Else:\n"
+                          "UnsupportedInsideElse: skipped\n"
+                          "EndIf:\n"))
     return 1;
   Engine conditionalEngine(48000, 2, 128);
   conditionalEngine.loadConfig(conditional.string());
@@ -710,8 +1062,7 @@ int main() {
     return 1;
   }
 
-  if (!write(conditional,
-             "If: sampleRate >>> 1\nPreamp: -6 dB\nEndIf:\n"))
+  if (!write(conditional, "If: sampleRate >>> 1\nPreamp: -6 dB\nEndIf:\n"))
     return 1;
   bool conditionErrorHasLocation = false;
   try {
