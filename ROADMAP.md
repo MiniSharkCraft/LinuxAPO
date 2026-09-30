@@ -11,6 +11,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Independent client records `SkyAPO Virtual Mic`; -6 dB numerical regression.
 - [x] Reconnect after virtual node loss; callback allocator audit.
 - [x] Show enumerated source channel count and any published sample-rate metadata in CLI and GUI device selectors; unknown rates remain explicit.
+- [x] Expose available PipeWire hardware identity properties in `skyapo device list`. Keep persisting `node.name`: the tested workstation publishes no stable serial/bus ID, and `object.serial` is only a runtime identifier.
 - [x] GUI device selector refreshes devices/status through CLI, selects by stable node name, serializes selection while requests run, and safely cancels child work when the window closes.
 - [x] Linux portability adaptation generated at build time.
 
