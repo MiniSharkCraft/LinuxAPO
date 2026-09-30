@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Strengthen actual upstream DSP tests: GraphicEQ now verifies a measured −6 dB response at its configured 1 kHz point, and Convolution is checked against a three-tap FIR reference over three blocks, including channel separation and cross-block state. Integrate the official MuParserX 3.0.1 archive with a pinned hash and BSD-2-Clause notice; production `If:` tests verify the legacy semicolon behavior.
+- Strengthen actual upstream DSP tests: GraphicEQ now verifies a measured −6 dB response at its configured 1 kHz point, and Convolution is checked against a three-tap FIR reference over three blocks, including channel separation and cross-block state. Integrate the official MuParserX 3.0.1 archive with a pinned hash and BSD-2-Clause notice; production config now shares parser state across Includes for `If:` conditions, `Eval:` assignments, and numeric inline backtick expansion, with invalid-expression rollback tests.
 - Add a tested Windows Equalizer APO → SkyAPO migration guide, an incremental clang-format CI gate, and a conservative uniform-channel gain value kept separate from effective RMS diagnostics for future LoudnessCorrection work.
 - Detect removal of an individual physical-capture link by its PipeWire global ID and recreate it on the control loop without restarting the daemon; private mono/stereo E2E tests destroy a live link, wait for recovery, and verify recorded -6 dB output.
 - Install the preserved Equalizer APO GPL text plus the pinned CLAP and VST3 MIT texts and a third-party inventory; a staged-install CTest checks the packaged notices instead of relying on the source tree alone.

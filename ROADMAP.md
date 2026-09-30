@@ -35,7 +35,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Port `FilterConfiguration` channel-map execution to Linux and preserve upstream `read/process/write` processing.
 - [x] Port `IFilterFactory` initialization/configuration/file lifecycle hooks and upstream ordered command dispatch for the supported factories.
 - [ ] Replace Windows-only `FilterEngine` configuration discovery, synchronization and watcher dependencies with narrow Linux adapters.
-- [x] Use upstream-recommended MuParserX 3.0.1 for production numeric/boolean `If:`/`ElseIf:` conditions, including semicolon sequencing; retain classic muParser as an explicit fallback when MuParserX is disabled. Inline expressions, strings, registry and regex config functions remain unsupported.
+- [x] Use upstream-recommended MuParserX 3.0.1 for production numeric/boolean `If:`/`ElseIf:` conditions, `Eval:` assignments, and numeric inline backtick expansion with one context across Includes; retain classic muParser as an explicit fallback. Registry/regex config functions and full string/matrix expression semantics remain unsupported.
 - Acceptance: SkyAPO uses upstream configuration/filter orchestration for the supported directives; parser compatibility fixtures from upstream have explicit pass/fail outcomes.
 
 ## 0.4.x — robust config lifecycle and PipeWire recovery

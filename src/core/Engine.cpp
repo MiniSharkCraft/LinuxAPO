@@ -68,6 +68,78 @@ void stripInlineComment(std::string &line) {
       escaped = false;
   }
 }
+
+#ifdef SKYAPO_HAVE_MUPARSERX
+std::wstring evaluateExpression(mup::ParserX &parser,
+                                const std::wstring &expression,
+                                const std::filesystem::path &path,
+                                unsigned line, const char *context) {
+  try {
+    parser.SetExpr(expression);
+    const mup::IValue &result = parser.Eval();
+    if (result.GetType() == 's')
+      return result.GetString();
+    if (result.GetType() == 'b')
+      return result.ToString();
+    if (!std::isfinite(result.GetFloat()))
+      throw std::runtime_error("expression result is not finite");
+    return result.ToString();
+  } catch (const mup::ParserError &e) {
+    throw std::runtime_error(path.string() + ":" + std::to_string(line) +
+                             ": invalid " + context + ": " +
+                             StringHelper::toString(e.GetMsg(), 65001));
+  } catch (const std::exception &e) {
+    throw std::runtime_error(path.string() + ":" + std::to_string(line) +
+                             ": invalid " + context + ": " + e.what());
+  }
+}
+
+std::wstring expandInlineExpressions(mup::ParserX &parser,
+                                     const std::wstring &input,
+                                     const std::filesystem::path &path,
+                                     unsigned line) {
+  std::wstring output;
+  std::wstring expression;
+  bool inExpression = false;
+  bool escaped = false;
+  for (wchar_t character : input) {
+    if (character == L'`') {
+      if (escaped) {
+        (inExpression ? expression : output) += character;
+      } else if (inExpression) {
+        output += evaluateExpression(parser, expression, path, line,
+                                     "inline expression");
+        expression.clear();
+        inExpression = false;
+      } else {
+        inExpression = true;
+      }
+      escaped = false;
+      continue;
+    }
+    if (character == L'\\') {
+      if (escaped) {
+        (inExpression ? expression : output) += character;
+        escaped = false;
+      } else {
+        escaped = true;
+      }
+      continue;
+    }
+    if (escaped) {
+      (inExpression ? expression : output) += L'\\';
+      escaped = false;
+    }
+    (inExpression ? expression : output) += character;
+  }
+  if (escaped)
+    (inExpression ? expression : output) += L'\\';
+  if (inExpression)
+    throw std::runtime_error(path.string() + ":" + std::to_string(line) +
+                             ": unterminated inline expression (missing `)");
+  return output;
+}
+#endif
 } // namespace
 
 void Engine::FilterDeleter::operator()(IFilter *filter) const {
@@ -132,6 +204,19 @@ void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
   bool stageActive = true;
+#ifdef SKYAPO_HAVE_MUPARSERX
+  mup::ParserX expressionParser(mup::pckALL_NON_COMPLEX);
+  expressionParser.EnableAutoCreateVar(true);
+  expressionParser.DefineConst(L"sampleRate",
+                               static_cast<mup::float_type>(rate));
+  expressionParser.DefineConst(L"inputChannelCount",
+                               static_cast<mup::float_type>(channelCount));
+  expressionParser.DefineConst(L"outputChannelCount",
+                               static_cast<mup::float_type>(channelCount));
+  auto *expressionParserPtr = &expressionParser;
+#else
+  mup::ParserX *expressionParserPtr = nullptr;
+#endif
   FilterEngine factoryContext(channelCount, channelCount, maxFrameCount);
   const auto addReturnedFilters =
       [&](std::vector<IFilter *> produced, const std::filesystem::path &source,
@@ -146,7 +231,7 @@ void Engine::loadConfig(const std::string &path) {
                        "configuration initialization");
   }
   parseConfigFile(std::filesystem::path(path), candidate, includeStack,
-                  stageActive);
+                  stageActive, expressionParserPtr);
   for (auto &factory : factories)
     addReturnedFilters(factory->endOfConfiguration(), path, 0,
                        "configuration finalization");
@@ -368,7 +453,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              FilterList &candidate,
                              std::vector<std::filesystem::path> &includeStack,
-                             bool &stageActive) {
+                             bool &stageActive,
+                             mup::ParserX *expressionParser) {
   std::error_code ec;
   auto absolutePath = std::filesystem::absolute(configPath, ec);
   if (ec)
@@ -415,15 +501,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                      unsigned conditionLine) -> bool {
 #ifdef SKYAPO_HAVE_MUPARSERX
     try {
-      mup::ParserX parser(mup::pckALL_NON_COMPLEX);
-      parser.EnableAutoCreateVar(true);
-      parser.DefineConst(L"sampleRate", static_cast<mup::float_type>(rate));
-      parser.DefineConst(L"inputChannelCount",
-                         static_cast<mup::float_type>(channelCount));
-      parser.DefineConst(L"outputChannelCount",
-                         static_cast<mup::float_type>(channelCount));
-      parser.SetExpr(expression);
-      const mup::IValue &value = parser.Eval();
+      expressionParser->SetExpr(expression);
+      const mup::IValue &value = expressionParser->Eval();
       if (value.GetType() == 'b')
         return value.GetBool();
       const double numeric = value.GetFloat();
@@ -544,6 +623,24 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     if (!conditionActive)
       continue;
 
+#ifdef SKYAPO_HAVE_MUPARSERX
+    command = expandInlineExpressions(*expressionParser, command,
+                                      normalizedPath, lineNo);
+    params = expandInlineExpressions(*expressionParser, params, normalizedPath,
+                                     lineNo);
+    if (command == L"Eval") {
+      (void)evaluateExpression(*expressionParser, params, normalizedPath,
+                               lineNo, "Eval expression");
+      continue;
+    }
+#else
+    if (command == L"Eval" || command.find(L'`') != std::wstring::npos ||
+        params.find(L'`') != std::wstring::npos)
+      throw std::runtime_error(
+          normalizedPath.string() + ":" + std::to_string(lineNo) +
+          ": Eval/inline expressions require MuParserX support");
+#endif
+
     if (command == L"Stage") {
       std::wistringstream stages(StringHelper::toLowerCase(params));
       std::wstring stage;
@@ -580,7 +677,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       if (included.is_relative())
         included = normalizedPath.parent_path() / included;
       bool includedStage = stageActive;
-      parseConfigFile(included, candidate, includeStack, includedStage);
+      parseConfigFile(included, candidate, includeStack, includedStage,
+                      expressionParser);
       continue;
     }
 

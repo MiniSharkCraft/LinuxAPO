@@ -749,6 +749,65 @@ int main() {
     std::cerr << "unmatched ElseIf directive was not diagnosed\n";
     return 1;
   }
+
+#ifdef SKYAPO_TEST_MUPARSERX
+  const auto expressionRoot = dir / "expression-root.txt";
+  if (!write(expressionRoot,
+             "Eval: inlineGain = -6\nInclude: expression-child.txt\n") ||
+      !write(dir / "expression-child.txt", "Preamp: `inlineGain` dB\n"))
+    return 1;
+  Engine expressionEngine(48000, 2, 128);
+  expressionEngine.loadConfig(expressionRoot.string());
+  float expressionSamples[2] = {1.0f, -1.0f};
+  expressionEngine.process(expressionSamples, 1);
+  if (expressionEngine.filterCount() != 1 ||
+      std::abs(expressionSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(expressionSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "MuParserX Eval variable did not expand through Include\n";
+    return 1;
+  }
+
+  if (!write(expressionRoot, "Preamp: `1 +` dB\n"))
+    return 1;
+  bool inlineExpressionErrorHasLocation = false;
+  try {
+    expressionEngine.loadConfig(expressionRoot.string());
+  } catch (const std::exception &ex) {
+    const auto message = std::string(ex.what());
+    inlineExpressionErrorHasLocation =
+        message.find(expressionRoot.string() + ":1:") != std::string::npos &&
+        message.find("invalid inline expression") != std::string::npos;
+  }
+  if (!inlineExpressionErrorHasLocation) {
+    std::cerr << "invalid inline expression lacked a source location\n";
+    return 1;
+  }
+  float expressionRetained[2] = {1.0f, -1.0f};
+  expressionEngine.process(expressionRetained, 1);
+  if (std::abs(expressionRetained[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(expressionRetained[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "invalid inline expression replaced the active graph\n";
+    return 1;
+  }
+#endif
+#ifndef SKYAPO_TEST_MUPARSERX
+  if (!write(conditional, "Preamp: `-6` dB\n"))
+    return 1;
+  bool fallbackExpressionDiagnosed = false;
+  try {
+    Engine fallbackExpressions(48000, 2, 128);
+    fallbackExpressions.loadConfig(conditional.string());
+  } catch (const std::exception &ex) {
+    const auto message = std::string(ex.what());
+    fallbackExpressionDiagnosed =
+        message.find(conditional.string() + ":1:") != std::string::npos &&
+        message.find("require MuParserX support") != std::string::npos;
+  }
+  if (!fallbackExpressionDiagnosed) {
+    std::cerr << "classic muParser fallback silently accepted inline syntax\n";
+    return 1;
+  }
+#endif
 #endif
 
   unlink(path.c_str());

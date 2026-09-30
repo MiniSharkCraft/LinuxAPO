@@ -8,6 +8,9 @@
 #include <vector>
 
 class FilterConfiguration;
+namespace mup {
+class ParserX;
+}
 
 class Engine {
 public:
@@ -49,7 +52,7 @@ private:
   };
   void parseConfigFile(const std::filesystem::path &path, FilterList &candidate,
                        std::vector<std::filesystem::path> &includeStack,
-                       bool &stageActive);
+                       bool &stageActive, mup::ParserX *expressionParser);
   std::vector<FilterNode> buildGraph(FilterList &candidate);
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
