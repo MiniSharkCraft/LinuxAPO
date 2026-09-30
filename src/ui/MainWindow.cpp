@@ -1052,8 +1052,8 @@ void MainWindow::refreshDevices() {
              if (reason.isEmpty())
                reason = QString::fromUtf8(output).trimmed();
              if (reason.isEmpty())
-               reason = tr("skyapo device list exited with status %1")
-                            .arg(result);
+               reason =
+                   tr("skyapo device list exited with status %1").arg(result);
              const QString message = tr("Device query failed: %1").arg(reason);
              statusLabel->setText(message);
              statusLabel->setAccessibleDescription(message);

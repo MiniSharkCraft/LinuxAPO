@@ -100,7 +100,8 @@ bool writeStatusCliFixture(const QString &path, const QString &state,
     script += "echo 'daemon control socket is unresponsive' >&2\n";
   script += "exit 0\n";
   QFile file(path);
-  return file.open(QIODevice::WriteOnly) && file.write(script) == script.size() &&
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
          file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                              QFileDevice::ExeOwner);
 }
