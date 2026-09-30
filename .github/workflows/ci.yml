@@ -81,15 +81,23 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             cmake git libsndfile pipewire fftw lilv muparser lv2 \
-            qt6-base pkgconf hicolor-icon-theme
+            qt6-base pkgconf hicolor-icon-theme wireplumber
 
       - name: Build and test Arch packages
         run: |
           useradd --create-home --shell /bin/bash builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE/packaging"
-          su builder -s /bin/bash -c 'makepkg --noconfirm --clean --check'
-          pacman -U --noconfirm ./skyapo-[0-9]*.pkg.tar.zst
-          skyapo --version
-          systemd-analyze verify /usr/lib/systemd/user/skyapod.service
-          pacman -Rns --noconfirm skyapo
+          su builder -s /bin/bash -c 'makepkg --noconfirm --check'
+          package=(./skyapo-[0-9]*.pkg.tar.zst)
+          if [[ ! -f "${package[0]}" || "${#package[@]}" -ne 1 ]]; then
+            printf 'Expected exactly one SkyAPO package archive, found %s.\n' "${#package[@]}" >&2
+            exit 1
+          fi
+          render_test="$GITHUB_WORKSPACE/packaging/src/skyapo-build/skyapo-render-tests"
+          if [[ ! -x "$render_test" ]]; then
+            printf 'Built WAV render verification harness is missing: %s\n' "$render_test" >&2
+            exit 1
+          fi
+          python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
+            --render-test-binary "$render_test" "${package[0]}"
