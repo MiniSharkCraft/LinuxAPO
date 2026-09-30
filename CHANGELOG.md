@@ -6,6 +6,7 @@
 - Added initial mono/stereo, single-audio-bus VST3 processing; manually rendered the installed LSP Filter Stereo plugin offline (192000 frames at 48 kHz; output samples changed).
 - Added a SkyAPO-authored VST3 half-gain bundle fixture; CTest measures −6.0206 dB offline and audits 1000 variable realtime processing blocks without host/DSP callback allocations.
 - Added VST3 writable parameter metadata and numeric-ID normalized config overrides; CTest validates metadata, −12.0412 dB override output, invalid ID/range rejection and allocation-free callback processing with a static override.
+- Verified the VST3 fixture through the live Built-in Audio → PipeWire → SkyAPO Virtual Mic path; an independent recording client measured 192000 frames, correlation 1 and −12.0206 dB with zero callback allocations/deallocations and overruns. Third-party VST3/yabridge realtime remains unverified.
 - Verified offline processing of a local yabridge ATKExpander VST3 wrapper in mono (192000 frames at 48 kHz; samples changed). Its stereo use was correctly rejected because the plugin exposes a mono bus.
 - Documented VST3 limits: live automation, auxiliary buses, state, latency compensation, UI and isolation remain unsupported; yabridge realtime and VST2 remain unverified.
 - Audited Steinberg's current VST2 licensing terms; documented the pre-October-2018 license requirement and kept VST2 open as an external legal blocker rather than vendoring restricted headers.

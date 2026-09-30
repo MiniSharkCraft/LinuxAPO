@@ -68,6 +68,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Honor `VST3_PATH` alongside Steinberg standard module paths and cache discovered module metadata per process.
 - [x] Discover and offline-process the local yabridge ATKExpander VST3 wrapper via the native VST3 host (192000 mono frames at 48 kHz; samples changed).
 - [x] Add a redistributable SkyAPO-authored VST3 half-gain fixture; CTest verifies −6.0206 dB offline and 1000 variable realtime DSP blocks pass the allocation audit.
+- [x] Verify the VST3 fixture in the physical-mic → PipeWire → DSP → virtual-mic graph on Built-in Audio at 48 kHz stereo/1024 quantum; an independent client recorded 192000 frames with correlation 1, ratio 0.250594 (−12.0206 dB), zero callback allocations/deallocations and zero overruns. Evidence/config: `tests/data/vst3_realtime_chain.txt`.
 - [ ] Verify third-party VST3/yabridge processing in the realtime PipeWire graph; the fixture audit does not guarantee allocations inside unrelated plugins.
 - [x] Expose VST3 normalized parameter metadata and validated numeric-ID config overrides; verify default/override audio numerically, metadata CLI, bad-ID/range rejection, and callback allocation audit.
 - [ ] Add VST3 plugin state/bypass, latency, auxiliary buses and plugin failure isolation.
