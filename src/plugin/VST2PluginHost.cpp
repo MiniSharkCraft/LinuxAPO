@@ -26,9 +26,13 @@ t_fstPtrInt audioMaster(AEffect *effect, int opcode, int, t_fstPtrInt,
     return kVstVersion;
   if (opcode == audioMasterGetCurrentProcessLevel)
     return kVstProcessLevelRealtime;
-  HostContext *context = effect
-      ? static_cast<HostContext *>(effect->user)
-      : constructingContext;
+  // A plugin is allowed to call audioMaster during VSTPluginMain before the
+  // host has received its AEffect and assigned effect->user. Prefer the
+  // current construction context in that window; afterward, use the per-effect
+  // context for concurrent plugin instances.
+  HostContext *context = constructingContext;
+  if (!context && effect)
+    context = static_cast<HostContext *>(effect->user);
   switch (opcode) {
   case audioMasterGetSampleRate:
     return context ? static_cast<t_fstPtrInt>(context->sampleRate) : 0;

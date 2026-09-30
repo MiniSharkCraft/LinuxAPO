@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <dlfcn.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,17 @@ int main(int argc, char **argv) {
     VST2PluginHost host;
     const std::vector<std::wstring> channels{L"L", L"R"};
     auto instance = host.create(argv[1], 48000.0f, 16, channels);
+    void *fixture = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    require(fixture != nullptr, "fixture telemetry module load");
+    using Query = int (*)();
+    auto sampleRate = reinterpret_cast<Query>(
+        dlsym(fixture, "vst2FixtureReportedSampleRate"));
+    auto blockSize = reinterpret_cast<Query>(
+        dlsym(fixture, "vst2FixtureReportedBlockSize"));
+    require(sampleRate && blockSize, "fixture telemetry symbols");
+    require(sampleRate() == 48000, "entry callback sample rate");
+    require(blockSize() == 16, "entry callback block size");
+    dlclose(fixture);
     require(instance->parameters().size() == 1, "parameter count");
     require(instance->parameters()[0].name == "Gain", "parameter name");
     instance->initialize(48000.0f, 16, channels);
@@ -66,7 +78,8 @@ int main(int argc, char **argv) {
               "failed plugin did not remain fail-closed");
     std::cout << "PASS: FST-only VST2-compatible fixture, " << checked
               << " varying samples/channel at ratio 0.5, parameter override "
-                 "ratio 0.25, oversize fail-closed\n";
+                 "ratio 0.25, entry callback negotiated 48000/16 before user "
+                 "assignment, oversize fail-closed\n";
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';
     return 1;

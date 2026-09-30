@@ -6,6 +6,8 @@
 
 static AEffect fixture;
 static float gain = 0.5f;
+static int reported_sample_rate;
+static int reported_block_size;
 
 static t_fstPtrInt dispatch(AEffect *effect, int opcode, int index,
                             t_fstPtrInt value, void *pointer, float opt) {
@@ -63,7 +65,16 @@ AEffect *VSTPluginMain(audioMasterCallback callback) {
   fixture.numOutputs = 2;
   fixture.flags = effFlagsCanReplacing;
   fixture.processReplacing = process_replacing;
-  if (callback)
+  if (callback) {
     (void)callback(&fixture, audioMasterVersion, 0, 0, 0, 0.0f);
+    /* During the entry call fixture.user is still NULL by design. */
+    reported_sample_rate = (int)callback(
+        &fixture, audioMasterGetSampleRate, 0, 0, 0, 0.0f);
+    reported_block_size = (int)callback(
+        &fixture, audioMasterGetBlockSize, 0, 0, 0, 0.0f);
+  }
   return &fixture;
 }
+
+int vst2FixtureReportedSampleRate(void) { return reported_sample_rate; }
+int vst2FixtureReportedBlockSize(void) { return reported_block_size; }
