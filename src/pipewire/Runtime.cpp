@@ -5,6 +5,7 @@
 #include "DeviceManager.h"
 #include "DefaultSinkVolumeMonitor.h"
 #include "Engine.h"
+#include "LoudnessVolumeProvider.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -146,6 +147,7 @@ struct Runtime {
   }
   ~Runtime() {
     cleaning = true;
+    skyapo::platform::LoudnessVolumeProvider::publish(false, 0.0f);
     // Release registry-bound proxies/listeners while their core is still live.
     renderVolumeMonitor.reset();
     if (filter)
@@ -195,7 +197,7 @@ struct Runtime {
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
     auto engine =
-        std::make_unique<Engine>(hz, channels, blockFrames, names);
+        std::make_unique<Engine>(hz, channels, blockFrames, names, true);
     engine->loadConfig(config);
     installEngine(std::move(engine));
     auto *pointer = active.load(std::memory_order_acquire);
@@ -227,7 +229,7 @@ struct Runtime {
     if (!hz || !blockFrames)
       throw std::runtime_error("cannot reload before PipeWire format negotiation");
     auto replacement =
-        std::make_unique<Engine>(hz, channels, blockFrames, names);
+        std::make_unique<Engine>(hz, channels, blockFrames, names, true);
     replacement->loadConfig(config);
     const unsigned count = replacement->filterCount();
     installEngine(std::move(replacement));
@@ -533,6 +535,8 @@ struct Runtime {
       const skyapo::pipewire::DefaultSinkVolumeSnapshot &snapshot) {
     auto &r = *static_cast<Runtime *>(data);
     r.renderVolume = snapshot;
+    skyapo::platform::LoudnessVolumeProvider::publish(
+        snapshot.uniformChannelGainAvailable, snapshot.uniformChannelGainDb);
   }
   std::string status() {
     std::ostringstream s;
@@ -568,6 +572,11 @@ struct Runtime {
         s << "muted, ";
       s << renderVolume.effectiveDb << " dB)";
     }
+    s << "\nLoudness volume input: ";
+    if (renderVolume.uniformChannelGainAvailable)
+      s << renderVolume.uniformChannelGainDb << " dB uniform channel gain";
+    else
+      s << "unavailable (channel gains are not a positive uniform scalar)";
     s << "\nFilters: " << (e ? e->filterCount() : 0) << "\nFilter chain:";
     if (!e || e->filterDescriptions().empty())
       s << "\n  (none)";
@@ -776,6 +785,9 @@ struct Runtime {
         std::make_unique<skyapo::pipewire::DefaultSinkVolumeMonitor>(
             core, registry, renderVolumeChanged, this);
     renderVolume = renderVolumeMonitor->snapshot();
+    skyapo::platform::LoudnessVolumeProvider::publish(
+        renderVolume.uniformChannelGainAvailable,
+        renderVolume.uniformChannelGainDb);
     uint8_t bytes[2048];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
     spa_audio_info_raw info{};

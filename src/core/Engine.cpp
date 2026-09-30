@@ -19,6 +19,9 @@
 #include "IIRFilterFactory.h"
 #include "PreampFilterFactory.h"
 #include "PreampFilter.h"
+#include "LoudnessCorrectionFilterFactory.h"
+#include "LoudnessCorrectionFilter.h"
+#include "LoudnessVolumeProvider.h"
 #ifdef SKYAPO_HAVE_LV2
 #include "LV2PluginHost.h"
 #endif
@@ -78,8 +81,9 @@ void Engine::ConfigurationDeleter::operator()(
 }
 
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
-               std::vector<std::wstring> names)
-    : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames) {
+               std::vector<std::wstring> names, bool allowPendingEndpointVolume)
+    : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames),
+      allowPendingEndpointVolume(allowPendingEndpointVolume) {
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
@@ -103,6 +107,7 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   factories.push_back(std::make_unique<PreampFilterFactory>());
   factories.push_back(std::make_unique<DelayFilterFactory>());
   factories.push_back(std::make_unique<CopyFilterFactory>());
+  factories.push_back(std::make_unique<LoudnessCorrectionFilterFactory>());
 #ifdef SKYAPO_HAVE_CLAP
   factories.push_back(makeCLAPPluginFilterFactory());
 #endif
@@ -229,6 +234,12 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
     IFilter *filter = parsed.filter.get();
     const auto location = parsed.source.string() + ":" +
                           std::to_string(parsed.line) + ": ";
+    if (dynamic_cast<LoudnessCorrectionFilter *>(filter) &&
+        !allowPendingEndpointVolume &&
+        !skyapo::platform::LoudnessVolumeProvider::available())
+      throw std::runtime_error(
+          location + "LoudnessCorrection needs a live PipeWire endpoint-volume "
+                     "snapshot; the offline renderer/config checker has none");
     if (auto *preamp = dynamic_cast<PreampFilter *>(filter)) {
       const double db = preamp->getDbGain();
       const double linear = std::pow(10.0, db / 20.0);
@@ -574,13 +585,6 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                  std::to_string(lineNo) + ": Plugin requires "
                                  "native plugin host support");
 #endif
-      if (originalCommand == L"LoudnessCorrection")
-        throw std::runtime_error(
-            normalizedPath.string() + ":" + std::to_string(lineNo) +
-            ": LoudnessCorrection requires the current render endpoint's "
-            "master volume; Windows EAPO reads it through "
-            "IAudioEndpointVolume, and SkyAPO has no equivalent endpoint "
-            "volume provider yet");
       throw std::runtime_error(normalizedPath.string() + ":" +
                                std::to_string(lineNo) + ": invalid " + name +
                                " parameters");

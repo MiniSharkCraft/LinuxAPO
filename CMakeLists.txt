@@ -14,6 +14,7 @@ option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
   "Run an isolated PipeWire server and verify captured SkyAPO DSP output" OFF)
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(FFTW3F QUIET IMPORTED_TARGET fftw3f)
@@ -28,7 +29,6 @@ endif()
 set(SKYAPO_VST3_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/upstream/vst3)
 if(EXISTS "${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp" AND
    EXISTS "${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp")
-  find_package(Threads REQUIRED)
   add_library(skyapo-vst3-base STATIC
     ${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp
     ${SKYAPO_VST3_ROOT}/base/source/fbuffer.cpp
@@ -94,6 +94,7 @@ add_library(skyapo-eapo-dsp STATIC
 target_include_directories(skyapo-eapo-dsp BEFORE PRIVATE src/platform/linux ${EAPO_PORT} ${EAPO})
 target_compile_definitions(skyapo-eapo-dsp PRIVATE __forceinline=inline)
 target_compile_options(skyapo-eapo-dsp PRIVATE -Wno-write-strings)
+target_link_libraries(skyapo-eapo-dsp PUBLIC Threads::Threads)
 if(TARGET PkgConfig::SNDFILE)
   target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::SNDFILE)
 endif()
@@ -186,6 +187,7 @@ if(PIPEWIRE_FOUND)
     src/pipewire/Runtime.cpp
     src/platform/RealtimeAudit.cpp)
   target_link_libraries(skyapo-pipewire PUBLIC skyapo-core PkgConfig::PIPEWIRE)
+  target_include_directories(skyapo-pipewire PRIVATE src/platform/linux)
   target_link_libraries(skyapo PRIVATE skyapo-pipewire)
   target_sources(skyapo PRIVATE src/platform/RealtimeAudit.cpp)
   target_link_options(skyapo PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
@@ -374,6 +376,7 @@ if(SKYAPO_BUILD_UI)
 endif()
 
 add_executable(skyapo-tests tests/core_tests.cpp)
+target_include_directories(skyapo-tests PRIVATE src/platform/linux)
 target_link_libraries(skyapo-tests PRIVATE skyapo-core PkgConfig::SNDFILE)
 target_compile_definitions(skyapo-tests PRIVATE __forceinline=inline)
 if(MUPARSER_FOUND)

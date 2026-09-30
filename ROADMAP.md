@@ -57,8 +57,8 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 ## 0.5.x — remaining core DSP
 
 - [x] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical (FFTW3f optional; convolution has fixed negotiated block size).
-- [ ] Port Channel/Copy/Include conditional details and LoudnessCorrection only where Linux equivalents preserve behavior; document endpoint-volume semantics.
-- [x] Explicitly reject `LoudnessCorrection:` with source/line diagnostics until Linux endpoint volume is wired into a semantically equivalent correction path; document why a fixed-gain approximation would change semantics.
+- [x] Reuse upstream `LoudnessCorrectionFilter`/factory in daemon mode with a Linux provider for uniform positive default-render channel gain; atomic worker handoff keeps the callback nonblocking, and config/offline tests cover DSP and unavailable-provider errors.
+- [x] Document that the PipeWire per-channel gain candidate is conservative and is not claimed identical to Windows `IAudioEndpointVolume`; offline render/config check reject the endpoint-dependent command without a live provider.
 - [x] Monitor the default PipeWire render sink's effective per-channel `Props` volume and mute state, with live CLI status, metadata/Pod tests, and desktop cross-check against `wpctl`; unrelated ALSA device `Props` must not overwrite the valid volume snapshot.
 - [x] Distinguish the diagnostic RMS channel level from a uniform positive per-channel gain candidate; mark asymmetric/zero values unavailable and keep mute separate. Do not treat either candidate as Windows endpoint master-volume semantics without further validation.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
@@ -107,6 +107,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add ordered row selection/focus, Ctrl/Shift range selection, Escape clear, Delete removal and Alt+Up/Down reordering; preserve config bytes and newline style on move.
 - [x] Add a Linux Include editor with config-relative path validation and native file browsing; upstream Include's Registry ACL and tab-navigation hooks are intentionally not reused.
 - [x] Add Linux visual `Channel:`/`Copy:` editors with EAPO serialization and explicit raw-text fallback for unsupported syntax; upstream widgets remain excluded due to Windows device/channel-mask dependencies.
+- [x] Add a visual IIR coefficient editor with ordering/range validation, round-trip tests and raw-expression fallback; the upstream Editor has no IIR visual editor to reuse.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
@@ -127,6 +128,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Add an Arch container CI job that builds the PKGBUILD and runs its package CTest suite.
 - [x] Add an incremental `clang-format` CI check for changed SkyAPO-owned C++ files, excluding upstream and generated code; verify hosted workflow runs after publishing/connecting the repository.
 - [x] Document Windows Equalizer APO → Linux SkyAPO config migration and compatibility gaps.
+- [x] Audit Arch package license placement with `namcap`; install all license texts under `/usr/share/licenses/skyapo/` and verify an isolated package archive.
 - [ ] Fresh-install test, licensing/dependency audit, release candidate checklist.
 - Acceptance: reproducible package install/uninstall and user service; CI and sanitizer suite pass; docs match actual runtime.
 

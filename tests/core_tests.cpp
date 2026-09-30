@@ -1,11 +1,14 @@
 #include "Engine.h"
 #include "BiQuad.h"
+#include "LoudnessVolumeProvider.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <thread>
 #include <sndfile.h>
 #include <unistd.h>
 #include <utility>
@@ -86,15 +89,63 @@ int main() {
     loudnessSemanticsDiagnosed =
         message.find(path + ":2:") != std::string::npos &&
         message.find("LoudnessCorrection") != std::string::npos &&
-        message.find("IAudioEndpointVolume") != std::string::npos &&
-        message.find("no equivalent endpoint volume provider") !=
+        message.find("live PipeWire endpoint-volume snapshot") !=
             std::string::npos;
   }
   if (!loudnessSemanticsDiagnosed) {
-    std::cerr << "LoudnessCorrection did not explain its missing Linux "
-                 "endpoint-volume semantics\n";
+    std::cerr << "LoudnessCorrection did not explain its missing live volume "
+                 "snapshot\n";
     return 1;
   }
+
+  skyapo::platform::LoudnessVolumeProvider::publish(true, 12.0f);
+  if (!write(path, "LoudnessCorrection: State 1 ReferenceLevel 0 "
+                   "ReferenceOffset 0 Attenuation 1.0\n"))
+    return 1;
+  {
+    Engine loudness(48000, 2, 1024, {L"L", L"R"});
+    loudness.loadConfig(path);
+    if (loudness.filterCount() != 1) {
+      std::cerr << "upstream LoudnessCorrection filter was not loaded\n";
+      return 1;
+    }
+    std::vector<float> tone(1024 * 2);
+    for (unsigned i = 0; i < 1024; ++i) {
+      const float sample =
+          0.2f * std::sin(2.0 * 3.141592653589793 * 100.0 * i / 48000.0);
+      tone[2 * i] = tone[2 * i + 1] = sample;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    double inputRms = 0.0;
+    double outputRms = 0.0;
+    for (unsigned block = 0; block < 12; ++block) {
+      loudness.process(tone.data(), 1024);
+      if (block >= 8)
+        for (float sample : tone)
+          outputRms += static_cast<double>(sample) * sample;
+      for (unsigned i = 0; i < 1024; ++i) {
+        const double sample =
+            0.2 * std::sin(2.0 * 3.141592653589793 * 100.0 * i / 48000.0);
+        if (block >= 8)
+          inputRms += 2.0 * sample * sample;
+      }
+      for (unsigned i = 0; i < 1024; ++i) {
+        const float sample =
+            0.2f * std::sin(2.0 * 3.141592653589793 * 100.0 * i / 48000.0);
+        tone[2 * i] = tone[2 * i + 1] = sample;
+      }
+    }
+    const double ratio = std::sqrt(outputRms / inputRms);
+    std::cout << "LoudnessCorrection upstream 100 Hz amplitude ratio: " << ratio
+              << '\n';
+    if (!(ratio > 0.4 && ratio < 0.9)) {
+      std::cerr << "upstream LoudnessCorrection produced unexpected 100 Hz "
+                   "amplitude ratio: "
+                << ratio << '\n';
+      return 1;
+    }
+  }
+  skyapo::platform::LoudnessVolumeProvider::publish(false, 0.0f);
 
 #ifdef SKYAPO_TEST_LV2
   if (!write(path, "Plugin: LV2 https://skyapo.example/plugins/test-gain\n"))

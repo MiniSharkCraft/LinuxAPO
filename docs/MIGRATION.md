@@ -69,7 +69,7 @@ trong ứng dụng Linux.
 | `Convolution:` | Dựa trên upstream convolution; cần FFTW3f và đọc IR qua adapter Linux/libsndfile. | Chép IR sang Linux, sửa path, xác thực sample rate/đọc được. Bộ lọc cần block cố định; offline renderer zero-pad block cuối. |
 | `If:`, `ElseIf:`, `Else:`, `EndIf:` | Có subset biểu thức số/boolean khi build với muParser. | Chỉ dùng `sampleRate`, `inputChannelCount`, `outputChannelCount` và toán tử subset đã ghi trong `CONFIG.md`; đây không phải muParserX đầy đủ. |
 | `Stage:` | `capture` ánh xạ vào đường capture Linux; các stage Windows `pre-mix` và `post-mix` bị bỏ qua. | Đặt filter cần chạy trên microphone trong `capture`. Đừng dựa vào stage bị bỏ qua để tạo xử lý tương đương. |
-| `LoudnessCorrection:` | **Không hỗ trợ**, bị từ chối có chẩn đoán. | Cần bỏ hoặc thay bằng một thiết kế khác được kiểm tra thủ công. SkyAPO không giả lập hành vi theo master volume Windows bằng gain cố định. |
+| `LoudnessCorrection:` | Dùng filter/factory DSP upstream trong daemon; volume đầu vào là gain per-channel đồng nhất của default PipeWire render sink khi truy xuất được. Offline renderer/config checker từ chối vì không có endpoint volume live. | Cần kiểm tra `skyapo status`: nguồn volume không phải bản sao tuyệt đối của Windows `IAudioEndpointVolume`, và filter được giữ neutral khi snapshot chưa khả dụng. |
 
 Các directive không hỗ trợ trong stage/nhánh đang hoạt động sẽ gây lỗi có
 đường dẫn và số dòng; SkyAPO không âm thầm bỏ qua. Nhánh conditional sai và

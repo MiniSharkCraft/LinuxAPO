@@ -12,7 +12,8 @@ class FilterConfiguration;
 class Engine {
 public:
   Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
-         std::vector<std::wstring> channelNames = {});
+         std::vector<std::wstring> channelNames = {},
+         bool allowPendingEndpointVolume = false);
   void loadConfig(const std::string &path);
   void process(float *interleaved, unsigned frames);
   unsigned filterCount() const { return graph.size(); }
@@ -52,6 +53,7 @@ private:
   std::vector<FilterNode> buildGraph(FilterList &candidate);
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
+  bool allowPendingEndpointVolume = false;
   std::vector<std::string> descriptions;
   std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
