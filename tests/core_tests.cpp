@@ -490,8 +490,8 @@ int main() {
   SNDFILE *irFile = sf_open(irPath.c_str(), SFM_WRITE, &irInfo);
   if (!irFile)
     return 1;
-  const float impulseResponse[4] = {1, 0, 0, 0};
-  if (sf_writef_float(irFile, impulseResponse, 4) != 4) {
+  const float impulseResponse[3] = {0.5f, -0.25f, 0.125f};
+  if (sf_writef_float(irFile, impulseResponse, 3) != 3) {
     sf_close(irFile);
     return 1;
   }
@@ -503,26 +503,43 @@ int main() {
   convolution.loadConfig(convolutionConfig.string());
   if (!convolution.requiresFixedBlock())
     return 1;
-  float convBlock[512]{};
-  for (int f = 0; f < 256; ++f) {
-    convBlock[2 * f] = 0.1f * f;
-    convBlock[2 * f + 1] = -0.05f * f;
-  }
   bool rejectedVariableBlock = false;
   try {
-    convolution.process(convBlock, 255);
+    float rejectedBlock[510]{};
+    convolution.process(rejectedBlock, 255);
   } catch (const std::exception &) {
     rejectedVariableBlock = true;
   }
   if (!rejectedVariableBlock)
     return 1;
-  convolution.process(convBlock, 256);
-  for (int i = 0; i < 512; ++i)
-    if (std::abs(convBlock[i] - ((i % 2) ? -0.05f : 0.1f) * (i / 2)) > 1e-4f) {
-      std::cerr << "upstream Convolution impulse response mismatch at " << i
-                << " got " << convBlock[i] << '\n';
-      return 1;
+  std::vector<float> convolutionInput(3 * 256 * 2);
+  std::vector<float> convolutionExpected(convolutionInput.size());
+  for (unsigned frame = 0; frame < 3 * 256; ++frame) {
+    convolutionInput[2 * frame] =
+        0.1f * static_cast<float>(static_cast<int>(frame % 19) - 9);
+    convolutionInput[2 * frame + 1] =
+        -0.07f * static_cast<float>(static_cast<int>(frame % 13) - 6);
+    for (unsigned channel = 0; channel < 2; ++channel) {
+      for (unsigned tap = 0; tap < 3 && tap <= frame; ++tap)
+        convolutionExpected[2 * frame + channel] +=
+            impulseResponse[tap] *
+            convolutionInput[2 * (frame - tap) + channel];
     }
+  }
+  for (unsigned block = 0; block < 3; ++block) {
+    float convBlock[512];
+    std::copy_n(convolutionInput.data() + block * 512, 512, convBlock);
+    convolution.process(convBlock, 256);
+    for (unsigned sample = 0; sample < 512; ++sample) {
+      const float expected = convolutionExpected[block * 512 + sample];
+      if (std::abs(convBlock[sample] - expected) > 1e-4f) {
+        std::cerr << "upstream Convolution FIR mismatch at block " << block
+                  << ", sample " << sample << ": got " << convBlock[sample]
+                  << ", expected " << expected << '\n';
+        return 1;
+      }
+    }
+  }
   auto graphicConfig = dir / "graphic-eq.txt";
   if (!write(graphicConfig, "GraphicEQ: 100 0 1000 0\n"))
     return 1;
@@ -542,6 +559,37 @@ int main() {
   }
   if (graphicEnergy < 0.1f) {
     std::cerr << "upstream GraphicEQ produced no output\n";
+    return 1;
+  }
+
+  if (!write(graphicConfig, "GraphicEQ: 1000 -6\n"))
+    return 1;
+  Engine graphicGain(48000, 2, 256);
+  graphicGain.loadConfig(graphicConfig.string());
+  double graphicInputEnergy = 0.0;
+  double graphicOutputEnergy = 0.0;
+  for (unsigned block = 0; block < 64; ++block) {
+    float tone[512]{};
+    for (unsigned frame = 0; frame < 256; ++frame) {
+      const float sample =
+          static_cast<float>(0.2 * std::sin(2.0 * 3.141592653589793 * 1000.0 *
+                                            (block * 256 + frame) / 48000.0));
+      tone[2 * frame] = tone[2 * frame + 1] = sample;
+      if (block >= 32)
+        graphicInputEnergy += 2.0 * sample * sample;
+    }
+    graphicGain.process(tone, 256);
+    if (block >= 32)
+      for (float sample : tone)
+        graphicOutputEnergy += static_cast<double>(sample) * sample;
+  }
+  const double graphicRatio =
+      std::sqrt(graphicOutputEnergy / graphicInputEnergy);
+  const double graphicGainDb = 20.0 * std::log10(graphicRatio);
+  std::cout << "upstream GraphicEQ 1 kHz gain: " << graphicGainDb << " dB\n";
+  if (std::abs(graphicGainDb + 6.0) > 0.2) {
+    std::cerr << "upstream GraphicEQ 1 kHz gain mismatch: " << graphicGainDb
+              << " dB (expected -6 dB)\n";
     return 1;
   }
 #endif

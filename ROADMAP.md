@@ -60,6 +60,8 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 
 - [x] Port upstream GraphicEQ and convolution paths with upstream FFTW/libHybridConv behavior where practical (FFTW3f optional; convolution has fixed negotiated block size).
 - [x] Reuse upstream `LoudnessCorrectionFilter`/factory in daemon mode with a Linux provider for uniform positive default-render channel gain; atomic worker handoff keeps the callback nonblocking, and config/offline tests cover DSP and unavailable-provider errors.
+- [x] Add numerical upstream GraphicEQ response coverage: a 1 kHz sine at 48 kHz measures −6 dB for a `GraphicEQ: 1000 -6` node (0.2 dB tolerance).
+- [x] Validate upstream convolution with a three-tap FIR against direct sample-domain reference across three consecutive fixed-size blocks, including stereo independence and state across block boundaries.
 - [x] Document that the PipeWire per-channel gain candidate is conservative and is not claimed identical to Windows `IAudioEndpointVolume`; offline render/config check reject the endpoint-dependent command without a live provider.
 - [x] Monitor the default PipeWire render sink's effective per-channel `Props` volume and mute state, with live CLI status, metadata/Pod tests, and desktop cross-check against `wpctl`; unrelated ALSA device `Props` must not overwrite the valid volume snapshot.
 - [x] Distinguish the diagnostic RMS channel level from a uniform positive per-channel gain candidate; mark asymmetric/zero values unavailable and keep mute separate. Do not treat either candidate as Windows endpoint master-volume semantics without further validation.
@@ -139,7 +141,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 
 - [ ] Stable daemon, major EAPO directives, hot reload with rollback.
 - [ ] PipeWire capture/virtual mic, recovery, mono/stereo at 44.1/48/96 kHz.
-- [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include and Convolution validated; GraphicEQ compiles with its actual upstream implementation.
+- [x] Preamp, Filter/BiQuad/IIR, Delay, Channel, Copy, Include, three-tap Convolution and a 1 kHz GraphicEQ point validated with numerical checks against known output.
 - [ ] VST2/VST3/LV2/CLAP product-grade support, yabridge compatibility, plugin state/bypass/failure and known-latency reporting. LV2/CLAP and initial single-bus VST3 hosts are prototypes, not full 1.0 acceptance; one mono yabridge wrapper works functionally but reports `realtime: no`, and VST2 remains license-blocked.
 - [ ] Ported/evolved original editor; full CLI and diagnostics.
 - [ ] Packaging, user service, desktop integration, licensing and clean-install docs.
