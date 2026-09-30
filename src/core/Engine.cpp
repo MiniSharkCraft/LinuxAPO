@@ -41,7 +41,12 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#ifdef SKYAPO_HAVE_MUPARSER
+#ifdef SKYAPO_HAVE_MUPARSERX
+#include <mpPackageCommon.h>
+#include <mpPackageNonCmplx.h>
+#include <mpPackageStr.h>
+#include <mpParser.h>
+#elif defined(SKYAPO_HAVE_MUPARSER)
 #include <muParser.h>
 #endif
 
@@ -408,7 +413,34 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
   std::vector<ConditionalFrame> conditions;
   const auto evaluateCondition = [&](const std::wstring &expression,
                                      unsigned conditionLine) -> bool {
-#ifdef SKYAPO_HAVE_MUPARSER
+#ifdef SKYAPO_HAVE_MUPARSERX
+    try {
+      mup::ParserX parser(mup::pckALL_NON_COMPLEX);
+      parser.EnableAutoCreateVar(true);
+      parser.DefineConst(L"sampleRate", static_cast<mup::float_type>(rate));
+      parser.DefineConst(L"inputChannelCount",
+                         static_cast<mup::float_type>(channelCount));
+      parser.DefineConst(L"outputChannelCount",
+                         static_cast<mup::float_type>(channelCount));
+      parser.SetExpr(expression);
+      const mup::IValue &value = parser.Eval();
+      if (value.GetType() == 'b')
+        return value.GetBool();
+      const double numeric = value.GetFloat();
+      if (!std::isfinite(numeric))
+        throw std::runtime_error("expression result is not finite");
+      return numeric != 0.0;
+    } catch (const mup::ParserError &e) {
+      throw std::runtime_error(normalizedPath.string() + ":" +
+                               std::to_string(conditionLine) +
+                               ": invalid If expression: " +
+                               StringHelper::toString(e.GetMsg(), 65001));
+    } catch (const std::exception &e) {
+      throw std::runtime_error(normalizedPath.string() + ":" +
+                               std::to_string(conditionLine) +
+                               ": invalid If expression: " + e.what());
+    }
+#elif defined(SKYAPO_HAVE_MUPARSER)
     try {
       mu::Parser parser;
       parser.DefineConst("sampleRate", static_cast<double>(rate));
@@ -434,8 +466,9 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     (void)expression;
     throw std::runtime_error(normalizedPath.string() + ":" +
                              std::to_string(conditionLine) +
-                             ": If/ElseIf requires muParser support; install "
-                             "muParser development files and rebuild SkyAPO");
+                             ": If/ElseIf requires MuParserX or muParser "
+                             "expression support; enable a parser backend and "
+                             "rebuild SkyAPO");
 #endif
   };
   while (std::getline(in, raw)) {

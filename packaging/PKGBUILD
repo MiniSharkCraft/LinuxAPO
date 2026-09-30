@@ -1,16 +1,18 @@
 pkgname=skyapo
 pkgver=0.1.0
-pkgrel=10
+pkgrel=11
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
 # Maintainer: Cong Nguyen
 arch=('x86_64')
-license=('GPL-2.0-or-later' 'MIT')
-depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme' 'muparser')
+license=('GPL-2.0-or-later' 'MIT' 'BSD-2-Clause')
+depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme')
 makedepends=('cmake' 'gcc' 'git' 'pkgconf')
 # Makepkg runs this PKGBUILD from its containing directory. Using PWD avoids
 # namcap treating the sibling checkout as a package install-time dependency.
-source=("skyapo::git+file://${PWD}/..")
-sha256sums=('SKIP')
+source=("skyapo::git+file://${PWD}/.."
+        'muparserx_v3_0_1.zip::https://sourceforge.net/p/equalizerapo/wiki/Developer%20documentation/attachment/muparserx_v3_0_1.zip')
+sha256sums=('SKIP'
+            '11689042843844638414af070f928ef5200461dc59fa237bad4a01531f982609')
 
 prepare() {
   cd "$srcdir/skyapo"
@@ -21,7 +23,8 @@ build() {
   cmake -S "$srcdir/skyapo" -B "$srcdir/skyapo-build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DCMAKE_INSTALL_LIBDIR=lib
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DSKYAPO_MUPARSERX_ARCHIVE="$srcdir/muparserx_v3_0_1.zip"
   cmake --build "$srcdir/skyapo-build" --parallel
 }
 

@@ -32,6 +32,9 @@ def main():
             "Steinberg-VST3-pluginterfaces-License.txt": "Steinberg Media Technologies GmbH",
             "Steinberg-VST3-public-sdk-License.txt": "Steinberg Media Technologies GmbH",
         }
+        cache = (build_dir / "CMakeCache.txt").read_text(errors="replace")
+        if "SKYAPO_ENABLE_MUPARSERX:BOOL=ON" in cache:
+            expected["MuParserX-License.txt"] = "Copyright (c) 2012, Ingo Berg"
         for relative, marker in expected.items():
             path = licenses / relative
             text = (path.read_text(errors="replace").replace("\u00a0", " ")
@@ -41,7 +44,7 @@ def main():
         notice = docs / "THIRD_PARTY_NOTICES.md"
         if not notice.is_file() or "FST-based VST2" not in notice.read_text():
             raise RuntimeError("third-party notice inventory was not installed")
-        print("Installed GPL and third-party MIT license notices verified.")
+        print("Installed GPL, MIT and BSD license notices verified.")
 
 
 if __name__ == "__main__":

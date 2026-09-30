@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(SkyAPO VERSION 0.1.0 LANGUAGES C CXX)
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
 include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -8,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
+option(SKYAPO_ENABLE_MUPARSERX "Fetch and use Equalizer APO's legacy MuParserX 3.0.1 parser" ON)
 option(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS
   "Build tests for the experimental FST-based VST2-compatible host" OFF)
 option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
@@ -24,6 +28,59 @@ if(SKYAPO_ENABLE_MUPARSER)
   pkg_check_modules(MUPARSER QUIET IMPORTED_TARGET muparser)
 else()
   set(MUPARSER_FOUND FALSE)
+endif()
+
+if(SKYAPO_ENABLE_MUPARSERX)
+  set(SKYAPO_MUPARSERX_SHA256 "11689042843844638414af070f928ef5200461dc59fa237bad4a01531f982609")
+  set(SKYAPO_MUPARSERX_ARCHIVE "" CACHE FILEPATH
+      "Path to the pinned MuParserX 3.0.1 archive (otherwise downloaded from SourceForge)")
+  if(SKYAPO_MUPARSERX_ARCHIVE)
+    file(SHA256 "${SKYAPO_MUPARSERX_ARCHIVE}" SKYAPO_MUPARSERX_ARCHIVE_SHA256)
+    if(NOT SKYAPO_MUPARSERX_ARCHIVE_SHA256 STREQUAL SKYAPO_MUPARSERX_SHA256)
+      message(FATAL_ERROR "MuParserX archive SHA-256 mismatch: ${SKYAPO_MUPARSERX_ARCHIVE_SHA256}")
+    endif()
+    set(SKYAPO_MUPARSERX_EXTRACT_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/skyapo_muparserx_301-src")
+    if(NOT EXISTS "${SKYAPO_MUPARSERX_EXTRACT_DIR}/parser/mpParser.h" AND
+       NOT EXISTS "${SKYAPO_MUPARSERX_EXTRACT_DIR}/muparserx_v3_0_1/parser/mpParser.h")
+      file(MAKE_DIRECTORY "${SKYAPO_MUPARSERX_EXTRACT_DIR}")
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E tar xvf "${SKYAPO_MUPARSERX_ARCHIVE}"
+        WORKING_DIRECTORY "${SKYAPO_MUPARSERX_EXTRACT_DIR}"
+        RESULT_VARIABLE SKYAPO_MUPARSERX_EXTRACT_RESULT
+        OUTPUT_QUIET ERROR_VARIABLE SKYAPO_MUPARSERX_EXTRACT_ERROR)
+      if(NOT SKYAPO_MUPARSERX_EXTRACT_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not extract MuParserX archive: ${SKYAPO_MUPARSERX_EXTRACT_ERROR}")
+      endif()
+    endif()
+    if(EXISTS "${SKYAPO_MUPARSERX_EXTRACT_DIR}/parser/mpParser.h")
+      set(SKYAPO_MUPARSERX_ROOT "${SKYAPO_MUPARSERX_EXTRACT_DIR}")
+    else()
+      set(SKYAPO_MUPARSERX_ROOT "${SKYAPO_MUPARSERX_EXTRACT_DIR}/muparserx_v3_0_1")
+    endif()
+  else()
+    include(FetchContent)
+    FetchContent_Declare(skyapo_muparserx_301
+      URL https://sourceforge.net/p/equalizerapo/wiki/Developer%20documentation/attachment/muparserx_v3_0_1.zip
+      URL_HASH SHA256=${SKYAPO_MUPARSERX_SHA256})
+    FetchContent_MakeAvailable(skyapo_muparserx_301)
+    set(SKYAPO_MUPARSERX_ROOT "${skyapo_muparserx_301_SOURCE_DIR}")
+  endif()
+  if(NOT EXISTS "${SKYAPO_MUPARSERX_ROOT}/License.txt" OR
+     NOT EXISTS "${SKYAPO_MUPARSERX_ROOT}/parser/mpParser.h")
+    message(FATAL_ERROR "MuParserX 3.0.1 archive has unexpected contents")
+  endif()
+  file(GLOB SKYAPO_MUPARSERX_SOURCES CONFIGURE_DEPENDS
+    "${SKYAPO_MUPARSERX_ROOT}/parser/*.cpp")
+  add_library(skyapo-muparserx STATIC ${SKYAPO_MUPARSERX_SOURCES})
+  target_include_directories(skyapo-muparserx SYSTEM PUBLIC "${SKYAPO_MUPARSERX_ROOT}/parser")
+  target_compile_features(skyapo-muparserx PUBLIC cxx_std_17)
+  target_compile_definitions(skyapo-muparserx PRIVATE _UNICODE)
+  target_compile_options(skyapo-muparserx PRIVATE
+    -fext-numeric-literals -Wno-deprecated-declarations
+    -Wno-deprecated-enum-enum-conversion -Wno-unknown-pragmas)
+  set(SKYAPO_HAVE_MUPARSERX TRUE)
+else()
+  message(STATUS "MuParserX 3.0.1 disabled; upstream expression syntax is unavailable")
 endif()
 
 set(SKYAPO_VST3_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/upstream/vst3)
@@ -110,6 +167,10 @@ target_include_directories(skyapo-core
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_compile_definitions(skyapo-core PRIVATE SKYAPO_VERSION="${PROJECT_VERSION}")
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
+if(SKYAPO_HAVE_MUPARSERX)
+  target_link_libraries(skyapo-core PUBLIC skyapo-muparserx)
+  target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_MUPARSERX=1 _UNICODE)
+endif()
 if(MUPARSER_FOUND)
   target_link_libraries(skyapo-core PUBLIC PkgConfig::MUPARSER)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_MUPARSER=1)
@@ -379,8 +440,11 @@ add_executable(skyapo-tests tests/core_tests.cpp)
 target_include_directories(skyapo-tests PRIVATE src/platform/linux)
 target_link_libraries(skyapo-tests PRIVATE skyapo-core PkgConfig::SNDFILE)
 target_compile_definitions(skyapo-tests PRIVATE __forceinline=inline)
-if(MUPARSER_FOUND)
+if(MUPARSER_FOUND OR SKYAPO_HAVE_MUPARSERX)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_MUPARSER=1)
+endif()
+if(SKYAPO_HAVE_MUPARSERX)
+  target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_MUPARSERX=1)
 endif()
 if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
@@ -628,3 +692,8 @@ install(FILES upstream/vst3/pluginterfaces/LICENSE.txt
 install(FILES upstream/vst3/public.sdk/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
   RENAME Steinberg-VST3-public-sdk-License.txt)
+if(SKYAPO_HAVE_MUPARSERX)
+  install(FILES "${SKYAPO_MUPARSERX_ROOT}/License.txt"
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+    RENAME MuParserX-License.txt)
+endif()

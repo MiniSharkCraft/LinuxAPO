@@ -674,6 +674,13 @@ int main() {
   }
 
 #ifdef SKYAPO_TEST_MUPARSER
+#ifdef SKYAPO_TEST_MUPARSERX
+#define SKYAPO_TEST_CONDITIONAL_ELSEIF \
+  "ElseIf: inputChannelCount == 2; sampleRate == 48000\n"
+#else
+#define SKYAPO_TEST_CONDITIONAL_ELSEIF \
+  "ElseIf: inputChannelCount == 2 && sampleRate == 48000\n"
+#endif
   const auto conditional = dir / "conditional.txt";
   if (!write(conditional,
              "If: sampleRate < 0\n"
@@ -681,7 +688,7 @@ int main() {
              "UnsupportedInsideFalseBranch: skipped\n"
              "Include: missing-only-in-false-branch.txt\n"
              "EndIf:\n"
-             "ElseIf: inputChannelCount == 2 && sampleRate == 48000\n"
+             SKYAPO_TEST_CONDITIONAL_ELSEIF
              "If: 1\n"
              "Preamp: -6 dB\n"
              "Else:\n"
@@ -726,6 +733,7 @@ int main() {
     std::cerr << "invalid conditional config replaced the active graph\n";
     return 1;
   }
+#undef SKYAPO_TEST_CONDITIONAL_ELSEIF
 
   if (!write(conditional, "ElseIf: 1\n"))
     return 1;
