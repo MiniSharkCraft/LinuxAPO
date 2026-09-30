@@ -236,9 +236,12 @@ private:
   void silence(float **output, unsigned frames) noexcept {
     if (!output)
       return;
+    // `frames` can be invalidly larger than the caller's negotiated buffer.
+    // In that case only the first maxFrameCount samples are known to exist.
+    const unsigned safeFrames = std::min(frames, maxFrameCount);
     for (size_t channel = 0; channel < channelCount; ++channel)
       if (output[channel])
-        std::fill_n(output[channel], frames, 0.0f);
+        std::fill_n(output[channel], safeFrames, 0.0f);
   }
 
   std::string modulePath;

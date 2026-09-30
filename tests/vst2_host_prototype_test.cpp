@@ -67,11 +67,19 @@ int main(int argc, char **argv) {
               "parameter override right ratio");
     }
 
+    outLeft.fill(42.0f);
+    outRight.fill(42.0f);
     instance->process(output, input, 17);
     require(instance->processingFailed(), "oversize block was not latched");
-    for (unsigned i = 0; i < 17; ++i)
+    for (unsigned i = 0; i < 16; ++i)
       require(outLeft[i] == 0.0f && outRight[i] == 0.0f,
               "oversize block was not silenced");
+    require(outLeft[16] == 42.0f && outRight[16] == 42.0f,
+            "oversize block wrote beyond the negotiated output capacity");
+    std::array<float, 16> exactCapacityLeft{}, exactCapacityRight{};
+    float *exactCapacityOutput[]{exactCapacityLeft.data(),
+                                 exactCapacityRight.data()};
+    instance->process(exactCapacityOutput, input, 17);
     instance->process(output, input, 3);
     for (unsigned i = 0; i < 3; ++i)
       require(outLeft[i] == 0.0f && outRight[i] == 0.0f,

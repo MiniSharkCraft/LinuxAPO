@@ -34,6 +34,11 @@ host callback behavior. In-process plugins can crash or compromise the daemon;
 C++ exception handling cannot isolate memory faults or hostile code. No claim
 is made about compatibility with arbitrary third-party plugins.
 
+Oversize process requests latch failure and silence only the negotiated
+`maxFrameCount` prefix: the host cannot assume that samples beyond the caller's
+announced output capacity exist. The prototype fixture checks a sentinel just
+past that capacity and an exact-capacity buffer under ASan.
+
 ## Standalone fixture test
 
 The project also has an opt-in CMake/CTest target for repeatable normal and
