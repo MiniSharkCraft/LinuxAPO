@@ -51,6 +51,7 @@ if(EXISTS "${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp" AND
     target_include_directories(${target} PUBLIC ${SKYAPO_VST3_ROOT})
     target_compile_features(${target} PUBLIC cxx_std_17)
     target_compile_definitions(${target} PRIVATE DEVELOPMENT=1)
+    set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
   endforeach()
   target_link_libraries(skyapo-vst3-hosting PUBLIC skyapo-vst3-base
     skyapo-vst3-interfaces ${CMAKE_DL_LIBS} Threads::Threads)
@@ -108,6 +109,32 @@ if(SKYAPO_HAVE_VST3)
   target_include_directories(skyapo-core PRIVATE ${SKYAPO_VST3_ROOT})
   target_link_libraries(skyapo-core PUBLIC skyapo-vst3-hosting)
   target_compile_definitions(skyapo-core PUBLIC SKYAPO_HAVE_VST3=1)
+
+  # Self-contained, redistributable test bundle for repeatable numerical host
+  # tests. Its code is SkyAPO-authored and depends on the pinned SDK interface.
+  set(SKYAPO_TEST_VST3_BUNDLE
+      "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/skyapo-test-gain.vst3")
+  set(SKYAPO_TEST_VST3_ARCH "${SKYAPO_TEST_VST3_BUNDLE}/Contents/${CMAKE_SYSTEM_PROCESSOR}-linux")
+  file(MAKE_DIRECTORY "${SKYAPO_TEST_VST3_ARCH}")
+  add_library(skyapo-test-vst3 MODULE
+    tests/plugins/vst3_gain.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/main/pluginfactory.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/main/moduleinit.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/main/linuxmain.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/common/commoniids.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/common/pluginview.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstaudioeffect.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstsinglecomponenteffect.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstparameters.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstbus.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstcomponent.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/vstcomponentbase.cpp)
+  target_include_directories(skyapo-test-vst3 PRIVATE ${SKYAPO_VST3_ROOT})
+  target_compile_features(skyapo-test-vst3 PRIVATE cxx_std_17)
+  target_compile_definitions(skyapo-test-vst3 PRIVATE DEVELOPMENT=1)
+  target_link_libraries(skyapo-test-vst3 PRIVATE skyapo-vst3-hosting)
+  set_target_properties(skyapo-test-vst3 PROPERTIES PREFIX "" OUTPUT_NAME "skyapo-test-gain"
+    LIBRARY_OUTPUT_DIRECTORY "${SKYAPO_TEST_VST3_ARCH}")
 endif()
 if(LILV_FOUND)
   target_sources(skyapo-core PRIVATE src/plugin/LV2PluginHost.cpp)
@@ -321,6 +348,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   set_tests_properties(skyapo-offline-clap-parameter-render PROPERTIES
     ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
   add_dependencies(skyapo-render-tests skyapo-test-clap)
+endif()
+if(SKYAPO_HAVE_VST3)
+  add_test(NAME skyapo-offline-vst3-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_gain.txt -6.0206)
+  set_tests_properties(skyapo-offline-vst3-render PROPERTIES
+    ENVIRONMENT "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+  add_dependencies(skyapo-render-tests skyapo-test-vst3)
+  target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_VST3=1)
+  add_dependencies(skyapo-realtime-safety-tests skyapo-test-vst3)
+  set_property(TEST skyapo-realtime-safety APPEND PROPERTY ENVIRONMENT
+    "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
 endif()
 if(LILV_FOUND AND LV2_FOUND)
   add_test(NAME skyapo-offline-lv2-render COMMAND skyapo-render-tests

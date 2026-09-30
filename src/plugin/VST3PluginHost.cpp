@@ -15,9 +15,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 using VST3::Hosting::Module;
@@ -34,7 +36,12 @@ Steinberg::Vst::HostApplication &hostApplication() {
 }
 
 std::vector<std::string> modulePaths() {
-  auto paths = Module::getModulePaths();
+  // Useful for hermetic tests and deployments that intentionally want one
+  // private catalog. Normal operation continues to include SDK system paths.
+  const char *pathsOnly = std::getenv("SKYAPO_VST3_PATHS_ONLY");
+  auto paths = pathsOnly && std::string_view(pathsOnly) == "1"
+                   ? std::vector<std::string>{}
+                   : Module::getModulePaths();
   if (const char *env = std::getenv("VST3_PATH")) {
     std::string list(env);
     size_t begin = 0;
@@ -83,11 +90,17 @@ const Catalog &catalog() {
         continue;
       std::string error;
       auto module = Module::create(path, error);
-      if (!module)
+      if (!module) {
+        if (std::getenv("SKYAPO_VST3_DEBUG"))
+          std::cerr << "VST3: unable to load '" << path << "': " << error << '\n';
         continue;
+      }
       for (const auto &info : module->getFactory().classInfos()) {
         if (info.category() == "Audio Module Class")
           result.push_back({module, info, info.ID().toString(false), info.name()});
+        else if (std::getenv("SKYAPO_VST3_DEBUG"))
+          std::cerr << "VST3: skip class '" << info.name() << "' category '"
+                    << info.category() << "' in '" << path << "'\n";
       }
     }
     return result;
