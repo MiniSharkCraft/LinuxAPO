@@ -401,6 +401,8 @@ add_executable(skyapo-pipewire-lifetime tests/pipewire_lifetime.cpp)
 target_link_libraries(skyapo-pipewire-lifetime PRIVATE PkgConfig::PIPEWIRE)
 add_executable(skyapo-pipewire-test-source tests/pipewire_test_source.cpp)
 target_link_libraries(skyapo-pipewire-test-source PRIVATE PkgConfig::PIPEWIRE)
+add_executable(skyapo-pipewire-test-consumer tests/pipewire_test_consumer.cpp)
+target_link_libraries(skyapo-pipewire-test-consumer PRIVATE PkgConfig::PIPEWIRE)
 
 configure_file(packaging/skyapod.service.in
   ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)

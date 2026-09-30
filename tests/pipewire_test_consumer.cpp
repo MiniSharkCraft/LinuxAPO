@@ -1,0 +1,259 @@
+// Native PipeWire client used to consume and numerically verify the test mic.
+#include <pipewire/filter.h>
+#include <pipewire/keys.h>
+#include <pipewire/pipewire.h>
+#include <spa/param/audio/raw.h>
+
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+namespace {
+constexpr uint32_t Invalid = SPA_ID_INVALID;
+constexpr double InputAmplitude = 0.1;
+constexpr double ExpectedDb = -6.0;
+
+struct Consumer {
+  pw_main_loop* loop{};
+  pw_context* context{};
+  pw_core* core{};
+  pw_registry* registry{};
+  pw_filter* filter{};
+  spa_hook coreHook{}, registryHook{}, filterHook{};
+  spa_source* timeout{};
+  unsigned channels{2};
+  std::array<const char*, 2> channelNames{};
+  std::array<void*, 2> inputs{};
+  std::array<uint32_t, 2> inputIds{Invalid, Invalid};
+  std::array<uint32_t, 2> outputIds{Invalid, Invalid};
+  std::array<pw_proxy*, 2> links{};
+  uint32_t sourceNode{Invalid};
+  uint32_t ownNode{Invalid};
+  std::atomic<uint64_t> frames{0};
+  std::atomic<double> energy{0.0};
+  std::atomic<bool> failed{false};
+
+  explicit Consumer(bool mono)
+      : channels(mono ? 1 : 2),
+        channelNames(mono ? std::array<const char*, 2>{"MONO", ""}
+                          : std::array<const char*, 2>{"FL", "FR"}) {}
+
+  static unsigned channelIndex(const char* channel, const Consumer& c) {
+    for (unsigned i = 0; i < c.channels; ++i)
+      if (std::strcmp(channel, c.channelNames[i]) == 0) return i;
+    return c.channels;
+  }
+
+  void linkChannel(unsigned channel) {
+    if (channel >= channels || sourceNode == Invalid || ownNode == Invalid ||
+        outputIds[channel] == Invalid || inputIds[channel] == Invalid ||
+        links[channel])
+      return;
+    auto* properties = pw_properties_new(nullptr, nullptr);
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", sourceNode);
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u",
+                       outputIds[channel]);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u", ownNode);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
+                       inputIds[channel]);
+    links[channel] = reinterpret_cast<pw_proxy*>(
+        pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
+                              PW_VERSION_LINK, &properties->dict, 0));
+    pw_properties_free(properties);
+    if (!links[channel]) {
+      failed.store(true, std::memory_order_relaxed);
+      std::fprintf(stderr, "test consumer: cannot link channel %s\n",
+                   channelNames[channel]);
+      pw_main_loop_quit(loop);
+    }
+  }
+
+  static void global(void* data, uint32_t id, uint32_t, const char* type,
+                     uint32_t, const spa_dict* props) {
+    auto& c = *static_cast<Consumer*>(data);
+    if (!props) return;
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+      const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+      if (name && std::strcmp(name, "skyapo.virtual_mic") == 0)
+        c.sourceNode = id;
+      else if (name && std::strcmp(name, "skyapo.test.consumer") == 0)
+        c.ownNode = id;
+      else
+        return;
+      for (unsigned ch = 0; ch < c.channels; ++ch) c.linkChannel(ch);
+      return;
+    }
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0) return;
+    const char* nodeValue = spa_dict_lookup(props, PW_KEY_NODE_ID);
+    const char* direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+    const char* channel = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNEL);
+    if (!nodeValue || !direction || !channel) return;
+    char* end = nullptr;
+    const auto nodeId = std::strtoul(nodeValue, &end, 10);
+    if (!end || *end) return;
+    const unsigned index = channelIndex(channel, c);
+    if (index >= c.channels) return;
+    if (nodeId == c.ownNode && std::strcmp(direction, "in") == 0)
+      c.inputIds[index] = id;
+    else if (nodeId == c.sourceNode && std::strcmp(direction, "out") == 0)
+      c.outputIds[index] = id;
+    else
+      return;
+    c.linkChannel(index);
+  }
+
+  static void globalRemove(void*, uint32_t) {}
+
+  static void coreError(void* data, uint32_t, int, int result,
+                        const char* message) {
+    auto& c = *static_cast<Consumer*>(data);
+    c.failed.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr, "test consumer: PipeWire error %d: %s\n", result,
+                 message ? message : "unknown error");
+    pw_main_loop_quit(c.loop);
+  }
+
+  static void stateChanged(void* data, pw_filter_state, pw_filter_state state,
+                           const char* error) {
+    if (state != PW_FILTER_STATE_ERROR) return;
+    auto& c = *static_cast<Consumer*>(data);
+    c.failed.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr, "test consumer: %s\n",
+                 error ? error : "PipeWire filter error");
+    pw_main_loop_quit(c.loop);
+  }
+
+  static void process(void* data, spa_io_position* position) {
+    auto& c = *static_cast<Consumer*>(data);
+    const uint32_t count = position->clock.duration;
+    double blockEnergy = 0.0;
+    for (unsigned ch = 0; ch < c.channels; ++ch) {
+      auto* samples =
+          static_cast<float*>(pw_filter_get_dsp_buffer(c.inputs[ch], count));
+      if (!samples) return;
+      for (uint32_t i = 0; i < count; ++i)
+        blockEnergy += static_cast<double>(samples[i]) * samples[i];
+    }
+    double total = c.energy.load(std::memory_order_relaxed);
+    while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
+                                           std::memory_order_relaxed)) {
+    }
+    c.frames.fetch_add(count, std::memory_order_relaxed);
+  }
+
+  static void finish(void* data, uint64_t) {
+    pw_main_loop_quit(static_cast<Consumer*>(data)->loop);
+  }
+
+  int run() {
+    pw_init(nullptr, nullptr);
+    loop = pw_main_loop_new(nullptr);
+    if (!loop) throw std::runtime_error("cannot create PipeWire loop");
+    context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
+    if (!context) throw std::runtime_error("cannot create PipeWire context");
+    core = pw_context_connect(context, nullptr, 0);
+    if (!core) throw std::runtime_error("cannot connect to PipeWire");
+
+    static const pw_core_events coreEvents = [] {
+      pw_core_events value{};
+      value.version = PW_VERSION_CORE_EVENTS;
+      value.error = coreError;
+      return value;
+    }();
+    pw_core_add_listener(core, &coreHook, &coreEvents, this);
+    registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+    static const pw_registry_events registryEvents = [] {
+      pw_registry_events value{};
+      value.version = PW_VERSION_REGISTRY_EVENTS;
+      value.global = global;
+      value.global_remove = globalRemove;
+      return value;
+    }();
+    pw_registry_add_listener(registry, &registryHook, &registryEvents, this);
+
+    const bool mono = channels == 1;
+    auto* properties = pw_properties_new(
+        PW_KEY_NODE_NAME, "skyapo.test.consumer", PW_KEY_NODE_DESCRIPTION,
+        "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS, "Audio/Sink",
+        PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER, "true",
+        PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
+    pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
+    pw_properties_set(properties, SPA_KEY_AUDIO_POSITION,
+                      mono ? "[ MONO ]" : "[ FL FR ]");
+    filter = pw_filter_new(core, "SkyAPO Test Consumer", properties);
+    if (!filter) throw std::runtime_error("cannot create consumer filter");
+    static const pw_filter_events filterEvents = [] {
+      pw_filter_events value{};
+      value.version = PW_VERSION_FILTER_EVENTS;
+      value.state_changed = stateChanged;
+      value.process = process;
+      return value;
+    }();
+    pw_filter_add_listener(filter, &filterHook, &filterEvents, this);
+    for (unsigned ch = 0; ch < channels; ++ch) {
+      const auto portName = std::string("record_") + channelNames[ch];
+      inputs[ch] = pw_filter_add_port(
+          filter, PW_DIRECTION_INPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, 1,
+          pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
+                            PW_KEY_PORT_NAME, portName.c_str(),
+                            PW_KEY_AUDIO_CHANNEL, channelNames[ch], nullptr),
+          nullptr, 0);
+      if (!inputs[ch]) throw std::runtime_error("cannot create consumer port");
+    }
+    if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0)
+      throw std::runtime_error("cannot connect consumer filter");
+    ownNode = pw_filter_get_node_id(filter);
+    timeout = pw_loop_add_timer(pw_main_loop_get_loop(loop), finish, this);
+    if (!timeout) throw std::runtime_error("cannot create test timer");
+    timespec duration{3, 0};
+    pw_loop_update_timer(pw_main_loop_get_loop(loop), timeout, &duration,
+                         nullptr, false);
+    pw_main_loop_run(loop);
+
+    for (auto* link : links)
+      if (link) pw_proxy_destroy(link);
+    pw_filter_destroy(filter);
+    pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
+    pw_core_disconnect(core);
+    pw_context_destroy(context);
+    pw_main_loop_destroy(loop);
+    pw_deinit();
+
+    const auto capturedFrames = frames.load();
+    const double rms =
+        capturedFrames ? std::sqrt(energy.load() / (capturedFrames * channels))
+                       : 0.0;
+    const double expected =
+        InputAmplitude * std::pow(10.0, ExpectedDb / 20.0) / std::sqrt(2.0);
+    const double ratio = expected > 0 ? rms / expected : 0.0;
+    std::printf(
+        "Captured frames: %llu\nChannels: %u\nRMS: %.8f\n"
+        "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
+        static_cast<unsigned long long>(capturedFrames), channels, rms,
+        expected, ratio);
+    return !failed.load() && capturedFrames > 48000 &&
+                   std::abs(ratio - 1.0) < 0.03
+               ? 0
+               : 1;
+  }
+};
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc > 2 || (argc == 2 && std::string(argv[1]) != "--mono")) {
+    std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono]\n");
+    return 2;
+  }
+  try {
+    Consumer consumer(argc == 2);
+    return consumer.run();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "test consumer: %s\n", error.what());
+    return 1;
+  }
+}

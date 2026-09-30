@@ -43,8 +43,9 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Restart a private PipeWire server while SkyAPO is processing a deterministic stereo source; verify stable-name rediscovery, virtual source recreation, FL/FR links and the expected −6 dB DSP ratio.
 - [x] Exercise a one-channel PipeWire source; verify `MONO` mapping, mono virtual mic, 48 kHz negotiation and −6 dB processing.
 - [x] Remove and recreate a selected synthetic source under the same stable name; verify daemon retry, device rediscovery and link/DSP recovery.
-- [ ] Test physical device unplug/replug and virtual source consumer churn on real clients.
-- [ ] Test virtual source consumer churn, daemon restart, overrun reporting and format/quantum changes.
+- [x] Attach, stop, and reattach a native PipeWire consumer; verify stereo and mono virtual-source samples numerically, including after private server restart.
+- [ ] Test physical device unplug/replug and automatic consumer selection on real desktop clients.
+- [ ] Test daemon restart, overrun reporting and format/quantum changes.
 - Acceptance: no callback filesystem/config work or recurring allocations; injected invalid reload preserves audio; recovery tests recreate links/source.
 
 ## 0.5.x — remaining core DSP
