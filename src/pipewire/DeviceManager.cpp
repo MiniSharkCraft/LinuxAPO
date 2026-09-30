@@ -1,4 +1,5 @@
 #include "DeviceManager.h"
+#include "NodeIdParser.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -39,9 +40,10 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
     s.devices.sources.push_back(std::move(device));
   }
   if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
-    auto n = prop(props, PW_KEY_NODE_ID);
-    if (!n.empty())
-      s.devices.ports.push_back({id, static_cast<uint32_t>(std::stoul(n)),
+    const auto nodeId = skyapo::pipewire::parseNodeId(
+        prop(props, PW_KEY_NODE_ID));
+    if (nodeId)
+      s.devices.ports.push_back({id, *nodeId,
                                  prop(props, PW_KEY_PORT_DIRECTION),
                                  prop(props, PW_KEY_AUDIO_CHANNEL),
                                  prop(props, PW_KEY_PORT_NAME)});
