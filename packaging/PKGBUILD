@@ -1,13 +1,16 @@
 pkgname=skyapo
 pkgver=0.1.0
-pkgrel=7
+pkgrel=8
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
+# Maintainer: Cong Nguyen
 arch=('x86_64')
 url='https://sourceforge.net/projects/equalizerapo/'
 license=('GPL-2.0-or-later')
 depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme' 'muparser')
 makedepends=('cmake' 'gcc' 'git' 'pkgconf')
-source=("skyapo::git+file://${startdir}/..")
+# Makepkg runs this PKGBUILD from its containing directory. Using PWD avoids
+# namcap treating the sibling checkout as a package install-time dependency.
+source=("skyapo::git+file://${PWD}/..")
 sha256sums=('SKIP')
 
 prepare() {
