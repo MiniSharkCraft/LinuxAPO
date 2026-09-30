@@ -146,6 +146,51 @@ bool writeDaemonControlCliFixture(const QString &path) {
                              QFileDevice::ExeOwner);
 }
 
+bool writeConfigWorkflowCliFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "case \"$1\" in\n"
+      "  status)\n"
+      "    if [ -e \"$SKYAPO_UI_TEST_RELOAD_MARKER\" ]; then state=reloaded; "
+      "else state=streaming; fi\n"
+      "    printf '%s\\n' \"Daemon: $state\"; exit 0 ;;\n"
+      "  device) printf '%s\\n' 'ID\\tNODE "
+      "NAME\\tDESCRIPTION\\tSELECTED\\tCHANNELS\\tSAMPLE RATE'; exit 0 ;;\n"
+      "  config)\n"
+      "    if [ \"$2\" = check ] && [ \"$3\" = --json ]; then\n"
+      "      printf '%s\\n' "
+      "'{\"valid\":true,\"filter_count\":1,\"diagnostics\":[]}'\n"
+      "      exit 0\n"
+      "    fi\n"
+      "    printf '%s\\n' \"$2 $3\" >> \"$SKYAPO_UI_TEST_CONFIG_LOG\"\n"
+      "    if [ \"$2\" = check ]; then\n"
+      "      cat \"$3\" >> \"$SKYAPO_UI_TEST_CONFIG_LOG\"\n"
+      "      : > \"$SKYAPO_UI_TEST_CONFIG_GATE_DIR/check-ready\"\n"
+      "      while [ ! -e \"$SKYAPO_UI_TEST_CONFIG_GATE_DIR/check\" ]; do "
+      "sleep 0.01; done\n"
+      "      case \"$3\" in *reject*) echo 'fixture config rejected' >&2; exit "
+      "1 ;; esac\n"
+      "      echo 'Valid config: fixture'; exit 0\n"
+      "    fi\n"
+      "    if [ \"$2\" = reload ]; then\n"
+      "      : > \"$SKYAPO_UI_TEST_CONFIG_GATE_DIR/reload-ready\"\n"
+      "      while [ ! -e \"$SKYAPO_UI_TEST_CONFIG_GATE_DIR/reload\" ]; do "
+      "sleep 0.01; done\n"
+      "      if [ -e \"$SKYAPO_UI_TEST_CONFIG_GATE_DIR/reload-fail\" ]; then "
+      "echo 'fixture reload rejected' >&2; exit 1; fi\n"
+      "      : > \"$SKYAPO_UI_TEST_RELOAD_MARKER\"\n"
+      "      echo 'Config reload succeeded'; exit 0\n"
+      "    fi\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
 bool configIsValid(const QString &cli, const QString &path,
                    QString *diagnostic = nullptr) {
   QProcess process;
@@ -1570,6 +1615,232 @@ int main(int argc, char **argv) {
   }
   qunsetenv("SKYAPO_UI_TEST_CONTROL_LOG");
   qunsetenv("SKYAPO_UI_TEST_CONTROL_GATE_DIR");
+  const QString configWorkflowScript =
+      temporary.filePath(QStringLiteral("config-workflow-cli.sh"));
+  const QString configWorkflowLog =
+      temporary.filePath(QStringLiteral("config-workflow.log"));
+  const QString configWorkflowGateDir =
+      temporary.filePath(QStringLiteral("config-workflow-gates"));
+  const QString reloadMarker =
+      temporary.filePath(QStringLiteral("config-reloaded"));
+  if (!QDir().mkpath(configWorkflowGateDir) ||
+      !writeConfigWorkflowCliFixture(configWorkflowScript)) {
+    std::cerr << "could not create config workflow CLI fixture\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_CONFIG_LOG", configWorkflowLog.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_CONFIG_GATE_DIR",
+          configWorkflowGateDir.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_RELOAD_MARKER", reloadMarker.toLocal8Bit());
+  QString capturedDialogTitle;
+  QString capturedDialogText;
+  QTimer modalCapture;
+  modalCapture.setInterval(5);
+  QObject::connect(&modalCapture, &QTimer::timeout, [&] {
+    auto *message =
+        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+    if (!message || !capturedDialogTitle.isEmpty())
+      return;
+    capturedDialogTitle = message->windowTitle();
+    capturedDialogText = message->text();
+    if (auto *ok = message->button(QMessageBox::Ok))
+      ok->click();
+  });
+  modalCapture.start();
+  unsigned workflowHeartbeat = 0;
+  QTimer workflowPulse;
+  workflowPulse.setInterval(10);
+  QObject::connect(&workflowPulse, &QTimer::timeout,
+                   [&workflowHeartbeat] { ++workflowHeartbeat; });
+  workflowPulse.start();
+  const auto writeWorkflowConfig = [](const QString &path,
+                                      const QByteArray &contents) {
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           file.write(contents) == contents.size();
+  };
+  const auto waitForWorkflowFile = [](const QString &path) {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 2000 && !QFileInfo::exists(path)) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return QFileInfo::exists(path);
+  };
+  const auto waitForResponsiveHeartbeat = [&](unsigned previous) {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 60) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return workflowHeartbeat > previous;
+  };
+  const auto waitForDialog = [&](const QString &title) {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 2000 && capturedDialogTitle.isEmpty()) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return capturedDialogTitle == title;
+  };
+  const auto createWorkflowGate = [&](const QString &name) {
+    QFile gate(configWorkflowGateDir + QLatin1Char('/') + name);
+    return gate.open(QIODevice::WriteOnly);
+  };
+
+  const QString checkConfigPath = temporary.filePath("workflow-check.txt");
+  if (!writeWorkflowConfig(checkConfigPath, "Preamp: -1 dB\n")) {
+    std::cerr << "could not create config-check fixture\n";
+    return 1;
+  }
+  MainWindow checkWindow(checkConfigPath, configWorkflowScript);
+  auto *checkGain = checkWindow.findChild<PreampFilterGUI *>()
+                        ? checkWindow.findChild<PreampFilterGUI *>()
+                              ->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                        : nullptr;
+  QPushButton *checkButton = nullptr;
+  for (auto *button : checkWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save & Check")
+      checkButton = button;
+  if (!checkGain || !checkButton) {
+    std::cerr << "config-check controls were not created\n";
+    return 1;
+  }
+  checkGain->setValue(-8.0);
+  checkButton->click();
+  QFile savedCheckConfig(checkConfigPath);
+  if (!savedCheckConfig.open(QIODevice::ReadOnly) ||
+      savedCheckConfig.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "Save & Check invoked the CLI before saving editor changes\n";
+    return 1;
+  }
+  const unsigned checkHeartbeat = workflowHeartbeat;
+  if (!waitForWorkflowFile(configWorkflowGateDir + "/check-ready") ||
+      !waitForResponsiveHeartbeat(checkHeartbeat) ||
+      !createWorkflowGate("check") || !waitForDialog("Configuration valid") ||
+      !capturedDialogText.contains("Valid config: fixture")) {
+    std::cerr << "successful Save & Check did not remain responsive or show "
+                 "the CLI result\n";
+    return 1;
+  }
+  std::cerr << "workflow-check-success\n";
+
+  const QString rejectedConfigPath =
+      temporary.filePath("workflow-reject-config.txt");
+  if (!writeWorkflowConfig(rejectedConfigPath, "Preamp: 0 dB\n")) {
+    std::cerr << "could not create rejected config-check fixture\n";
+    return 1;
+  }
+  capturedDialogTitle.clear();
+  capturedDialogText.clear();
+  QFile::remove(configWorkflowGateDir + "/check-ready");
+  QFile::remove(configWorkflowGateDir + "/check");
+  MainWindow rejectedCheckWindow(rejectedConfigPath, configWorkflowScript);
+  QPushButton *rejectedCheckButton = nullptr;
+  for (auto *button : rejectedCheckWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save & Check")
+      rejectedCheckButton = button;
+  if (!rejectedCheckButton) {
+    std::cerr << "Save & Check button was missing for rejected config\n";
+    return 1;
+  }
+  rejectedCheckButton->click();
+  if (!waitForWorkflowFile(configWorkflowGateDir + "/check-ready") ||
+      !createWorkflowGate("check") || !waitForDialog("Configuration error") ||
+      !capturedDialogText.contains("fixture config rejected")) {
+    std::cerr << "failed Save & Check did not display the CLI diagnostic\n";
+    return 1;
+  }
+  std::cerr << "workflow-check-failure\n";
+
+  const QString reloadConfigPath = temporary.filePath("workflow-reload.txt");
+  if (!writeWorkflowConfig(reloadConfigPath, "Preamp: -1 dB\n")) {
+    std::cerr << "could not create config-reload fixture\n";
+    return 1;
+  }
+  capturedDialogTitle.clear();
+  capturedDialogText.clear();
+  QFile::remove(configWorkflowGateDir + "/reload-ready");
+  QFile::remove(configWorkflowGateDir + "/reload");
+  MainWindow reloadWindow(reloadConfigPath, configWorkflowScript);
+  auto *reloadPreamp = reloadWindow.findChild<PreampFilterGUI *>();
+  auto *reloadGain =
+      reloadPreamp ? reloadPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  QPushButton *reloadButton = nullptr;
+  for (auto *button : reloadWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save & Reload")
+      reloadButton = button;
+  if (!reloadGain || !reloadButton) {
+    std::cerr << "config-reload controls were not created\n";
+    return 1;
+  }
+  reloadGain->setValue(-5.0);
+  reloadButton->click();
+  QFile savedReloadConfig(reloadConfigPath);
+  if (!savedReloadConfig.open(QIODevice::ReadOnly) ||
+      savedReloadConfig.readAll() != "Preamp: -5 dB\n") {
+    std::cerr << "Save & Reload invoked the CLI before saving editor changes\n";
+    return 1;
+  }
+  const unsigned reloadHeartbeat = workflowHeartbeat;
+  if (!waitForWorkflowFile(configWorkflowGateDir + "/reload-ready") ||
+      !waitForResponsiveHeartbeat(reloadHeartbeat) ||
+      !createWorkflowGate("reload") || !waitForDialog("Reload requested") ||
+      !capturedDialogText.contains("Config reload succeeded")) {
+    std::cerr << "successful Save & Reload did not remain responsive or show "
+                 "the CLI result\n";
+    return 1;
+  }
+  std::cerr << "workflow-reload-success\n";
+  QElapsedTimer statusRefreshWait;
+  statusRefreshWait.start();
+  auto *reloadedStatus = reloadWindow.findChild<QLabel *>("daemonStatus");
+  while (statusRefreshWait.elapsed() < 2000 &&
+         (!reloadedStatus ||
+          !reloadedStatus->text().contains("Daemon: reloaded"))) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!reloadedStatus || !reloadedStatus->text().contains("Daemon: reloaded")) {
+    std::cerr << "successful config reload did not refresh daemon status\n";
+    return 1;
+  }
+
+  capturedDialogTitle.clear();
+  capturedDialogText.clear();
+  QFile::remove(configWorkflowGateDir + "/reload-ready");
+  QFile::remove(configWorkflowGateDir + "/reload");
+  QFile reloadFailureGate(configWorkflowGateDir + "/reload-fail");
+  if (!reloadFailureGate.open(QIODevice::WriteOnly)) {
+    std::cerr << "could not create failed reload fixture state\n";
+    return 1;
+  }
+  MainWindow failedReloadWindow(reloadConfigPath, configWorkflowScript);
+  QPushButton *failedReloadButton = nullptr;
+  for (auto *button : failedReloadWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save & Reload")
+      failedReloadButton = button;
+  if (!failedReloadButton) {
+    std::cerr << "Save & Reload button was missing for failure fixture\n";
+    return 1;
+  }
+  failedReloadButton->click();
+  if (!waitForWorkflowFile(configWorkflowGateDir + "/reload-ready") ||
+      !createWorkflowGate("reload") || !waitForDialog("Reload failed") ||
+      !capturedDialogText.contains("fixture reload rejected")) {
+    std::cerr << "failed Save & Reload did not display the CLI diagnostic\n";
+    return 1;
+  }
+  std::cerr << "workflow-reload-failure\n";
+  modalCapture.stop();
+  workflowPulse.stop();
+  qunsetenv("SKYAPO_UI_TEST_CONFIG_LOG");
+  qunsetenv("SKYAPO_UI_TEST_CONFIG_GATE_DIR");
+  qunsetenv("SKYAPO_UI_TEST_RELOAD_MARKER");
   std::cout << "upstream editor widgets, selection/reordering, config "
                "preservation, async UI, stable device selection, and "
                "bounded CLI failure handling, and GraphicEQ serialization "
