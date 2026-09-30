@@ -1,6 +1,6 @@
 pkgname=skyapo
 pkgver=0.1.0
-pkgrel=11
+pkgrel=12
 pkgdesc='Linux audio processing port based on Equalizer APO DSP'
 # Maintainer: Cong Nguyen
 arch=('x86_64')

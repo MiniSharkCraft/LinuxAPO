@@ -3,17 +3,13 @@
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
 file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
 set(EAPO_SOURCES)
-configure_file(${EAPO}/FilterConfiguration.cpp
-  ${EAPO_PORT}/FilterConfiguration.cpp COPYONLY)
-configure_file(${EAPO}/FilterConfiguration.h
-  ${EAPO_PORT}/FilterConfiguration.h COPYONLY)
 # FilterConfiguration consumes only immutable sizing values. Adapt generated
 # copies to a narrow context instead of coupling them to SkyAPO's legacy global
 # FilterEngine factory shim. Upstream source stays pristine; checked tokens make
 # upstream drift fail at configure time rather than silently skip this fix.
 foreach(configuration_file FilterConfiguration.h FilterConfiguration.cpp)
   set(configuration_path ${EAPO_PORT}/${configuration_file})
-  file(READ ${configuration_path} configuration_content)
+  file(READ "${EAPO}/${configuration_file}" configuration_content)
   if(configuration_file STREQUAL "FilterConfiguration.h")
     string(FIND "${configuration_content}"
       "FilterConfiguration(FilterEngine* engine" expected_signature)
@@ -42,7 +38,15 @@ foreach(configuration_file FilterConfiguration.h FilterConfiguration.cpp)
   if(configuration_context_found EQUAL -1)
     message(FATAL_ERROR "Could not decouple upstream FilterConfiguration context")
   endif()
-  file(WRITE ${configuration_path} "${configuration_content}")
+  if(EXISTS "${configuration_path}")
+    file(READ "${configuration_path}" previous_configuration_content)
+  else()
+    set(previous_configuration_content "")
+  endif()
+  if(NOT "${previous_configuration_content}" STREQUAL
+     "${configuration_content}")
+    file(WRITE "${configuration_path}" "${configuration_content}")
+  endif()
 endforeach()
 list(APPEND EAPO_SOURCES ${EAPO_PORT}/FilterConfiguration.cpp)
 set(EAPO_FILTERS PreampFilter PreampFilterFactory BiQuad BiQuadFilter

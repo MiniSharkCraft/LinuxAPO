@@ -236,6 +236,9 @@ endif()
 add_executable(skyapo-render src/render/main.cpp)
 target_link_libraries(skyapo-render PRIVATE skyapo-core PkgConfig::SNDFILE)
 
+add_executable(skyapo-bench src/benchmark/main.cpp)
+target_link_libraries(skyapo-bench PRIVATE skyapo-core)
+
 add_executable(skyapo src/cli/main.cpp)
 target_compile_definitions(skyapo PRIVATE
   SKYAPO_VERSION="${PROJECT_VERSION}"
@@ -287,6 +290,10 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/ipc_cli_test.py
       $<TARGET_FILE:skyapo>)
+  add_test(NAME skyapo-benchmark
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmark_test.py
+      $<TARGET_FILE:skyapo-bench>)
 endif()
 add_executable(skyapo-ipc-protocol-tests tests/ipc_protocol_test.cpp)
 add_test(NAME skyapo-ipc-protocol COMMAND skyapo-ipc-protocol-tests)
@@ -676,11 +683,11 @@ endif()
 
 configure_file(packaging/skyapod.service.in
   ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)
-install(TARGETS skyapo skyapod skyapo-render
+install(TARGETS skyapo skyapod skyapo-render skyapo-bench
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
-install(FILES docs/man/skyapo.1 docs/man/skyapod.1
+install(FILES docs/man/skyapo.1 docs/man/skyapod.1 docs/man/skyapo-bench.1
   DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 install(FILES README.md ROADMAP.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md
   DESTINATION ${CMAKE_INSTALL_DOCDIR})

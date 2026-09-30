@@ -130,6 +130,32 @@ The test LV2 bundle was selected via `LV2_PATH` and loaded by `skyapod` using `t
 
 ## Implementation file changes in this milestone
 
+### Repeatable DSP block benchmark
+
+`skyapo-bench` loads the same `Engine`/upstream filter graph used by the
+renderer, warms it up, and reports JSON mean/median/p95/max processing time for
+a fixed block, plus that block's nominal time budget. Input copying and config
+construction are outside the measured interval. It is a local DSP benchmark,
+not a PipeWire callback, scheduling, or end-to-end latency benchmark. It also
+reports process peak RSS, which includes libraries and runtime state and cannot
+be attributed solely to the filter graph.
+
+Example filter-count scaling on a development shell:
+
+```sh
+for count in 1 4 16 64; do
+  config=$(mktemp)
+  for ((i = 0; i < count; i++)); do printf 'Preamp: -0.01 dB\n' >> "$config"; done
+  build/skyapo-bench --config "$config" --rate 48000 --channels 2 --block 256
+  rm -f "$config"
+done
+```
+
+To measure a fixed-block convolution graph, point it at a valid convolution
+configuration and pass the negotiated rate and block size. Compare runs on the
+same host/build; do not interpret `p95_budget_percent` as a guarantee against
+PipeWire scheduling jitter.
+
 - `CMakeLists.txt`, `.gitignore`, `.gitmodules`, `cmake/PortableEapo.cmake`: pinned upstream gitlink, clean build-time portability adaptation, native runtime/audit/probe targets.
 - `src/core/Engine.h`, `src/core/Engine.cpp`: explicit external channel names; relative/nested Include expansion; ordered upstream Channel/Copy channel routing with preallocated buses; transactional config construction; unchanged actual upstream DSP math.
 - `src/platform/linux/ChannelHelper.cpp`: Linux channel-name implementation backing the upstream ChannelFilter/CopyFilter API.

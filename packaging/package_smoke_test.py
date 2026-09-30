@@ -28,18 +28,22 @@ def main():
         "usr/bin/skyapo",
         "usr/bin/skyapod",
         "usr/bin/skyapo-render",
+        "usr/bin/skyapo-bench",
         "usr/bin/skyapo-ui",
         "usr/lib/systemd/user/skyapod.service",
         "usr/share/applications/skyapo.desktop",
         "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
         "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
+        "usr/share/man/man1/skyapo-bench.1",
         "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
     ]
     for relative in required:
         path = root / relative
         if not path.is_file():
             raise RuntimeError(f"package is missing required file: {relative}")
-    for binary in ("skyapo", "skyapod", "skyapo-render", "skyapo-ui"):
+    for binary in (
+        "skyapo", "skyapod", "skyapo-render", "skyapo-bench", "skyapo-ui"
+    ):
         path = root / "usr/bin" / binary
         if not os.access(path, os.X_OK):
             raise RuntimeError(f"package binary is not executable: {path}")
@@ -64,6 +68,7 @@ def main():
 
         cli = root / "usr/bin/skyapo"
         run([str(cli), "--help"], env)
+        run([str(root / "usr/bin/skyapo-bench"), "--help"], env)
         config = temp / "smoke.txt"
         config.write_text("Preamp: -6 dB\n")
         run([str(cli), "config", "check", str(config)], env)

@@ -24,6 +24,13 @@ For AddressSanitizer and UBSan: configure with `-DSKYAPO_SANITIZERS=ON`.
 build/skyapo-render --input input.wav --output output.wav --config examples/basic.txt
 ```
 
+Measure DSP block time for a config (JSON output; this is not PipeWire or
+end-to-end latency):
+
+```sh
+build/skyapo-bench --config examples/basic.txt --rate 48000 --channels 2 --block 256
+```
+
 The WAV sample rate/channel count are preserved. Supported commands currently are `Preamp:`, Equalizer APO parametric and IIR `Filter:`, `Delay:`, `Channel:`, `Copy:`, `Stage:`, `GraphicEQ:`, `Convolution:`, nested `Include:` with relative paths, and basic numeric/boolean `If:`, `ElseIf:`, `Else:`, `EndIf:` directives. Conditional variables are `sampleRate`, `inputChannelCount`, and `outputChannelCount`. Invalid and unsupported active lines report the config path and line number. `Stage: capture` selects Linux capture processing; Windows-only `pre-mix`/`post-mix` sections are skipped. This uses upstream filter implementations and factories, but the complete Equalizer APO parser is not yet ported.
 
 Check a config with `build/skyapo config check examples/basic.txt`. `build/skyapo device list` enumerates PipeWire source nodes and reports channel count plus sample rate when node metadata provides it; unavailable rates are shown as `unknown` rather than inferred.

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `skyapo-bench`, a JSON DSP block-time benchmark using the actual engine, with filter-count smoke coverage, install/man-page integration, and package smoke validation.
 - Decouple the generated upstream `FilterConfiguration` constructor from SkyAPO's legacy `FilterEngine` factory shim using a checked Linux `FilterConfigurationContext`; this clarifies the future full-engine port boundary without modifying the upstream checkout.
 - Add an Arch package-stage smoke test for installed executables, user-service path, desktop assets, license notices, isolated config validation and offline-renderer startup.
 - Add a Linux Convolution editor row with config-relative WAV-path browsing, missing/unreadable IR feedback and Save & Check integration; offscreen UI tests verify path preservation and the real parser/checker result.

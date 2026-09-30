@@ -67,6 +67,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Document that the PipeWire per-channel gain candidate is conservative and is not claimed identical to Windows `IAudioEndpointVolume`; offline render/config check reject the endpoint-dependent command without a live provider.
 - [x] Monitor the default PipeWire render sink's effective per-channel `Props` volume and mute state, with live CLI status, metadata/Pod tests, and desktop cross-check against `wpctl`; unrelated ALSA device `Props` must not overwrite the valid volume snapshot.
 - [x] Distinguish the diagnostic RMS channel level from a uniform positive per-channel gain candidate; mark asymmetric/zero values unavailable and keep mute separate. Do not treat either candidate as Windows endpoint master-volume semantics without further validation.
+- [x] Add `skyapo-bench` for repeatable actual `Engine` processing measurements over configurable fixed blocks; it reports mean/median/p95/max DSP time, nominal block budget and whole-process peak RSS, with generated 1/4/16-filter CTest coverage. This does not measure PipeWire scheduling or end-to-end latency; graph-only memory attribution and a dedicated convolution benchmark remain open.
 - [ ] Benchmark filter scaling, convolution, memory and latency; add deterministic impulse/frequency-response fixtures.
 - Acceptance: every claimed directive has golden reference tests and sanitizer coverage; known latency only is reported.
 

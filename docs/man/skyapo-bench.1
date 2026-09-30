@@ -1,0 +1,46 @@
+.TH SKYAPO-BENCH 1 "2026-09-30" "SkyAPO 0.1.0" "User Commands"
+.SH NAME
+skyapo-bench \- measure SkyAPO DSP block processing time
+.SH SYNOPSIS
+.B skyapo-bench
+--config \fIFILE\fR [--rate \fIHZ\fR] [--channels \fICOUNT\fR]
+[--block \fIFRAMES\fR] [--warmup \fIBLOCKS\fR]
+[--iterations \fIBLOCKS\fR]
+.SH DESCRIPTION
+.B skyapo-bench
+loads a SkyAPO configuration into the same DSP engine used by the offline
+renderer and measures repeated fixed-size processing blocks. Configuration
+loading and input-buffer preparation are outside the timed interval. Results
+are emitted as one JSON object with mean, median, p95 and maximum block time
+alongside the nominal block budget.
+.PP
+The JSON also includes process peak RSS in KiB. This includes the executable,
+loaded libraries and runtime state; it is not an isolated measurement of the
+filter graph's allocation.
+.PP
+This measures the local DSP engine only. It does not measure PipeWire graph
+latency, scheduling jitter, device latency, or callback overhead,
+and it is not a realtime-safety guarantee.
+.SH OPTIONS
+.TP
+.B --config \fIFILE\fR
+Configuration to validate, construct and process. Required.
+.TP
+.B --rate \fIHZ\fR
+Nominal sample rate. Default: 48000.
+.TP
+.B --channels \fICOUNT\fR
+Channel count from 1 through 8. Default: 2.
+.TP
+.B --block \fIFRAMES\fR
+Frames in each measured block. Default: 256.
+.TP
+.B --warmup \fIBLOCKS\fR
+Unmeasured warmup blocks. Default: 500.
+.TP
+.B --iterations \fIBLOCKS\fR
+Measured blocks. Default: 5000.
+.SH EXAMPLE
+.nf
+skyapo-bench --config examples/basic.txt --rate 48000 --channels 2 --block 256
+.fi
