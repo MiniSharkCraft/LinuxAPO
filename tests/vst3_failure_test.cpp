@@ -1,7 +1,38 @@
 #include "VST3PluginHost.h"
+#include "Engine.h"
 
 #include <array>
+#include <cstdlib>
 #include <iostream>
+#include <string>
+#include <unistd.h>
+
+static bool engineReportsFailure() {
+  constexpr const char *uid = "534B5941504F00010000000000000002";
+  char path[] = "/tmp/skyapo-vst3-failure-XXXXXX";
+  const int fd = mkstemp(path);
+  if (fd < 0)
+    return false;
+  const std::string config =
+      std::string("Plugin: VST3 ") + uid + "\n";
+  const auto written = write(fd, config.data(), config.size());
+  close(fd);
+  if (written != static_cast<ssize_t>(config.size())) {
+    unlink(path);
+    return false;
+  }
+
+  Engine engine(48000, 2, 64, {L"L", L"R"});
+  engine.loadConfig(path);
+  unlink(path);
+  std::array<float, 128> block{};
+  block.fill(0.25f);
+  engine.process(block.data(), 64);
+  const auto failures = engine.failedPluginDescriptions();
+  return failures.size() == 1 &&
+         failures.front().find(uid) != std::string::npos &&
+         failures.front().find(":1") != std::string::npos;
+}
 
 int main() {
   VST3PluginHost host;
@@ -37,6 +68,10 @@ int main() {
         std::cerr << "latched VST3 error did not silence subsequent block\n";
         return 1;
       }
+  if (!engineReportsFailure()) {
+    std::cerr << "Engine did not report the failed VST3 plugin/config line\n";
+    return 1;
+  }
   std::cout << "VST3 error latched; current and subsequent blocks are silent\n";
   return 0;
 }

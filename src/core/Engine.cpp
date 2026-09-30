@@ -512,9 +512,10 @@ void Engine::process(float *samples, unsigned frames) {
 std::vector<std::string> Engine::failedPluginDescriptions() const {
   std::vector<std::string> failures;
   for (size_t i = 0; i < graph.size(); ++i) {
-    const auto *state = dynamic_cast<const IPluginFailureState *>(graph[i].filter);
+    const auto *state =
+        dynamic_cast<const IPluginFailureState *>(graph[i].filter);
     if (state && state->processingFailed() && i < descriptions.size())
-      failures.push_back(descriptions[i]);
+      failures.push_back(state->failureIdentifier() + " — " + descriptions[i]);
   }
   return failures;
 }

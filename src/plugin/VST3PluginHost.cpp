@@ -361,6 +361,10 @@ public:
   bool processingFailed() const noexcept override {
     return instance && instance->processingFailed();
   }
+  const std::string &failureIdentifier() const noexcept override {
+    return pluginUid;
+  }
+
 private:
   VST3PluginHost &host;
   std::string pluginUid;

@@ -74,7 +74,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 
 - [x] Add first native CLAP audio-effect host against official pinned CLAP headers; add ID discovery via CLAP_PATH/standard paths and numeric offline/realtime-audit fixtures.
 - [x] Add CLAP parameter metadata/CLI inspection and static config-time parameter events/overrides with range validation; test numerical offline processing, invalid config rejection, allocation audit and live PipeWire capture.
-- [x] Latch CLAP `CLAP_PROCESS_ERROR` atomically and silence the current/following blocks without recalling the failed plugin; daemon/CLI failure reporting and equivalent VST3 handling remain open.
+- [x] Latch CLAP/VST3 process errors atomically, silence current/following blocks without recalling the failed plugin, and expose plugin identifier/source line through Engine and daemon/CLI status.
 - [x] Pin official Steinberg VST3 SDK components and build the Linux module/hosting subset without adding the full SDK/tutorial/UI tree.
 - [x] Add VST3 bundle/class discovery, CLI info, and an initial single-bus mono/stereo audio-effect adapter; manually render a real installed LSP Filter Stereo bundle offline and confirm changed samples.
 - [x] Honor `VST3_PATH` alongside Steinberg standard module paths and cache discovered module metadata per process.

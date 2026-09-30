@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Added `skyapo diagnostics --json` with typed runtime/build fields and explicit `null` for unavailable values; its CLI fixture verifies JSON escaping and the unchanged text diagnostics command. CLAP process errors now latch lock-free and silence subsequent blocks without recalling the failed plugin; daemon-level error reporting and VST3 handling remain open.
+- Added `skyapo diagnostics --json` with typed runtime/build fields and explicit `null` for unavailable values; its CLI fixture verifies JSON escaping and the unchanged text diagnostics command. CLAP/VST3 process errors now latch lock-free, silence later blocks without recalling the failed plugin, and surface the plugin identifier plus config source line through status/JSON diagnostics.
 - `LoudnessCorrection:` now fails with an actionable file/line error explaining its dependency on Windows `IAudioEndpointVolume`; no fixed-gain approximation is silently substituted.
 - Verified a yabridge-produced ATKExpander VST3 through a private PipeWire graph and independent mono consumer: 143360 frames captured, daemon/consumer RMS 0.00077629/0.00077680, DSP ratio 0.0109782, zero daemon overruns and audited allocations/deallocations. The wrapper reports `realtime: no`; this is a functional-path test, not a safety guarantee. A prior `File name too long`/Wine stack-overflow was caused by long isolation paths and did not recur with short private paths.
 - `skyapo diagnostics` now reports the linked PipeWire library version, or explicitly says PipeWire support was not built.
