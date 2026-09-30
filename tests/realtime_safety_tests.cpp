@@ -114,7 +114,7 @@ int main() {
     close(pluginFd);
     {
       std::ofstream f(pluginPath);
-      f << "Plugin: CLAP org.skyapo.test.gain\n";
+      f << "Plugin: CLAP org.skyapo.test.gain 7=0.25\n";
     }
     Engine plugin(48000, 2, 8192, {L"L", L"R"});
     plugin.loadConfig(pluginPath);

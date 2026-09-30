@@ -167,7 +167,14 @@ int main(int argc, char **argv) {
         if (found != plugins.end()) {
           const auto info = clapHost.describe(requested);
           std::cout << info.name << "\nFormat: CLAP\nID: " << info.uri
-                    << "\nAudio parameters: not exposed by the current host\n";
+                    << "\n";
+          if (info.inputParameters.empty())
+            std::cout << "Input parameters: none\n";
+          for (const auto &parameter : info.inputParameters)
+            std::cout << parameter.symbol << "\t" << parameter.name << "\t"
+                      << "default=" << parameter.defaultValue << "\t"
+                      << "range=[" << parameter.minimum << ", "
+                      << parameter.maximum << "]\n";
           return 0;
         }
       }

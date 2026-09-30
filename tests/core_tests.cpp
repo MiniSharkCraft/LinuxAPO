@@ -99,6 +99,38 @@ int main() {
       std::cerr << "CLAP test plugin output mismatch at " << i << '\n';
       return 1;
     }
+
+  if (!write(path, "Plugin: CLAP org.skyapo.test.gain Gain=0.25\n"))
+    return 1;
+  Engine clapOverride(48000, 2, 128, {L"L", L"R"});
+  clapOverride.loadConfig(path);
+  float clapOverriddenBlock[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const float overriddenExpected[8] = {.05f, -.1f, .15f, -.2f,
+                                       .25f, -.25f, .125f, -.125f};
+  clapOverride.process(clapOverriddenBlock, 4);
+  for (unsigned i = 0; i < 8; ++i)
+    if (std::abs(clapOverriddenBlock[i] - overriddenExpected[i]) > 1e-5f) {
+      std::cerr << "CLAP parameter override output mismatch at " << i << '\n';
+      return 1;
+    }
+  for (const auto *invalid : {
+           "Plugin: CLAP org.skyapo.test.gain missing=0.25\n",
+           "Plugin: CLAP org.skyapo.test.gain 7=3\n",
+       }) {
+    if (!write(path, invalid))
+      return 1;
+    bool rejectedOverride = false;
+    try {
+      Engine invalidClap(48000, 2, 128, {L"L", L"R"});
+      invalidClap.loadConfig(path);
+    } catch (const std::exception &) {
+      rejectedOverride = true;
+    }
+    if (!rejectedOverride) {
+      std::cerr << "invalid CLAP parameter override was accepted\n";
+      return 1;
+    }
+  }
 #endif
 
   if (!write(path, "Filter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n"))

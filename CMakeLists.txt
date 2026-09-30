@@ -48,6 +48,7 @@ target_include_directories(skyapo-core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin src/core ${EAPO_PORT}
          ${EAPO_PORT}/filters ${EAPO}/filters ${EAPO} ${EAPO}/helpers)
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
+target_compile_definitions(skyapo-core PRIVATE SKYAPO_VERSION="${PROJECT_VERSION}")
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   target_sources(skyapo-core PRIVATE src/plugin/CLAPPluginHost.cpp)
@@ -251,7 +252,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   add_test(NAME skyapo-clap-plugin-info COMMAND skyapo plugin info
     org.skyapo.test.gain)
   set_tests_properties(skyapo-clap-plugin-info PROPERTIES
-    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}"
+    PASS_REGULAR_EXPRESSION "7[ \t]+Gain")
 endif()
 
 add_executable(skyapo-render-tests tests/render_tests.cpp)
@@ -261,7 +263,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/clap/include/clap/clap.h")
   add_test(NAME skyapo-offline-clap-render COMMAND skyapo-render-tests
     $<TARGET_FILE:skyapo-render>
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_gain.txt -6.0206)
+  add_test(NAME skyapo-offline-clap-parameter-render COMMAND skyapo-render-tests
+    $<TARGET_FILE:skyapo-render>
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_override.txt -12.0412)
   set_tests_properties(skyapo-offline-clap-render PROPERTIES
+    ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
+  set_tests_properties(skyapo-offline-clap-parameter-render PROPERTIES
     ENVIRONMENT "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR}")
   add_dependencies(skyapo-render-tests skyapo-test-clap)
 endif()

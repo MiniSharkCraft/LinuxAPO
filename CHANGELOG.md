@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Added a pinned official CLAP SDK submodule and initial native CLAP effect host with CLAP_PATH/standard-path discovery, config IDs, offline render and 1000-block realtime-allocation tests.
-- Added a native CLAP stereo half-gain test plugin; CTest confirms the expected −6.0206 dB output and no recurring host-side callback allocation. Parameters/events/state/latency and production plugin safety remain unsupported.
+- Added a native CLAP stereo half-gain test plugin; CTest confirms the expected −6.0206 dB output and no recurring host-side callback allocation. Live events/state/latency and production plugin safety remain unsupported.
+- Added CLAP parameter metadata inspection and config-time overrides by stable numeric ID or unique name; validated range/unknown-value rejection and numerical offline gain. Fixed overrides are delivered using preallocated process events.
 - Added physical input channel counts and published sample-rate metadata to `skyapo device list`; the GUI selector displays known values and leaves unavailable rates unknown.
 - Fixed config comment stripping so `#` inside quoted Include paths is preserved; added nested-file regression coverage.
 - Added row focus/selection, Delete removal, and Alt+Up/Alt+Down config reordering to the Linux-hosted upstream filter rows.

@@ -62,7 +62,8 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 ## 0.7.x — plugin formats and yabridge
 
 - [x] Add first native CLAP audio-effect host against official pinned CLAP headers; add ID discovery via CLAP_PATH/standard paths and numeric offline/realtime-audit fixtures.
-- [ ] Add CLAP parameter/event/state/latency support, production plugin validation and safer failure isolation.
+- [x] Add CLAP parameter metadata/CLI inspection and static config-time parameter events/overrides with range validation; test numerical offline processing, invalid config rejection, allocation audit and live PipeWire capture.
+- [ ] Add CLAP live parameter/control changes, state/latency support, production-plugin validation and safer failure isolation.
 - [ ] Add VST2 and VST3 support as legally distributable host integrations permit.
 - [ ] Verify yabridge-produced wrappers using ordinary native format scanning; document user workflow.
 - [ ] Plugin live parameters, state, bypass, latency and isolation behavior.

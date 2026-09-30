@@ -1,13 +1,17 @@
 #include <clap/clap.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct gain_data { const clap_host_t *host; } gain_data;
+typedef struct gain_data {
+  const clap_host_t *host;
+  double gain;
+} gain_data;
 
 static bool CLAP_ABI plugin_init(const clap_plugin_t *plugin) {
   if (!plugin || !plugin->plugin_data)
     return false;
-  const gain_data *data = plugin->plugin_data;
+  gain_data *data = plugin->plugin_data;
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   return thread_check && thread_check->is_main_thread(data->host);
@@ -32,17 +36,30 @@ static void CLAP_ABI plugin_stop(const clap_plugin_t *plugin) { (void)plugin; }
 static void CLAP_ABI plugin_reset(const clap_plugin_t *plugin) { (void)plugin; }
 static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
                                                   const clap_process_t *process) {
-  const gain_data *data = plugin->plugin_data;
+  gain_data *data = plugin->plugin_data;
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   if (!process || process->audio_inputs_count != 1 ||
       process->audio_outputs_count != 1 || !thread_check ||
       !thread_check->is_audio_thread(data->host))
     return CLAP_PROCESS_ERROR;
+  for (uint32_t e = 0; process->in_events &&
+                        e < process->in_events->size(process->in_events);
+       ++e) {
+    const clap_event_header_t *header =
+        process->in_events->get(process->in_events, e);
+    if (header && header->space_id == CLAP_CORE_EVENT_SPACE_ID &&
+        header->type == CLAP_EVENT_PARAM_VALUE) {
+      const clap_event_param_value_t *event =
+          (const clap_event_param_value_t *)header;
+      if (event->param_id == 7)
+        data->gain = event->value;
+    }
+  }
   for (uint32_t c = 0; c < 2; ++c)
     for (uint32_t i = 0; i < process->frames_count; ++i)
       process->audio_outputs[0].data32[c][i] =
-          process->audio_inputs[0].data32[c][i] * 0.5f;
+          (float)(process->audio_inputs[0].data32[c][i] * data->gain);
   return CLAP_PROCESS_CONTINUE;
 }
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
@@ -71,10 +88,67 @@ static bool CLAP_ABI port_get(const clap_plugin_t *plugin, uint32_t index,
   return true;
 }
 static const clap_plugin_audio_ports_t audio_ports = {port_count, port_get};
+static uint32_t CLAP_ABI param_count(const clap_plugin_t *plugin) {
+  (void)plugin;
+  return 1;
+}
+static bool CLAP_ABI param_info(const clap_plugin_t *plugin, uint32_t index,
+                                clap_param_info_t *info) {
+  (void)plugin;
+  if (index || !info)
+    return false;
+  memset(info, 0, sizeof(*info));
+  info->id = 7;
+  info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+  strcpy(info->name, "Gain");
+  info->min_value = 0.0;
+  info->max_value = 2.0;
+  info->default_value = 0.5;
+  return true;
+}
+static bool CLAP_ABI param_value(const clap_plugin_t *plugin, clap_id id,
+                                  double *value) {
+  if (id != 7 || !value)
+    return false;
+  *value = ((const gain_data *)plugin->plugin_data)->gain;
+  return true;
+}
+static bool CLAP_ABI param_value_to_text(const clap_plugin_t *plugin, clap_id id,
+                                         double value, char *buffer,
+                                         uint32_t capacity) {
+  (void)plugin;
+  if (id != 7 || !buffer || capacity == 0)
+    return false;
+  snprintf(buffer, capacity, "%.3f", value);
+  return true;
+}
+static bool CLAP_ABI param_text_to_value(const clap_plugin_t *plugin, clap_id id,
+                                         const char *text, double *value) {
+  (void)plugin;
+  if (id != 7 || !text || !value)
+    return false;
+  char *end = NULL;
+  *value = strtod(text, &end);
+  return end != text && *end == '\0';
+}
+static void CLAP_ABI param_flush(const clap_plugin_t *plugin,
+                                const clap_input_events_t *input,
+                                const clap_output_events_t *output) {
+  (void)plugin;
+  (void)input;
+  (void)output;
+}
+static const clap_plugin_params_t plugin_params = {
+    param_count, param_info, param_value, param_value_to_text,
+    param_text_to_value, param_flush};
 static const void *CLAP_ABI plugin_extension(const clap_plugin_t *plugin,
                                              const char *id) {
   (void)plugin;
-  return strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0 ? &audio_ports : NULL;
+  if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)
+    return &audio_ports;
+  if (strcmp(id, CLAP_EXT_PARAMS) == 0)
+    return &plugin_params;
+  return NULL;
 }
 
 static const clap_plugin_descriptor_t descriptor = {
@@ -103,6 +177,7 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
     return NULL;
   }
   data->host = host;
+  data->gain = 0.5;
   plugin->desc = &descriptor;
   plugin->plugin_data = data;
   plugin->init = plugin_init;
