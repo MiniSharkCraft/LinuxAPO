@@ -113,6 +113,7 @@ if(EXISTS "${SKYAPO_VST3_ROOT}/base/source/baseiids.cpp" AND
     ${SKYAPO_VST3_ROOT}/pluginterfaces/base/ustring.cpp)
   add_library(skyapo-vst3-hosting STATIC
     ${SKYAPO_VST3_ROOT}/public.sdk/source/common/commonstringconvert.cpp
+    ${SKYAPO_VST3_ROOT}/public.sdk/source/common/memorystream.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/common/threadchecker_linux.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
     ${SKYAPO_VST3_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp

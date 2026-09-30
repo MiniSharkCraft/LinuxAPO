@@ -398,6 +398,79 @@ int main() {
 
 #ifdef SKYAPO_TEST_VST3
   const std::string vst3Uid = "534B5941504F00010000000000000001";
+
+  const fs::path vst3StateHome =
+      fs::path("/tmp") / ("skyapo-vst3-state-" + std::to_string(getpid()));
+  fs::remove_all(vst3StateHome);
+  fs::create_directories(vst3StateHome);
+  const char *oldVst3StateHome = std::getenv("XDG_STATE_HOME");
+  const std::string oldVst3StateHomeValue =
+      oldVst3StateHome ? oldVst3StateHome : "";
+  const bool hadOldVst3StateHome = oldVst3StateHome != nullptr;
+  if (!setTestPluginPath("XDG_STATE_HOME", vst3StateHome.c_str()))
+    return 1;
+  if (!write(path, "Plugin: VST3 " + vst3Uid + " 7=0.5\n"))
+    return 1;
+  {
+    Engine stateSource(48000, 2, 128, {L"L", L"R"});
+    stateSource.loadConfig(path);
+    stateSource.setPluginParameter(vst3Uid, "7", 0.83f);
+    float beforeSave[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    stateSource.process(beforeSave, 4);
+    if (std::abs(beforeSave[0] - 0.83f) > 1e-5f ||
+        stateSource.savePersistentPluginStates() != 1) {
+      std::cerr << "VST3 plugin state save failed\n";
+      return 1;
+    }
+  }
+  {
+    Engine restoredState(48000, 2, 128, {L"L", L"R"});
+    restoredState.loadConfig(path);
+    float afterRestore[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    restoredState.process(afterRestore, 4);
+    if (std::abs(afterRestore[0] - 0.83f) > 1e-5f ||
+        std::abs(afterRestore[7] - 0.83f) > 1e-5f) {
+      std::cerr << "VST3 saved component state did not restore numerically: "
+                << afterRestore[0] << ", " << afterRestore[7] << '\n';
+      return 1;
+    }
+    const fs::path stateDirectory = vst3StateHome / "skyapo" / "vst3-state";
+    fs::path sidecar;
+    for (const auto &entry : fs::directory_iterator(stateDirectory))
+      if (entry.is_regular_file() && entry.path().extension() == ".vst3state")
+        sidecar = entry.path();
+    if (sidecar.empty()) {
+      std::cerr << "VST3 state sidecar was not created\n";
+      return 1;
+    }
+    struct stat sidecarStatus{};
+    if (stat(sidecar.c_str(), &sidecarStatus) < 0 ||
+        sidecarStatus.st_uid != geteuid() || (sidecarStatus.st_mode & 0077)) {
+      std::cerr << "VST3 state sidecar permissions/owner are not private\n";
+      return 1;
+    }
+    if (!write(sidecar, "corrupt"))
+      return 1;
+    bool rejected = false;
+    try {
+      restoredState.loadConfig(path);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    float lastGood[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    restoredState.process(lastGood, 4);
+    if (!rejected || std::abs(lastGood[0] - 0.83f) > 1e-5f ||
+        std::abs(lastGood[7] - 0.83f) > 1e-5f) {
+      std::cerr << "corrupt VST3 state did not preserve the last-good graph\n";
+      return 1;
+    }
+  }
+  fs::remove_all(vst3StateHome);
+  if (hadOldVst3StateHome)
+    setenv("XDG_STATE_HOME", oldVst3StateHomeValue.c_str(), 1);
+  else
+    unsetenv("XDG_STATE_HOME");
+
   if (!write(path, "Plugin: VST3 " + vst3Uid + "\n"))
     return 1;
   Engine vst3Plugin(48000, 2, 128, {L"L", L"R"});
@@ -680,9 +753,9 @@ int main() {
       RTLD_NOW | RTLD_LOCAL);
   using DestroyCount = uint32_t (*)();
   auto destroyedCount = reinterpret_cast<DestroyCount>(
-      clapTestLibrary ? dlsym(clapTestLibrary,
-                              "skyapo_test_clap_destroyed_plugin_count")
-                      : nullptr);
+      clapTestLibrary
+          ? dlsym(clapTestLibrary, "skyapo_test_clap_destroyed_plugin_count")
+          : nullptr);
   if (!destroyedCount) {
     std::cerr << "cannot inspect CLAP fixture cleanup counter\n";
     return 1;
@@ -708,13 +781,13 @@ int main() {
     std::cerr << "expected exactly one CLAP state sidecar\n";
     return 1;
   }
-  struct stat stateStat {};
+  struct stat stateStat{};
   if (stat(sidecars.front().c_str(), &stateStat) < 0 ||
       (stateStat.st_mode & 0077) != 0) {
     std::cerr << "CLAP state sidecar is not private (mode 0600)\n";
     return 1;
   }
-  struct stat stateDirStat {};
+  struct stat stateDirStat{};
   if (stat(stateStore.c_str(), &stateDirStat) < 0 ||
       (stateDirStat.st_mode & 0077) != 0) {
     std::cerr << "CLAP state directory is not private (mode 0700)\n";
@@ -765,8 +838,8 @@ int main() {
   try {
     stateRestored.loadConfig(stateConfig.string());
   } catch (const std::exception &error) {
-    corruptRejected = std::string(error.what()).find("checksum") !=
-                      std::string::npos;
+    corruptRejected =
+        std::string(error.what()).find("checksum") != std::string::npos;
   }
   float retainedBlock[8] = {1, 1, 1, 1, 1, 1, 1, 1};
   stateRestored.process(retainedBlock, 4);
@@ -775,7 +848,8 @@ int main() {
     return 1;
   }
   if (destroyedCount() != destroyedBeforeCorruptLoad + 1) {
-    std::cerr << "corrupt-state candidate did not destroy its initialized CLAP plugin\n";
+    std::cerr << "corrupt-state candidate did not destroy its initialized CLAP "
+                 "plugin\n";
     return 1;
   }
   auto pluginRejectedBytes = stateBytes;
@@ -791,21 +865,22 @@ int main() {
   for (size_t i = payloadOffset; i < pluginRejectedBytes.size(); ++i)
     hashByte(pluginRejectedBytes[i]);
   for (unsigned i = 0; i < 8; ++i)
-    pluginRejectedBytes[28 + i] =
-        static_cast<uint8_t>(checksum >> (i * 8));
+    pluginRejectedBytes[28 + i] = static_cast<uint8_t>(checksum >> (i * 8));
   {
-    std::ofstream replacement(sidecars.front(), std::ios::binary | std::ios::trunc);
-    replacement.write(reinterpret_cast<const char *>(pluginRejectedBytes.data()),
-                      pluginRejectedBytes.size());
+    std::ofstream replacement(sidecars.front(),
+                              std::ios::binary | std::ios::trunc);
+    replacement.write(
+        reinterpret_cast<const char *>(pluginRejectedBytes.data()),
+        pluginRejectedBytes.size());
   }
   bool pluginLoadRejected = false;
   const auto destroyedBeforePluginLoad = destroyedCount();
   try {
     stateRestored.loadConfig(stateConfig.string());
   } catch (const std::exception &error) {
-    pluginLoadRejected = std::string(error.what()).find(
-                             "plugin rejected saved state") !=
-                         std::string::npos;
+    pluginLoadRejected =
+        std::string(error.what()).find("plugin rejected saved state") !=
+        std::string::npos;
   }
   std::fill(std::begin(retainedBlock), std::end(retainedBlock), 1.0f);
   stateRestored.process(retainedBlock, 4);
@@ -814,7 +889,8 @@ int main() {
     return 1;
   }
   if (destroyedCount() != destroyedBeforePluginLoad + 1) {
-    std::cerr << "load-false candidate did not destroy its initialized CLAP plugin\n";
+    std::cerr
+        << "load-false candidate did not destroy its initialized CLAP plugin\n";
     return 1;
   }
   fs::remove(sidecars.front());
