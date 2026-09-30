@@ -179,6 +179,27 @@ std::optional<std::vector<std::string>> statusListAfter(
   return values;
 }
 
+void printUsage(std::ostream &out) {
+  out << "Usage: skyapo <command> [arguments]\n"
+         "\n"
+         "Commands:\n"
+         "  status                         Show daemon and audio graph status\n"
+         "  diagnostics [--json]           Show build/runtime diagnostics\n"
+         "  start | stop | restart         Control the per-user daemon\n"
+         "  device list                    List PipeWire capture devices\n"
+         "  device set <id-or-name>        Select a capture device\n"
+         "  device current                 Show the selected capture device\n"
+         "  config show                    Print the active configuration\n"
+         "  config check <file>            Validate a configuration\n"
+         "  config check --json <file>     Validate and emit JSON diagnostics\n"
+         "  config reload                  Reload the active configuration\n"
+         "  filters                        Show active filters\n"
+         "  plugin list                    List discovered plugins\n"
+         "  plugin info <URI>              Show plugin metadata\n"
+         "  help                           Show this help\n"
+         "  --version                      Show SkyAPO and upstream versions\n";
+}
+
 std::string trimText(const std::string &value) {
   const auto begin = value.find_first_not_of(" \t\r\n");
   if (begin == std::string::npos)
@@ -575,6 +596,15 @@ int main(int argc, char **argv) {
                                "| config check [--json] <file> | plugin list/scan "
                                "| plugin info <URI>");
     std::string cmd = argv[1];
+    if (argc == 2 && (cmd == "help" || cmd == "--help" || cmd == "-h")) {
+      printUsage(std::cout);
+      return 0;
+    }
+    if (argc == 2 && (cmd == "--version" || cmd == "-V" || cmd == "version")) {
+      std::cout << "SkyAPO " << SKYAPO_VERSION << "\nEqualizer APO upstream "
+                << SKYAPO_UPSTREAM_REVISION << '\n';
+      return 0;
+    }
     if (cmd == "status") {
       const auto status = settings::queryStatus();
       if (status.empty())
