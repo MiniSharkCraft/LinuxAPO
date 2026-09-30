@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Decouple the generated upstream `FilterConfiguration` constructor from SkyAPO's legacy `FilterEngine` factory shim using a checked Linux `FilterConfigurationContext`; this clarifies the future full-engine port boundary without modifying the upstream checkout.
 - Add a Linux Convolution editor row with config-relative WAV-path browsing, missing/unreadable IR feedback and Save & Check integration; offscreen UI tests verify path preservation and the real parser/checker result.
 - Strengthen actual upstream DSP tests: GraphicEQ now verifies a measured −6 dB response at its configured 1 kHz point, and Convolution is checked against a three-tap FIR reference over three blocks, including channel separation and cross-block state. Integrate the official MuParserX 3.0.1 archive with a pinned hash and BSD-2-Clause notice; production config now shares parser state across Includes for `If:` conditions, `Eval:` assignments, numeric inline backtick expansion and portable upstream regex functions, with invalid-expression rollback tests. The unmodified upstream `iir_lowpass.txt` config is also parsed and its passband/stopband response measured.
 - Bound the isolated VST2 prototype's fail-closed output clearing to the negotiated buffer capacity; a canary and exact-capacity ASan regression cover oversize requests.

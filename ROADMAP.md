@@ -33,6 +33,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 ## 0.3.x — upstream configuration engine
 
 - [x] Port `FilterConfiguration` channel-map execution to Linux and preserve upstream `read/process/write` processing.
+- [x] Decouple the build-tree upstream `FilterConfiguration` constructor from the Linux `FilterEngine` factory shim with a checked `FilterConfigurationContext` adaptation; official upstream checkout remains pristine.
 - [x] Port `IFilterFactory` initialization/configuration/file lifecycle hooks and upstream ordered command dispatch for the supported factories.
 - [ ] Replace Windows-only `FilterEngine` configuration discovery, synchronization and watcher dependencies with narrow Linux adapters.
 - [x] Use upstream-recommended MuParserX 3.0.1 for production numeric/boolean `If:`/`ElseIf:` conditions, `Eval:` assignments, numeric inline backtick expansion with one context across Includes, and portable upstream `regexSearch`/`regexReplace` callbacks; retain classic muParser as an explicit fallback. Windows registry functions, upstream string-operator overrides and full string/matrix expression semantics remain unsupported.

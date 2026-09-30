@@ -2,6 +2,7 @@
 #include "../plugin/IPluginFailureState.h"
 #include "FilterConfiguration.h"
 #include "FilterEngine.h"
+#include "FilterConfigurationContext.h"
 
 #include "BiQuadFilterFactory.h"
 #include "BiQuadFilter.h"
@@ -297,7 +298,8 @@ void Engine::loadConfig(const std::string &path) {
     throw;
   }
 
-  FilterEngine context(channelCount, channelCount, maxFrameCount);
+  FilterConfigurationContext context(channelCount, channelCount,
+                                      maxFrameCount);
   void *memory = MemoryHelper::alloc(sizeof(FilterConfiguration));
   FilterConfiguration *built = nullptr;
   try {
