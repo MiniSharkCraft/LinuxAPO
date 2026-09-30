@@ -23,7 +23,7 @@ jobs:
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
             libsndfile1-dev libpipewire-0.3-dev libfftw3-dev \
-            liblilv-dev lv2-dev qt6-base-dev
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -73,7 +73,8 @@ jobs:
       - name: Install Arch build dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            cmake git libsndfile pipewire fftw lilv lv2 qt6-base pkgconf
+            cmake git libsndfile pipewire fftw lilv muparser lv2 \
+            qt6-base pkgconf hicolor-icon-theme
 
       - name: Build and test Arch packages
         run: |
