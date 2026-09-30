@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `skyapo diagnostics` now reports the linked PipeWire library version, or explicitly says PipeWire support was not built.
+- `skyapo status` now reports a connected-but-unresponsive daemon socket as an error; diagnostics retain version information and show the timeout state rather than returning an empty status.
 - Added Preamp/BiQuad numeric-domain validation with source-line diagnostics and regression tests; the Qt device selector now refreshes PipeWire devices through the CLI, persists stable node names, and safely terminates in-flight CLI work when its window closes.
 - Exercised `skyapo start`/`restart` on the live PipeWire desktop using isolated XDG configuration: restart changed the daemon PID and recovered the physical capture graph, 48 kHz stereo format, 1024-frame quantum, and 2/2 capture links. Independent post-restart sample verification and sustained-load overrun testing remain open.
 - Verified live PipeWire rate/quantum renegotiation without restarting `skyapod`: 48 kHz/512, 44.1 kHz/512 and 96 kHz/2048 each rebuilt DSP and delivered processed samples to the native consumer (132096–286720 frames; measured output ratios 0.999970–0.999987 of the expected −6 dB amplitude). Status reported zero overruns and callback allocations/deallocations. Convolution quantum changes remain untested.

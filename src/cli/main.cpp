@@ -110,7 +110,11 @@ int main(int argc, char **argv) {
                                "| plugin info <URI>");
     std::string cmd = argv[1];
     if (cmd == "status") {
-      std::cout << settings::queryStatus();
+      const auto status = settings::queryStatus();
+      if (status.empty())
+        throw std::runtime_error(
+            "daemon control socket is unresponsive (status request timed out)");
+      std::cout << status;
       return 0;
     }
     if (cmd == "diagnostics" && argc == 2) {
@@ -122,14 +126,19 @@ int main(int argc, char **argv) {
 #else
       std::cout << "PipeWire library: unavailable (not built)\n";
 #endif
-      std::cout << settings::queryStatus();
+      const auto status = settings::queryStatus();
+      if (status.empty())
+        std::cout << "Daemon: unresponsive (status request timed out)\n";
+      else
+        std::cout << status;
       return 0;
     }
     if (cmd == "filters" && argc == 2) {
       const auto status = settings::queryStatus();
-      if (status.find("Daemon: not reachable") != std::string::npos)
+      if (status.empty() ||
+          status.find("Daemon: not reachable") != std::string::npos)
         throw std::runtime_error(
-            "daemon is not reachable; active filters unavailable");
+            "daemon is unavailable or unresponsive; active filters unavailable");
       const auto begin = status.find("Filter chain:");
       const auto end = status.find("\nConfig:", begin);
       if (begin == std::string::npos)
