@@ -1,4 +1,5 @@
 #include "ConfigFile.h"
+#include "ChannelCopyEditor.h"
 #include "IncludeEditor.h"
 #include "MainWindow.h"
 
@@ -190,6 +191,61 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  auto *channelEditor = ChannelCopyEditor::create("Channel", "L SUB");
+  if (!channelEditor || channelEditor->kind() != ChannelCopyEditor::Kind::Channel ||
+      !channelEditor->findChild<QCheckBox *>("channel_L")->isChecked() ||
+      !channelEditor->findChild<QCheckBox *>("channel_LFE")->isChecked()) {
+    std::cerr << "Channel visual editor did not load supported EAPO names/alias\n";
+    delete channelEditor;
+    return 1;
+  }
+  channelEditor->findChild<QCheckBox *>("channel_C")->setChecked(true);
+  channelEditor->store(storedCommand, storedParameters);
+  delete channelEditor;
+  if (storedCommand != "Channel" || storedParameters != "L C LFE") {
+    std::cerr << "Channel visual editor did not serialize edited selections\n";
+    return 1;
+  }
+  auto *allChannels = ChannelCopyEditor::create("Channel", "ALL");
+  if (!allChannels ||
+      !allChannels->findChild<QCheckBox *>("channelSelectAll")->isChecked()) {
+    std::cerr << "Channel visual editor did not load ALL selection\n";
+    delete allChannels;
+    return 1;
+  }
+  allChannels->store(storedCommand, storedParameters);
+  delete allChannels;
+  if (storedParameters != "ALL" ||
+      ChannelCopyEditor::create("Channel", "unknown") != nullptr) {
+    std::cerr << "Channel editor accepted unsupported semantics\n";
+    return 1;
+  }
+
+  auto *copyEditor = ChannelCopyEditor::create("Copy", "L=0.5*R R=L");
+  if (!copyEditor || copyEditor->kind() != ChannelCopyEditor::Kind::Copy ||
+      copyEditor->copyTable()->rowCount() != 2) {
+    std::cerr << "Copy visual editor did not load simple channel mappings\n";
+    delete copyEditor;
+    return 1;
+  }
+  auto *copyGain = copyEditor->findChild<QDoubleSpinBox *>("copyGain_0");
+  auto *copySource = copyEditor->findChild<QComboBox *>("copySource_0");
+  if (!copyGain || !copySource) {
+    std::cerr << "Copy visual editor controls are missing\n";
+    delete copyEditor;
+    return 1;
+  }
+  copyGain->setValue(0.75);
+  copyEditor->findChild<QComboBox *>("copySource_0")->setCurrentText("C");
+  copyEditor->store(storedCommand, storedParameters);
+  delete copyEditor;
+  if (storedCommand != "Copy" || storedParameters != "L=0.75*C R=L" ||
+      ChannelCopyEditor::create("Copy", "L=R+C") != nullptr ||
+      ChannelCopyEditor::create("Copy", "L=unknown") != nullptr) {
+    std::cerr << "Copy editor serialization/unsupported-expression boundary failed\n";
+    return 1;
+  }
+
   if (argc != 2) {
     std::cerr << "UI integration test needs the delayed CLI fixture path\n";
     return 1;
@@ -225,7 +281,8 @@ int main(int argc, char **argv) {
   QFile config(configPath);
   if (!config.open(QIODevice::WriteOnly) ||
       config.write(
-          "Preamp: 0 dB\n; keep order\nPreamp: -6 dB\nInclude: child.txt\n") <
+          "Preamp: 0 dB\n; keep order\nPreamp: -6 dB\nInclude: child.txt\n"
+          "Channel: L R\nCopy: L=R R=L\n") <
           0) {
     std::cerr << "could not create temporary UI config\n";
     return 1;
@@ -237,8 +294,9 @@ int main(int argc, char **argv) {
   QElapsedTimer construction;
   construction.start();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.findChildren<FilterTableRow *>().size() != 4 ||
-      window.findChildren<IncludeEditor *>().size() != 1) {
+  if (window.findChildren<FilterTableRow *>().size() != 6 ||
+      window.findChildren<IncludeEditor *>().size() != 1 ||
+      window.findChildren<ChannelCopyEditor *>().size() != 2) {
     std::cerr << "upstream FilterTableRow was not used by the Linux editor\n";
     return 1;
   }
@@ -295,7 +353,8 @@ int main(int argc, char **argv) {
   QFile reordered(configPath);
   if (!reordered.open(QIODevice::ReadOnly) ||
       reordered.readAll() !=
-          "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\nInclude: child.txt\n") {
+          "; keep order\nPreamp: 0 dB\nPreamp: -6 dB\nInclude: child.txt\n"
+          "Channel: L R\nCopy: L=R R=L\n") {
     std::cerr << "Alt+Down did not reorder and save the selected config row\n";
     return 1;
   }

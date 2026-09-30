@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "ChannelCopyEditor.h"
 #include "IncludeEditor.h"
 
 #include "Editor/FilterTableRow.h"
@@ -299,6 +300,8 @@ void MainWindow::rebuildRows() {
       if (command == "Include")
         editor = new IncludeEditor(parameters, configPath, rowTable);
       if (!editor)
+        editor = ChannelCopyEditor::create(command, parameters, rowTable);
+      if (!editor)
         editor = preampFactory.createFilterGUI(command, parameters);
       if (!editor) {
         command = raw.left(colon).trimmed();
@@ -369,6 +372,12 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
     }
   };
   append(preamp.createFilterTemplates());
+  menu->addAction(tr("Channel selection"))->setData(
+      QVariant::fromValue(FilterTemplate(tr("Channel selection"),
+                                         "Channel: L R", {tr("Basic filters")})));
+  menu->addAction(tr("Copy between channels"))->setData(
+      QVariant::fromValue(FilterTemplate(tr("Copy between channels"),
+                                         "Copy: L=L", {tr("Basic filters")})));
   menu->addSection(tr("Parametric filters"));
   append(biquad.createFilterTemplates());
   menu->addSeparator();

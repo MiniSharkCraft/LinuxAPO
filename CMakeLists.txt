@@ -325,7 +325,8 @@ if(SKYAPO_BUILD_UI)
 
     add_executable(skyapo-ui src/ui/main.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/ConfigFile.h
-      src/ui/IncludeEditor.cpp src/ui/IncludeEditor.h)
+      src/ui/IncludeEditor.cpp src/ui/IncludeEditor.h
+      src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h)
     set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
@@ -334,7 +335,8 @@ if(SKYAPO_BUILD_UI)
     add_executable(skyapo-ui-test-cli tests/ui_cli_stub.cpp)
     add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/IncludeEditor.cpp
-      src/ui/IncludeEditor.h)
+      src/ui/IncludeEditor.h src/ui/ChannelCopyEditor.cpp
+      src/ui/ChannelCopyEditor.h)
     set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})

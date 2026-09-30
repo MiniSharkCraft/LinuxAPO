@@ -103,6 +103,7 @@ Current development version: **0.1.0**. This root repository tracks the Linux po
 - [x] Reuse the actual upstream `FilterTableRow` widget/resources through a narrow Linux adapter; full upstream table model/selection/drag behavior remains open.
 - [x] Add ordered row selection/focus, Ctrl/Shift range selection, Escape clear, Delete removal and Alt+Up/Down reordering; preserve config bytes and newline style on move.
 - [x] Add a Linux Include editor with config-relative path validation and native file browsing; upstream Include's Registry ACL and tab-navigation hooks are intentionally not reused.
+- [x] Add Linux visual `Channel:`/`Copy:` editors with EAPO serialization and explicit raw-text fallback for unsupported syntax; upstream widgets remain excluded due to Windows device/channel-mask dependencies.
 - [ ] Device/status/config editing, live validation, implemented filter rows and actual response analysis.
 - Acceptance: GUI edits preserve hand-written config content where possible, errors are actionable, and GUI lifetime is independent of daemon audio.
 
