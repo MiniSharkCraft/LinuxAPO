@@ -111,7 +111,7 @@ Current development version: **0.1.0**. The current commit is the first root-rep
 - [x] Add actual active filter source-line listing and build/upstream revision diagnostics.
 - [x] Include the linked PipeWire library version in `skyapo diagnostics`; it is reported from the runtime library, not hardcoded.
 - [x] Report a connected-but-silent daemon control socket as unresponsive; `skyapo status` now exits with an actionable error instead of printing an empty response.
-- [ ] Version the IPC protocol.
+- [x] Version the local IPC protocol with bounded v1 request/response framing and rejection tests.
 - [x] Add tested structured/machine-readable CLI diagnostics (`skyapo diagnostics --json`).
 - [x] User systemd unit, Arch PKGBUILD, CMake install rules, and upstream license installation.
 - [x] Desktop launcher for the Qt editor.
