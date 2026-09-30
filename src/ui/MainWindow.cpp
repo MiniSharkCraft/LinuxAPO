@@ -1048,8 +1048,15 @@ void MainWindow::refreshDevices() {
          [this](int result, QByteArray output, QByteArray error) {
            deviceRequestPending = false;
            if (result != 0) {
-             statusLabel->setText(
-                 tr("Device query failed: %1").arg(QString::fromUtf8(error)));
+             QString reason = QString::fromUtf8(error).trimmed();
+             if (reason.isEmpty())
+               reason = QString::fromUtf8(output).trimmed();
+             if (reason.isEmpty())
+               reason = tr("skyapo device list exited with status %1")
+                            .arg(result);
+             const QString message = tr("Device query failed: %1").arg(reason);
+             statusLabel->setText(message);
+             statusLabel->setAccessibleDescription(message);
              return;
            }
            const QSignalBlocker blocker(deviceCombo);

@@ -105,6 +105,25 @@ bool writeStatusCliFixture(const QString &path, const QString &state,
                              QFileDevice::ExeOwner);
 }
 
+bool writeDeviceQueryFailureCliFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "if [ \"$1\" = \"status\" ]; then\n"
+      "  sleep 2\n"
+      "  printf '%s\\n' 'Daemon: streaming'\n"
+      "  exit 0\n"
+      "fi\n"
+      "if [ \"$1\" = \"device\" ] && [ \"$2\" = \"list\" ]; then\n"
+      "  printf '%s\\n' 'enumeration fixture detail'\n"
+      "  exit 7\n"
+      "fi\n"
+      "exit 0\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) && file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
 bool configIsValid(const QString &cli, const QString &path,
                    QString *diagnostic = nullptr) {
   QProcess process;
@@ -1201,6 +1220,36 @@ int main(int argc, char **argv) {
     std::cerr << "hung CLI request did not surface a timeout in the UI: "
               << (stalledStatus ? stalledStatus->text().toStdString()
                                 : "status label missing")
+              << '\n';
+    return 1;
+  }
+  const QString deviceFailureScript =
+      temporary.filePath(QStringLiteral("device-query-failure-cli.sh"));
+  if (!writeDeviceQueryFailureCliFixture(deviceFailureScript)) {
+    std::cerr << "could not create device-query failure fixture script\n";
+    return 1;
+  }
+  MainWindow deviceFailureWindow(configPath, deviceFailureScript);
+  auto *deviceFailureStatus =
+      deviceFailureWindow.findChild<QLabel *>("daemonStatus");
+  QElapsedTimer deviceFailureWait;
+  deviceFailureWait.start();
+  while (deviceFailureWait.elapsed() < 1500 &&
+         (!deviceFailureStatus ||
+          !deviceFailureStatus->text().contains("Device query failed:"))) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  const QString expectedDeviceFailure =
+      QStringLiteral("Device query failed: enumeration fixture detail");
+  if (!deviceFailureStatus ||
+      deviceFailureStatus->text() != expectedDeviceFailure ||
+      deviceFailureStatus->accessibleDescription() != expectedDeviceFailure) {
+    std::cerr << "device enumeration failure was not surfaced accessibly with "
+                 "the CLI diagnostic: "
+              << (deviceFailureStatus
+                      ? deviceFailureStatus->text().toStdString()
+                      : "status label missing")
               << '\n';
     return 1;
   }
