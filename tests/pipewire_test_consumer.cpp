@@ -30,6 +30,7 @@ struct Consumer {
   bool expectSilent{};
   bool acceptAnyAudio{};
   double expectedDb{-6.0};
+  unsigned expectedRate{};
   std::array<const char*, 2> channelNames{};
   std::array<void*, 2> inputs{};
   std::array<uint32_t, 2> inputIds{Invalid, Invalid};
@@ -38,12 +39,14 @@ struct Consumer {
   uint32_t sourceNode{Invalid};
   uint32_t ownNode{Invalid};
   std::atomic<uint64_t> frames{0};
+  std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
   std::atomic<bool> failed{false};
 
-  explicit Consumer(bool mono, bool silent, bool anyAudio, double gainDb)
+  explicit Consumer(bool mono, bool silent, bool anyAudio, double gainDb,
+                    unsigned rate)
       : channels(mono ? 1 : 2), expectSilent(silent), acceptAnyAudio(anyAudio),
-        expectedDb(gainDb),
+        expectedDb(gainDb), expectedRate(rate),
         channelNames(mono ? std::array<const char *, 2>{"MONO", ""}
                           : std::array<const char *, 2>{"FL", "FR"}) {}
 
@@ -134,6 +137,16 @@ struct Consumer {
 
   static void process(void* data, spa_io_position* position) {
     auto& c = *static_cast<Consumer*>(data);
+    const auto rate = position->clock.rate.num
+                          ? position->clock.rate.denom / position->clock.rate.num
+                          : 0;
+    const auto previousRate = c.sampleRate.load(std::memory_order_relaxed);
+    if (!rate || (c.expectedRate && rate != c.expectedRate) ||
+        (previousRate && previousRate != rate)) {
+      c.failed.store(true, std::memory_order_relaxed);
+      return;
+    }
+    c.sampleRate.store(rate, std::memory_order_relaxed);
     const uint32_t count = position->clock.duration;
     double blockEnergy = 0.0;
     for (unsigned ch = 0; ch < c.channels; ++ch) {
@@ -236,9 +249,10 @@ struct Consumer {
         InputAmplitude * std::pow(10.0, expectedDb / 20.0) / std::sqrt(2.0);
     const double ratio = expected > 0 ? rms / expected : 0.0;
     std::printf(
-        "Captured frames: %llu\nChannels: %u\nRMS: %.8f\n"
+        "Captured frames: %llu\nChannels: %u\nSample rate: %u Hz\nRMS: %.8f\n"
         "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
-        static_cast<unsigned long long>(capturedFrames), channels, rms,
+        static_cast<unsigned long long>(capturedFrames), channels,
+        sampleRate.load(), rms,
         expected, ratio);
     const bool audioMatches =
         acceptAnyAudio ||
@@ -255,6 +269,7 @@ int main(int argc, char** argv) {
   bool expectSilent = false;
   bool acceptAnyAudio = false;
   double expectedDb = -6.0;
+  unsigned expectedRate = 0;
   for (int arg = 1; arg < argc; ++arg) {
     const std::string option(argv[arg]);
     if (option == "--mono")
@@ -270,15 +285,24 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "test consumer: invalid --expected-db value\n");
         return 2;
       }
+    } else if (option == "--expected-rate" && arg + 1 < argc) {
+      char *end = nullptr;
+      const auto parsed = std::strtoul(argv[++arg], &end, 10);
+      if (end == argv[arg] || *end || parsed == 0 || parsed > UINT32_MAX) {
+        std::fprintf(stderr, "test consumer: invalid --expected-rate value\n");
+        return 2;
+      }
+      expectedRate = static_cast<unsigned>(parsed);
     } else {
       std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono] "
                            "[--expect-silent] [--accept-any-audio] "
-                           "[--expected-db DB]\n");
+                           "[--expected-db DB] [--expected-rate HZ]\n");
       return 2;
     }
   }
   try {
-    Consumer consumer(mono, expectSilent, acceptAnyAudio, expectedDb);
+    Consumer consumer(mono, expectSilent, acceptAnyAudio, expectedDb,
+                      expectedRate);
     return consumer.run();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "test consumer: %s\n", error.what());

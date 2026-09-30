@@ -58,6 +58,12 @@ setting and with numeric override `0=0.0` and `0=1.0`; this did not demonstrate
 an audible/parameter-driven effect, so it is only wrapper load/offline-path
 evidence. yabridge logged `realtime: no`; no PipeWire E2E, third-party
 real-time-safety or broad compatibility claim follows from this probe.
+An additional installed `kHs Gain` yabridge VST2 wrapper probe using the same
+isolated-Wine approach reached yabridge's `Preparing to load VST2 plugin`
+message but did not report initialization completion or parameter metadata
+within 40 seconds. The bounded probe timed out; it does not establish whether
+the plugin itself crashed or is incompatible. Its temporary Wine prefix and
+processes were removed afterward.
 
 ## Build and tests
 

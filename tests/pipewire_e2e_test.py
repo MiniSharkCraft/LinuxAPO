@@ -109,6 +109,24 @@ def start_private_pipewire(pipewire, config, env, logs, runtime):
     raise RuntimeError("private PipeWire server socket was not created")
 
 
+def make_rate_config(base_config, destination, sample_rate):
+    text = base_config.read_text()
+    replacements = {
+        "default.clock.rate": str(sample_rate),
+        "default.clock.allowed-rates": f"[ {sample_rate} ]",
+        "default.clock.quantum": "1024",
+    }
+    for key, value in replacements.items():
+        pattern = re.compile(rf"(?m)^(\s*)#\s*{re.escape(key)}\s*=.*$")
+        text, count = pattern.subn(rf"\g<1>{key} = {value}", text)
+        if count != 1:
+            raise RuntimeError(
+                f"expected exactly one commented {key} in {base_config}, "
+                f"found {count}; refusing an unforced-rate test")
+    destination.write_text(text)
+    return destination
+
+
 def start_test_source(source, mono, env, source_log):
     return subprocess.Popen(
         [str(source)] + (["--mono"] if mono else []), env=env,
@@ -117,20 +135,26 @@ def start_test_source(source, mono, env, source_log):
 
 def main():
     if len(sys.argv) != 11 or sys.argv[10] not in (
-        "mono", "stereo", "latency", "include-reload", "source-replug",
+        "mono", "stereo", "mono-44100", "stereo-44100",
+        "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
+        "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
             "SOURCE CONSUMER PIPEWIRE_CONFIG DSP_CONFIG "
-            "mono|stereo|latency|include-reload|source-replug|server-restart|"
+            "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
+            "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
             "vst2-live-param|plugin-bypass")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
-    mono = mode == "mono"
+    rate_case = re.fullmatch(r"(mono|stereo)-(44100|48000|96000)", mode)
+    mono = mode == "mono" or (rate_case is not None and
+                               rate_case.group(1) == "mono")
+    sample_rate = int(rate_case.group(2)) if rate_case else 48000
     latency_plugin = mode == "latency"
     include_reload = mode == "include-reload"
     source_replug = mode == "source-replug"
@@ -159,6 +183,8 @@ def main():
         config_home = root / "config"
         runtime.mkdir(mode=0o700)
         config_home.mkdir(mode=0o700)
+        rate_config = make_rate_config(
+            pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
         included_config = config_home / "include-reload-root.txt"
         include_directory = config_home / "includes"
         include_child = include_directory / "include-reload-child.txt"
@@ -180,7 +206,7 @@ def main():
         server = source_process = daemon_process = None
         try:
             server = start_private_pipewire(
-                pipewire, pw_config, env, logs, runtime)
+                pipewire, rate_config, env, logs, runtime)
 
             source_process = start_test_source(source, mono, env, source_log)
             deadline = time.monotonic() + 8
@@ -213,16 +239,18 @@ def main():
                 status = result.stdout
                 if (result.returncode == 0 and "Daemon: streaming" in status and
                         "SkyAPO Virtual Mic" in status and
-                        "Sample rate: 48000 Hz" in status):
+                        f"Sample rate: {sample_rate} Hz" in status):
                     break
                 time.sleep(0.1)
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
             expected_filters = 1 if vst2_live else (2 if plugin_chain else 1)
+            channel_positions = "MONO" if mono else "FL FR"
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
+                f"Channel positions: {channel_positions}",
                 f"Active capture links: {channel_count}/{channel_count}",
-                "Format: F32 planar DSP", "Sample rate: 48000 Hz",
+                "Format: F32 planar DSP", f"Sample rate: {sample_rate} Hz",
                 "Quantum: 1024",
                 "Callback allocations: 0", "Callback deallocations: 0",
                 "Default render endpoint: unavailable"]
@@ -428,11 +456,16 @@ def main():
                 expected_db = -2.0
 
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
+            consumer_args += ["--expected-rate", str(sample_rate)]
             if plugin_chain:
                 consumer_args += ["--expected-db", str(expected_db)]
             elif include_reload:
                 consumer_args += ["--expected-db", str(expected_db)]
             captured = run(consumer_args, env, timeout=12)
+            if f"Sample rate: {sample_rate} Hz" not in captured.stdout:
+                raise RuntimeError(
+                    f"independent consumer did not negotiate {sample_rate} Hz:\n"
+                    f"{captured.stdout}")
             match = re.search(r"RMS ratio to expected: ([0-9.]+)",
                               captured.stdout)
             if not match or abs(float(match.group(1)) - 1.0) >= 0.03:
