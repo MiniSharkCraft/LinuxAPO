@@ -140,7 +140,7 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "renegotiate"
+        "renegotiate", "transition-format"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
@@ -148,7 +148,7 @@ def main():
             "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
-            "vst2-live-param|plugin-bypass|renegotiate")
+            "vst2-live-param|plugin-bypass|renegotiate|transition-format")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
@@ -165,6 +165,7 @@ def main():
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
     plugin_bypass = mode == "plugin-bypass"
     renegotiate = mode == "renegotiate"
+    transition_format = mode == "transition-format"
     plugin_chain = plugin_live or plugin_bypass or latency_plugin
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
@@ -189,7 +190,7 @@ def main():
         state_home.mkdir(mode=0o700)
         rate_config = make_rate_config(
             pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
-        if renegotiate:
+        if renegotiate or transition_format:
             text = rate_config.read_text()
             text = text.replace(
                 "default.clock.allowed-rates = [ 48000 ]",
@@ -198,6 +199,7 @@ def main():
                 raise RuntimeError("could not enable runtime test sample rates")
             rate_config.write_text(text)
         included_config = config_home / "include-reload-root.txt"
+        transition_config = config_home / "transition-format.txt"
         include_directory = config_home / "includes"
         include_child = include_directory / "include-reload-child.txt"
         if include_reload:
@@ -206,6 +208,9 @@ def main():
                 "Include: includes/include-reload-child.txt\n")
             include_child.write_text("Preamp: -6 dB\n")
             dsp_config = included_config
+        if transition_format:
+            transition_config.write_text("Preamp: -6 dB\n")
+            dsp_config = transition_config
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
@@ -213,6 +218,8 @@ def main():
             "XDG_STATE_HOME": str(state_home),
             "PIPEWIRE_RUNTIME_DIR": str(runtime),
         })
+        if transition_format:
+            env["SKYAPO_TEST_TRANSITION_MS"] = "500"
         logs = (root / "pipewire.log").open("w+")
         source_log = (root / "source.log").open("w+")
         daemon_log = (root / "daemon.log").open("w+")
@@ -281,6 +288,70 @@ def main():
 
             old_virtual_id = virtual_source_id(status)
             assert_virtual_source(pw_dump, env, old_virtual_id)
+
+            if transition_format:
+                transition_config.write_text("Preamp: -3 dB\n")
+                reload_result = run(
+                    [str(cli), "config", "reload"], env, timeout=8)
+                if "Config reload succeeded" not in reload_result.stdout:
+                    raise RuntimeError(
+                        "transition test config did not reload:\n"
+                        f"{reload_result.stdout}")
+                deadline = time.monotonic() + 5
+                transition_status = ""
+                while time.monotonic() < deadline:
+                    transition_status = run([str(cli), "status"], env).stdout
+                    if "Graph transition: crossfading" in transition_status:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise RuntimeError(
+                        "long test transition was not published:\n"
+                        f"{transition_status}")
+
+                metadata = (os.environ.get("SKYAPO_PW_METADATA") or
+                            shutil.which("pw-metadata"))
+                if not metadata:
+                    raise RuntimeError("pw-metadata is required for transition test")
+                run([metadata, "-n", "settings", "0", "clock.force-rate",
+                     "44100", "Spa:Int"], env, timeout=5)
+                deadline = time.monotonic() + 12
+                rebuilt_status = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, check=False)
+                    rebuilt_status = result.stdout
+                    if (result.returncode == 0 and
+                            "Sample rate: 44100 Hz" in rebuilt_status and
+                            "Quantum: 512" in rebuilt_status and
+                            "Graph transition: stable" in rebuilt_status and
+                            "Format rebuilds during transition: 1" in
+                            rebuilt_status and
+                            "Active capture links: " +
+                            f"{channel_count}/{channel_count}" in
+                            rebuilt_status):
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise RuntimeError(
+                        "format change did not rebuild while the graph "
+                        "transition was pending:\n"
+                        f"{rebuilt_status}")
+                status = rebuilt_status
+                sample_rate = 44100
+                capture = run(
+                    [str(consumer), "--expected-rate", str(sample_rate),
+                     "--expected-db", "-3"], env, timeout=12)
+                ratio = re.search(r"RMS ratio to expected: ([0-9.]+)",
+                                  capture.stdout)
+                if (not ratio or
+                        abs(float(ratio.group(1)) - 1.0) >= 0.03):
+                    raise RuntimeError(
+                        "format change during crossfade did not preserve the "
+                        f"accepted DSP graph:\n{capture.stdout}")
+                print("Sample-rate change arrived during a published 500 ms "
+                      "test crossfade; Runtime confirmed the pending-format "
+                      "rebuild branch, then recorded the -3 dB graph at "
+                      f"44.1 kHz (ratio {float(ratio.group(1)):.6f}).")
 
             if renegotiate:
                 metadata = (os.environ.get("SKYAPO_PW_METADATA") or
@@ -424,7 +495,8 @@ def main():
                       f"{channel_count} capture links.")
                 recovered_status = relinked_status
 
-            expected_db = -12.020599913 if latency_plugin else -6.0
+            expected_db = (-12.020599913 if latency_plugin else
+                           (-3.0 if transition_format else -6.0))
             if plugin_live:
                 live_value = "0.75" if (vst2_live or mode == "plugin-live-param") else "0.25"
                 changed = run([str(cli), "plugin", "set",
@@ -568,7 +640,7 @@ def main():
             consumer_args += ["--expected-rate", str(sample_rate)]
             if plugin_chain:
                 consumer_args += ["--expected-db", str(expected_db)]
-            elif include_reload:
+            elif include_reload or transition_format:
                 consumer_args += ["--expected-db", str(expected_db)]
             captured = run(consumer_args, env, timeout=12)
             if f"Sample rate: {sample_rate} Hz" not in captured.stdout:

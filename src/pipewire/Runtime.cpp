@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -141,6 +142,8 @@ struct Runtime {
   std::atomic<bool> transitionComplete{false};
   unsigned transitionCounter{};
   unsigned transitionLength{};
+  unsigned transitionDurationMs{10};
+  uint64_t formatRebuildsDuringTransition{};
   std::atomic<bool> resetMetrics{false};
   std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0},
       requestedQuantum{0};
@@ -154,6 +157,18 @@ struct Runtime {
   explicit Runtime(volatile sig_atomic_t &stop) : stopping(stop) {
     ownInputs.fill(SPA_ID_INVALID);
     linkGlobalIds.fill(SPA_ID_INVALID);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    if (const char *value = std::getenv("SKYAPO_TEST_TRANSITION_MS")) {
+      char *end = nullptr;
+      errno = 0;
+      const unsigned long parsed = std::strtoul(value, &end, 10);
+      if (errno || end == value || *end != '\0' || parsed < 10 ||
+          parsed > 5000)
+        throw std::runtime_error(
+            "SKYAPO_TEST_TRANSITION_MS must be an integer from 10 to 5000");
+      transitionDurationMs = static_cast<unsigned>(parsed);
+    }
+#endif
   }
   ~Runtime() {
     cleaning = true;
@@ -251,6 +266,7 @@ struct Runtime {
     // same-format reload was mid-fade when PipeWire renegotiated, choose that
     // already accepted pending config before rebuilding at the new format.
     if (pending.load(std::memory_order_seq_cst)) {
+      ++formatRebuildsDuringTransition;
       if (!quiesceAndDrain())
         throw std::runtime_error(
             "timed out draining callbacks for PipeWire format rebuild");
@@ -302,7 +318,8 @@ struct Runtime {
       // published raw pointer and never destroys or mutates ownership.
       retiredEngines.reserve(retiredEngines.size() + 1);
       transitionCounter = 0;
-      transitionLength = std::max(1u, replacement->sampleRate() / 100);
+      transitionLength = std::max(
+          1u, replacement->sampleRate() * transitionDurationMs / 1000);
       auto *next = replacement.get();
       pendingEngine = std::move(replacement);
       pending.store(next, std::memory_order_seq_cst);
@@ -751,6 +768,8 @@ struct Runtime {
       << " (skyapo.virtual_mic)\nFormat: F32 planar DSP\nChannels: " << channels
       << "\nGraph transition: "
       << (pending.load(std::memory_order_seq_cst) ? "crossfading" : "stable")
+      << "\nFormat rebuilds during transition: "
+      << formatRebuildsDuringTransition
       << "\nChannel positions:";
     for (auto &p : ports)
       s << ' ' << p.channel;
