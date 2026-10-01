@@ -454,6 +454,7 @@ bool CLAP_ABI rejectEvent(const clap_output_events_t *,
 class CLAPInstance final : public IPluginInstance,
                            public IPluginParameterControl,
                            public IPluginLatencyRefresh,
+                           public IPluginFailureState,
                            public IPluginStatePersistence {
 public:
   CLAPInstance(std::shared_ptr<ClapLibrary> lib,
@@ -768,6 +769,12 @@ public:
   bool processingFailed() const noexcept override {
     return processingError.load(std::memory_order_acquire);
   }
+  const std::string &failureIdentifier() const noexcept override {
+    return pluginId;
+  }
+  void latchProcessingFailure() noexcept override {
+    processingError.store(true, std::memory_order_release);
+  }
 
   const std::string &pluginIdentifier() const noexcept override {
     return pluginId;
@@ -967,6 +974,11 @@ public:
     return outputChannels;
   }
   void process(float **output, float **input, unsigned frames) override {
+    if (processingFailed()) {
+      for (unsigned channel = 0; channel < channelCount; ++channel)
+        std::fill_n(output[channel], frames, 0.0f);
+      return;
+    }
     if (copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
@@ -974,11 +986,15 @@ public:
   bool processingFailed() const noexcept override {
     return instance && instance->processingFailed();
   }
+  void latchProcessingFailure() noexcept override {
+    if (auto *failure = dynamic_cast<IPluginFailureState *>(instance.get()))
+      failure->latchProcessingFailure();
+  }
   const std::string &failureIdentifier() const noexcept override {
     return pluginId;
   }
   uint32_t latencySamples() const noexcept override {
-    return instance ? instance->latencySamples() : 0;
+    return instance && !processingFailed() ? instance->latencySamples() : 0;
   }
   bool latencyRefreshPending() const noexcept override {
     const auto *refresh =
@@ -989,7 +1005,15 @@ public:
     auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
     if (!refresh || !refresh->refreshPluginLatency())
       return false;
-    prepareBypassDelay(instance->latencySamples(), channelCount);
+    const auto latency = instance->latencySamples();
+    if (latency > skyapo::plugin::MaxRealtimeLatencySamples) {
+      latchProcessingFailure();
+      // This instance now renders silence and reports zero latency. Rebuild
+      // the graph schedule so an out-of-range plugin cannot take down the
+      // otherwise-valid daemon or leave stale compensation active.
+      return true;
+    }
+    prepareBypassDelay(latency, channelCount);
     return true;
   }
   const std::string &pluginIdentifier() const noexcept override {

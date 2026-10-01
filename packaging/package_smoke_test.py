@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit
 
 
 def run(command, env, expected=0):
@@ -72,8 +73,15 @@ def validate_desktop_metadata(root):
     if component.findtext("name") != "SkyAPO":
         raise RuntimeError("AppStream component name is missing or incorrect")
     homepage = component.find("url[@type='homepage']")
-    if homepage is None or homepage.text != "https://sourceforge.net/projects/equalizerapo/":
-        raise RuntimeError("AppStream metadata must link to the official Equalizer APO project")
+    if homepage is not None:
+        address = (homepage.text or "").strip()
+        parsed_homepage = urlsplit(address)
+        if parsed_homepage.scheme != "https" or not parsed_homepage.netloc:
+            raise RuntimeError("AppStream homepage, when provided, must use HTTPS")
+        if "equalizerapo" in address.casefold():
+            raise RuntimeError(
+                "AppStream homepage must not misidentify upstream Equalizer APO as SkyAPO"
+            )
     launchable = component.find("launchable")
     if launchable is None or launchable.get("type") != "desktop-id" or launchable.text != "skyapo.desktop":
         raise RuntimeError("AppStream launchable must refer to skyapo.desktop")
@@ -116,16 +124,24 @@ def main():
         "usr/share/applications/skyapo.desktop",
         "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
         "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
-        "usr/share/man/man1/skyapo.1",
-        "usr/share/man/man1/skyapod.1",
-        "usr/share/man/man1/skyapo-bench.1",
         "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
+        "usr/share/licenses/skyapo/CLAP-License.txt",
+        "usr/share/licenses/skyapo/Steinberg-VST3-base-License.txt",
+        "usr/share/licenses/skyapo/Steinberg-VST3-pluginterfaces-License.txt",
+        "usr/share/licenses/skyapo/Steinberg-VST3-public-sdk-License.txt",
+        "usr/share/licenses/skyapo/MuParserX-License.txt",
         "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt",
     ]
     for relative in required:
         path = root / relative
         if not path.is_file():
             raise RuntimeError(f"package is missing required file: {relative}")
+    for page in ("skyapo.1", "skyapod.1", "skyapo-bench.1"):
+        base = root / "usr/share/man/man1" / page
+        if not base.is_file() and not pathlib.Path(str(base) + ".gz").is_file():
+            raise RuntimeError(
+                f"package is missing required man page: {base.relative_to(root)}"
+            )
     validate_desktop_metadata(root)
     qt_license = (root / "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt").read_text(errors="replace")
     if "GNU LESSER GENERAL PUBLIC LICENSE" not in qt_license:

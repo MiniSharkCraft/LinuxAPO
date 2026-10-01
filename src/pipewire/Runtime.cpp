@@ -109,9 +109,9 @@ struct Runtime {
   pw_registry *registry{};
   pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
-  spa_source *rateEvent{}, *transitionEvent{}, *statusEvent{}, *sigint{},
-      *sigterm{}, *selectionTimer{}, *configEvent{}, *reloadTimer{},
-      *linkRetryTimer{};
+  spa_source *rateEvent{}, *transitionEvent{}, *statusEvent{},
+      *pluginLatencyEvent{}, *sigint{}, *sigterm{}, *selectionTimer{},
+      *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
   std::unique_ptr<skyapo::platform::ConfigWatcher> configWatcher;
   int server = -1;
   bool ownsSocket = false;
@@ -141,6 +141,7 @@ struct Runtime {
   std::atomic<unsigned> callbacksInFlight{0};
   std::atomic<AudioMode> audioMode{AudioMode::Running};
   std::atomic<bool> transitionComplete{false};
+  std::atomic<bool> pluginLatencyEventQueued{false};
   // A queued completion event can outlive its graph; this prevents it from
   // resetting telemetry for a more recently installed graph.
   skyapo::pipewire::TransitionMetricsGeneration transitionMetrics;
@@ -192,8 +193,9 @@ struct Runtime {
       pw_core_disconnect(core);
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
-      for (auto *s : {rateEvent, transitionEvent, statusEvent, sigint, sigterm,
-                      selectionTimer, configEvent, reloadTimer, linkRetryTimer})
+      for (auto *s :
+           {rateEvent, transitionEvent, statusEvent, pluginLatencyEvent, sigint,
+            sigterm, selectionTimer, configEvent, reloadTimer, linkRetryTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
@@ -602,6 +604,25 @@ struct Runtime {
       r.maxNs.store(elapsed, std::memory_order_relaxed);
     if (hz && elapsed > frames * 1000000000 / hz)
       r.overruns.fetch_add(1, std::memory_order_relaxed);
+
+    // A plugin may report a changed latency at the end of run(). Its new DSP
+    // delay applies to subsequent blocks, so stop processing at this block
+    // boundary and let the control loop rebuild the PDC schedule while audio
+    // callbacks are drained. The quiescing callback path writes silence; it
+    // does not allocate, inspect files, or wait for the control loop.
+    if (!r.pending.load(std::memory_order_seq_cst)) {
+      Engine *processed = r.active.load(std::memory_order_seq_cst);
+      if (processed && processed->pluginLatencyRefreshPending()) {
+        bool expected = false;
+        if (r.pluginLatencyEventQueued.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+          r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+          pw_loop_signal_event(pw_main_loop_get_loop(r.main),
+                               r.pluginLatencyEvent);
+        }
+      }
+    }
   }
   static void stateChanged(void *data, pw_filter_state old,
                            pw_filter_state state, const char *error) {
@@ -615,37 +636,54 @@ struct Runtime {
         old != PW_FILTER_STATE_UNCONNECTED && !r.cleaning && !r.stopping)
       r.fail("virtual source disconnected");
   }
+  static void refreshPluginLatency(Runtime &r) {
+    r.reclaimRetired();
+    if (r.pending.load(std::memory_order_seq_cst)) {
+      r.resumeAudio();
+      return;
+    }
+    auto *engine = r.active.load(std::memory_order_seq_cst);
+    if (!engine || !engine->pluginLatencyRefreshPending()) {
+      r.resumeAudio();
+      return;
+    }
+    if (!r.quiesceAndDrain()) {
+      r.pluginLatencyError =
+          "timed out draining callbacks for plugin latency refresh";
+      r.fail(r.pluginLatencyError);
+      return;
+    }
+    try {
+      r.reclaimRetired();
+      engine = r.active.load(std::memory_order_seq_cst);
+      const unsigned count = engine ? engine->refreshPluginLatencies() : 0;
+      if (count) {
+        r.pluginLatencyRefreshes += count;
+        r.pluginLatencyError.clear();
+        std::cerr << "skyapod: refreshed latency for " << count
+                  << " plugin instance(s)\n";
+        r.resetMetrics.store(true, std::memory_order_release);
+      }
+    } catch (const std::exception &e) {
+      r.pluginLatencyError = e.what();
+      std::cerr << "skyapod: plugin latency refresh failed: "
+                << r.pluginLatencyError << '\n';
+      // A failed PDC rebuild can leave part of the graph with its new delay
+      // while the remaining nodes still use the old schedule. Keep the audio
+      // path quiesced and stop rather than resume with channel misalignment.
+      r.fail(r.pluginLatencyError);
+      return;
+    }
+    r.resumeAudio();
+  }
+  static void pluginLatencyChanged(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    r.pluginLatencyEventQueued.store(false, std::memory_order_release);
+    refreshPluginLatency(r);
+  }
   static void selectionChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
-    r.reclaimRetired();
-    if (!r.pending.load(std::memory_order_seq_cst)) {
-      auto *engine = r.active.load(std::memory_order_seq_cst);
-      if (engine && engine->pluginLatencyRefreshPending()) {
-        if (!r.quiesceAndDrain()) {
-          r.pluginLatencyError =
-              "timed out draining callbacks for VST3 latency refresh";
-        } else {
-          try {
-            r.reclaimRetired();
-            engine = r.active.load(std::memory_order_seq_cst);
-            const unsigned count =
-                engine ? engine->refreshPluginLatencies() : 0;
-            if (count) {
-              r.pluginLatencyRefreshes += count;
-              r.pluginLatencyError.clear();
-              std::cerr << "skyapod: refreshed latency for " << count
-                        << " plugin instance(s)\n";
-              r.resetMetrics.store(true, std::memory_order_release);
-            }
-          } catch (const std::exception &e) {
-            r.pluginLatencyError = e.what();
-            std::cerr << "skyapod: plugin latency refresh failed: "
-                      << r.pluginLatencyError << '\n';
-          }
-          r.resumeAudio();
-        }
-      }
-    }
+    refreshPluginLatency(r);
     try {
       if (settings::device() != r.device.name)
         r.fail("device selection changed");
@@ -864,9 +902,12 @@ struct Runtime {
     const auto pluginLatency =
         e ? e->pluginLatencySamples() : std::optional<uint64_t>{};
     if (pluginLatency)
-      s << *pluginLatency << " samples (no delay compensation)";
+      s << *pluginLatency << " samples (sum only; not end-to-end latency)";
     else
       s << "unknown";
+    s << "\nPlugin latency compensation: "
+      << (e && e->pluginLatencyCompensationActive() ? "active" : "inactive")
+      << " (plugin-reported latency only)";
     s << "\nConfig: " << config << "\nProcessed blocks: " << b
       << "\nOverruns: " << overruns.load();
     s << "\nActive capture links: "
@@ -1032,6 +1073,7 @@ struct Runtime {
     pw_core_add_listener(core, &coreHook, &ce, this);
     rateEvent = pw_loop_add_event(loop, rateChanged, this);
     transitionEvent = pw_loop_add_event(loop, transitionReady, this);
+    pluginLatencyEvent = pw_loop_add_event(loop, pluginLatencyChanged, this);
     sigint = pw_loop_add_signal(loop, SIGINT, signal, this);
     sigterm = pw_loop_add_signal(loop, SIGTERM, signal, this);
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
@@ -1040,8 +1082,9 @@ struct Runtime {
     configWatcher = std::make_unique<skyapo::platform::ConfigWatcher>(config);
     configEvent = pw_loop_add_io(loop, configWatcher->fileDescriptor(),
                                  SPA_IO_IN, false, configReady, this);
-    if (!rateEvent || !transitionEvent || !sigint || !sigterm ||
-        !selectionTimer || !reloadTimer || !linkRetryTimer || !configEvent)
+    if (!rateEvent || !transitionEvent || !pluginLatencyEvent || !sigint ||
+        !sigterm || !selectionTimer || !reloadTimer || !linkRetryTimer ||
+        !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);

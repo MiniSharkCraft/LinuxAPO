@@ -1,6 +1,6 @@
 # SkyAPO
 
-SkyAPO is an early Linux port effort for Equalizer APO. It compiles and invokes selected real upstream Equalizer APO DSP filters; the project does not substitute another audio effects engine. The upstream GPL license and history are kept in `upstream/equalizerapo`; `docs/THIRD_PARTY_NOTICES.md` (installed as `THIRD_PARTY_NOTICES.md`) inventories the pinned CLAP/VST3 interfaces and package license files. Additional engineering notes are under `docs/` in the source checkout.
+SkyAPO 0.9.0 is a daily-use preview of Equalizer APO's Linux audio path—not a 1.0.0 or production-final release. It compiles and invokes selected real upstream Equalizer APO DSP filters; the project does not substitute another audio effects engine. Native PipeWire routes a selected capture device through DSP to `SkyAPO Virtual Mic`. Hardware unplug/replug, full legacy config parity, total end-to-end latency and plugin crash isolation remain incomplete; see “Deferred to 1.0.0” in `ROADMAP.md`. The upstream GPL license and history are kept in `upstream/equalizerapo`; `docs/THIRD_PARTY_NOTICES.md` inventories pinned plugin interfaces and package license files.
 
 ## Build
 
@@ -76,6 +76,6 @@ The adapter uses actual upstream `FilterConfiguration` read/process/write and se
 
 No heap allocation, parsing, files, enumeration, or logging occurs in the processing callback. Allocation counters cover executable C++ and linked/wrapped C calls, not shared PipeWire library internals. Status timing instrumentation is diagnostic, not a scheduling guarantee.
 
-`skyapo status` and `skyapo diagnostics --json` report the sum of reported plugin latency snapshots when the active hosts provide them (`plugin_reported_latency_sum_samples` and its sample-rate-derived millisecond value). This sum is not a per-channel path calculation or total/end-to-end latency, and SkyAPO does not yet perform plugin delay compensation or track later latency-change notifications. The graph quantum remains a separate scheduling interval.
+`skyapo status` and `skyapo diagnostics --json` report the sum of reported plugin latency snapshots when the active hosts provide them (`plugin_reported_latency_sum_samples` and its sample-rate-derived millisecond value). LV2 accepts both its deprecated `reportsLatency` port property and modern `latency` designation; CLAP/VST3 notifications and LV2 polling refresh snapshots off the audio thread. SkyAPO compensates plugin-reported latency across supported plugin paths, `Copy` fan-ins and final output channels. It does not fold intentional EAPO `Delay:` directives into that schedule or measure total/end-to-end latency; the graph quantum remains a separate scheduling interval.
 
 Troubleshooting: run as your normal user, ensure PipeWire/WirePlumber is running, select a physical audio source first, and check daemon stderr/status. A silent mic, wrong source, or failed target makes the recording test fail. Config edits are watched and debounced; invalid replacements leave the last valid graph active, and the error appears in status. Sanitizer builds are for diagnostics, not low-latency production.

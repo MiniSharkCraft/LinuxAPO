@@ -2,6 +2,7 @@
 import configparser
 import pathlib
 import sys
+from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 
@@ -27,6 +28,39 @@ if launchable is None or launchable.text != desktop_path.name:
 for required in ("name", "summary", "metadata_license", "project_license"):
     if not root.findtext(required):
         raise SystemExit(f"AppStream metadata is missing {required}")
-homepage = root.find("url[@type='homepage']")
-if homepage is None or not (homepage.text or "").startswith("https://"):
-    raise SystemExit("AppStream metadata must provide an HTTPS homepage")
+
+
+def validate_optional_homepage(component):
+    homepage = component.find("url[@type='homepage']")
+    if homepage is None:
+        return
+    address = (homepage.text or "").strip()
+    parsed = urlsplit(address)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError(
+            "AppStream homepage, when provided, must be an HTTPS URL"
+        )
+    if "equalizerapo" in address.casefold():
+        raise ValueError(
+            "AppStream homepage must not point to the upstream Equalizer APO project"
+        )
+
+
+validate_optional_homepage(root)
+
+# Keep URL optional until SkyAPO has its own official homepage, and guard
+# against reintroducing the unrelated upstream Equalizer APO project URL.
+validate_optional_homepage(ET.fromstring("<component />"))
+upstream_homepage = ET.fromstring(
+    '<component><url type="homepage">'
+    "https://sourceforge.net/projects/equalizerapo/"
+    "</url></component>"
+)
+try:
+    validate_optional_homepage(upstream_homepage)
+except ValueError:
+    pass
+else:
+    raise SystemExit(
+        "AppStream metadata must reject the upstream Equalizer APO homepage"
+    )

@@ -5,14 +5,17 @@
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/raw.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr uint32_t Invalid = SPA_ID_INVALID;
@@ -41,6 +44,16 @@ struct Consumer {
   std::atomic<uint64_t> frames{0};
   std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
+  std::atomic<double> channelDifferenceEnergy{0.0};
+  bool expectIdenticalChannels{};
+  std::atomic<unsigned> processCalls{0};
+  std::atomic<unsigned> invalidRateCalls{0};
+  std::atomic<unsigned> zeroDurationCalls{0};
+  std::atomic<unsigned> nullBufferCalls{0};
+  std::atomic<int> filterState{PW_FILTER_STATE_UNCONNECTED};
+  std::vector<float> recordedLeft{};
+  std::vector<float> recordedRight{};
+  size_t recordedSamples{};
   std::atomic<bool> failed{false};
 
   explicit Consumer(bool mono, bool silent, bool anyAudio, double gainDb,
@@ -125,10 +138,12 @@ struct Consumer {
     pw_main_loop_quit(c.loop);
   }
 
-  static void stateChanged(void* data, pw_filter_state, pw_filter_state state,
-                           const char* error) {
-    if (state != PW_FILTER_STATE_ERROR) return;
+  static void stateChanged(void *data, pw_filter_state, pw_filter_state state,
+                           const char *error) {
     auto& c = *static_cast<Consumer*>(data);
+    c.filterState.store(static_cast<int>(state), std::memory_order_relaxed);
+    if (state != PW_FILTER_STATE_ERROR)
+      return;
     c.failed.store(true, std::memory_order_relaxed);
     std::fprintf(stderr, "test consumer: %s\n",
                  error ? error : "PipeWire filter error");
@@ -137,28 +152,60 @@ struct Consumer {
 
   static void process(void* data, spa_io_position* position) {
     auto& c = *static_cast<Consumer*>(data);
+    c.processCalls.fetch_add(1, std::memory_order_relaxed);
     const auto rate = position->clock.rate.num
                           ? position->clock.rate.denom / position->clock.rate.num
                           : 0;
     const auto previousRate = c.sampleRate.load(std::memory_order_relaxed);
     if (!rate || (c.expectedRate && rate != c.expectedRate) ||
         (previousRate && previousRate != rate)) {
+      c.invalidRateCalls.fetch_add(1, std::memory_order_relaxed);
       c.failed.store(true, std::memory_order_relaxed);
       return;
     }
     c.sampleRate.store(rate, std::memory_order_relaxed);
     const uint32_t count = position->clock.duration;
+    if (count == 0)
+      c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
     double blockEnergy = 0.0;
+    double blockChannelDifferenceEnergy = 0.0;
+    std::array<float *, 2> channelData{};
     for (unsigned ch = 0; ch < c.channels; ++ch) {
-      auto* samples =
-          static_cast<float*>(pw_filter_get_dsp_buffer(c.inputs[ch], count));
-      if (!samples) return;
+      channelData[ch] =
+          static_cast<float *>(pw_filter_get_dsp_buffer(c.inputs[ch], count));
+      if (!channelData[ch]) {
+        c.nullBufferCalls.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
       for (uint32_t i = 0; i < count; ++i)
-        blockEnergy += static_cast<double>(samples[i]) * samples[i];
+        blockEnergy +=
+            static_cast<double>(channelData[ch][i]) * channelData[ch][i];
+    }
+    if (c.expectIdenticalChannels) {
+      for (uint32_t i = 0; i < count; ++i) {
+        const double difference =
+            static_cast<double>(channelData[0][i]) - channelData[1][i];
+        blockChannelDifferenceEnergy += difference * difference;
+      }
+      const auto remaining = c.recordedLeft.size() - c.recordedSamples;
+      const auto copyCount = std::min<size_t>(count, remaining);
+      std::copy_n(channelData[0], copyCount,
+                  c.recordedLeft.data() + c.recordedSamples);
+      std::copy_n(channelData[1], copyCount,
+                  c.recordedRight.data() + c.recordedSamples);
+      c.recordedSamples += copyCount;
     }
     double total = c.energy.load(std::memory_order_relaxed);
     while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
                                            std::memory_order_relaxed)) {
+    }
+    if (c.expectIdenticalChannels) {
+      double differenceTotal =
+          c.channelDifferenceEnergy.load(std::memory_order_relaxed);
+      while (!c.channelDifferenceEnergy.compare_exchange_weak(
+          differenceTotal, differenceTotal + blockChannelDifferenceEnergy,
+          std::memory_order_relaxed)) {
+      }
     }
     c.frames.fetch_add(count, std::memory_order_relaxed);
   }
@@ -168,6 +215,11 @@ struct Consumer {
   }
 
   int run() {
+    if (expectIdenticalChannels) {
+      constexpr size_t sampleCapacity = 48000 * 5;
+      recordedLeft.resize(sampleCapacity);
+      recordedRight.resize(sampleCapacity);
+    }
     pw_init(nullptr, nullptr);
     loop = pw_main_loop_new(nullptr);
     if (!loop) throw std::runtime_error("cannot create PipeWire loop");
@@ -232,6 +284,7 @@ struct Consumer {
                          nullptr, false);
     pw_main_loop_run(loop);
 
+    const auto actualFilterState = pw_filter_get_state(filter, nullptr);
     for (auto* link : links)
       if (link) pw_proxy_destroy(link);
     pw_filter_destroy(filter);
@@ -242,22 +295,92 @@ struct Consumer {
     pw_deinit();
 
     const auto capturedFrames = frames.load();
+    if (capturedFrames == 0) {
+      std::fprintf(stderr,
+                   "test consumer diagnostics: sourceNode=%u ownNode=%u "
+                   "outputPorts=%u,%u inputPorts=%u,%u links=%p,%p "
+                   "failed=%d processCalls=%u invalidRate=%u zeroDuration=%u "
+                   "nullBuffer=%u filterState=%d actualFilterState=%d\n",
+                   sourceNode, ownNode, outputIds[0], outputIds[1], inputIds[0],
+                   inputIds[1], static_cast<void *>(links[0]),
+                   static_cast<void *>(links[1]), failed.load(),
+                   processCalls.load(), invalidRateCalls.load(),
+                   zeroDurationCalls.load(), nullBufferCalls.load(),
+                   filterState.load(), static_cast<int>(actualFilterState));
+    }
     const double rms =
         capturedFrames ? std::sqrt(energy.load() / (capturedFrames * channels))
                        : 0.0;
     const double expected =
         InputAmplitude * std::pow(10.0, expectedDb / 20.0) / std::sqrt(2.0);
     const double ratio = expected > 0 ? rms / expected : 0.0;
+    const double channelDifferenceRatio =
+        expectIdenticalChannels && energy.load() > 0.0
+            ? std::sqrt(channelDifferenceEnergy.load() / energy.load())
+            : 0.0;
+    int bestChannelLag = 0;
+    double bestLagDifferenceRatio = channelDifferenceRatio;
+    double recordedLeftRms = 0.0;
+    double recordedRightRms = 0.0;
+    if (expectIdenticalChannels && recordedSamples > 256) {
+      double bestCorrelation = -std::numeric_limits<double>::infinity();
+      const auto count = recordedSamples;
+      double leftEnergy = 0.0;
+      double rightEnergy = 0.0;
+      for (size_t i = 0; i < count; ++i) {
+        leftEnergy += static_cast<double>(recordedLeft[i]) * recordedLeft[i];
+        rightEnergy += static_cast<double>(recordedRight[i]) * recordedRight[i];
+      }
+      recordedLeftRms = std::sqrt(leftEnergy / count);
+      recordedRightRms = std::sqrt(rightEnergy / count);
+      for (int lag = -128; lag <= 128; ++lag) {
+        const size_t begin = lag < 0 ? static_cast<size_t>(-lag) : 0;
+        const size_t end = lag > 0 ? count - static_cast<size_t>(lag) : count;
+        double crossEnergy = 0.0;
+        double leftEnergy = 0.0;
+        double rightEnergy = 0.0;
+        for (size_t i = begin; i < end; ++i) {
+          const auto j = static_cast<size_t>(static_cast<int64_t>(i) + lag);
+          crossEnergy +=
+              static_cast<double>(recordedLeft[i]) * recordedRight[j];
+          leftEnergy += static_cast<double>(recordedLeft[i]) * recordedLeft[i];
+          rightEnergy +=
+              static_cast<double>(recordedRight[j]) * recordedRight[j];
+        }
+        const double correlation =
+            leftEnergy > 0.0 && rightEnergy > 0.0
+                ? crossEnergy / std::sqrt(leftEnergy * rightEnergy)
+                : -std::numeric_limits<double>::infinity();
+        if (correlation > bestCorrelation) {
+          bestCorrelation = correlation;
+          bestChannelLag = lag;
+          bestLagDifferenceRatio =
+              std::sqrt(std::max(0.0, 2.0 - 2.0 * bestCorrelation));
+        }
+      }
+    }
     std::printf(
         "Captured frames: %llu\nChannels: %u\nSample rate: %u Hz\nRMS: %.8f\n"
         "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
         static_cast<unsigned long long>(capturedFrames), channels,
         sampleRate.load(), rms,
         expected, ratio);
+    if (expectIdenticalChannels)
+      std::printf("Inter-channel difference ratio: %.8f\n",
+                  channelDifferenceRatio);
+    if (expectIdenticalChannels)
+      std::printf("Best relative channel lag: %d samples\n"
+                  "Best-lag difference ratio: %.8f\n"
+                  "Left RMS: %.8f\nRight RMS: %.8f\n",
+                  bestChannelLag, bestLagDifferenceRatio, recordedLeftRms,
+                  recordedRightRms);
     const bool audioMatches =
         acceptAnyAudio ||
         (expectSilent ? rms < 1.0e-6 : std::abs(ratio - 1.0) < 0.03);
-    return !failed.load() && capturedFrames > 48000 && audioMatches
+    const bool channelsMatch =
+        !expectIdenticalChannels || channelDifferenceRatio < 0.01;
+    return !failed.load() && capturedFrames > 48000 && audioMatches &&
+                   channelsMatch
                ? 0
                : 1;
   }
@@ -268,6 +391,7 @@ int main(int argc, char** argv) {
   bool mono = false;
   bool expectSilent = false;
   bool acceptAnyAudio = false;
+  bool expectIdenticalChannels = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
   for (int arg = 1; arg < argc; ++arg) {
@@ -278,6 +402,8 @@ int main(int argc, char** argv) {
       expectSilent = true;
     else if (option == "--accept-any-audio")
       acceptAnyAudio = true;
+    else if (option == "--expect-identical-channels")
+      expectIdenticalChannels = true;
     else if (option == "--expected-db" && arg + 1 < argc) {
       char *end = nullptr;
       expectedDb = std::strtod(argv[++arg], &end);
@@ -296,6 +422,7 @@ int main(int argc, char** argv) {
     } else {
       std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono] "
                            "[--expect-silent] [--accept-any-audio] "
+                           "[--expect-identical-channels] "
                            "[--expected-db DB] [--expected-rate HZ]\n");
       return 2;
     }
@@ -303,6 +430,13 @@ int main(int argc, char** argv) {
   try {
     Consumer consumer(mono, expectSilent, acceptAnyAudio, expectedDb,
                       expectedRate);
+    if (expectIdenticalChannels && mono) {
+      std::fprintf(
+          stderr,
+          "test consumer: --expect-identical-channels requires stereo\n");
+      return 2;
+    }
+    consumer.expectIdenticalChannels = expectIdenticalChannels;
     return consumer.run();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "test consumer: %s\n", error.what());

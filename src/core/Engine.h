@@ -52,7 +52,9 @@ public:
   unsigned processTransitionTo(Engine &next, float *interleaved,
                                unsigned frames, unsigned transitionCounter,
                                unsigned transitionLength);
-  unsigned filterCount() const { return graph.size(); }
+  unsigned filterCount() const {
+    return descriptions.size();
+  }
   unsigned sampleRate() const { return rate; }
   unsigned channels() const { return channelCount; }
   unsigned maxFrames() const { return maxFrameCount; }
@@ -65,6 +67,7 @@ public:
   }
   std::vector<std::string> failedPluginDescriptions() const;
   std::optional<uint64_t> pluginLatencySamples() const noexcept;
+  bool pluginLatencyCompensationActive() const noexcept;
   bool pluginLatencyRefreshPending() const noexcept;
   // Control-thread only; realtime callbacks must be quiesced and drained.
   unsigned refreshPluginLatencies();
@@ -92,8 +95,12 @@ private:
   using FilterList = std::vector<ParsedFilter>;
   struct FilterNode {
     IFilter *filter;
+    std::string description;
     std::vector<unsigned> inputs;
     std::vector<unsigned> outputs;
+    // Internal channel-lane alignment inserted before each plugin stage.
+    bool pdcAlignment{};
+    std::vector<unsigned> alignmentChannels;
     bool inPlace;
     bool fixedBlock;
   };
@@ -103,7 +110,10 @@ private:
                        std::vector<std::filesystem::path> &attemptedFiles,
                        std::vector<IncludeSite> &includeChain,
                        bool &stageActive, mup::ParserX *expressionParser);
-  std::vector<FilterNode> buildGraph(FilterList &candidate);
+  std::vector<FilterNode>
+  buildGraph(FilterList &candidate,
+             std::vector<std::unique_ptr<IFilter, FilterDeleter>> &generated);
+  void rebuildPdcPlan(std::vector<FilterNode> &nodes, unsigned laneCount) const;
   unsigned rate, channelCount, maxFrameCount;
   bool fixedBlock = false;
   bool allowPendingEndpointVolume = false;
@@ -113,5 +123,6 @@ private:
   std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
+  unsigned allChannelCount{};
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
 };

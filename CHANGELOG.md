@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0 — daily-use preview (2026-10-01)
+
+- Set the supported release scope to the locally verified PipeWire/DSP/virtual-mic path, transactional config lifecycle, bounded supported plugin/PDC behavior, and Arch staged-install workflow. This is a preview, not 1.0.0 or production-final.
+- Defer real hardware unplug/replug, clean-root/ALPM-hook and hosted-CI evidence, legal/distribution resolution, complete Windows EAPO parity, arbitrary third-party plugin guarantees/isolation, and total end-to-end latency to the explicit 1.0.0 backlog in `ROADMAP.md`.
+- Add a 10,000-sample ceiling for plugin-reported realtime latency and compensation rings; reject oversized initial values and silence an instance that reports an oversized dynamic value, then rebuild its compensation schedule off-thread. Other unexpected PDC refresh failures remain fail-closed rather than resuming with a potentially stale channel alignment.
+- Verify the full local PipeWire-enabled regression (57/57), ASan/UBSan suite (35/35), callback allocation tests, offline render/config/plugin tests and plugin latency/PDC E2E. An isolated Arch package build from the final 0.9.0 commit remains required before tagging.
+
 ## Unreleased
 
 - Port the pinned upstream Equalizer APO MuParserX `StringOperators` and `LogicalOperators` into checked build-tree adaptations; production config now supports upstream string-aware `+` and infix `not`, with numerical parser-path regression coverage. Revalidated the live Built-in Audio → SkyAPO Virtual Mic path at 48 kHz/Q1024: an independent recorder captured 192000 frames with correlation 1 and −6 dB RMS ratio, and callback audits reported 0 allocations/deallocations and 0 overruns.

@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "PluginLatencyLimits.h"
+
 // Control-thread interface for transparent host bypass. Implementations
 // publish the value atomically; the audio callback reads it without locking.
 class IPluginBypassControl {
@@ -28,6 +30,9 @@ public:
   // The dry path uses the plugin's known initial latency so toggling host
   // bypass does not move the signal earlier in time.
   void prepareBypassDelay(uint32_t latencySamples, unsigned channels) {
+    if (latencySamples > skyapo::plugin::MaxRealtimeLatencySamples)
+      throw std::runtime_error(
+          "plugin latency exceeds SkyAPO's realtime compensation safety limit");
     if (!latencySamples) {
       bypassDelay_.clear();
       bypassLatency_ = 0;

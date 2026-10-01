@@ -8,6 +8,7 @@
 #include "../plugin/IPluginLatencyRefresh.h"
 #include "../plugin/IPluginSourceContext.h"
 #include "../plugin/IPluginStatePersistence.h"
+#include "../plugin/PluginLatencyLimits.h"
 #include "FilterConfiguration.h"
 #include "FilterConfigurationContext.h"
 #include "UpstreamFilterEngineProcess.h"
@@ -69,6 +70,218 @@
 #endif
 
 namespace {
+class PdcAlignmentFilter final : public IFilter {
+public:
+  explicit PdcAlignmentFilter(std::vector<unsigned> channels)
+      : channels_(std::move(channels)) {}
+
+  bool getInPlace() override {
+    return false;
+  }
+  std::vector<std::wstring>
+  initialize(float, unsigned, std::vector<std::wstring> names) override {
+    delays_.assign(names.size(), 0);
+    rings_.resize(names.size());
+    cursors_.assign(names.size(), 0);
+    return names;
+  }
+  void configure(const std::vector<uint64_t> &arrival,
+                 std::vector<uint64_t> &updated) {
+    uint64_t latest = 0;
+    for (const unsigned channel : channels_)
+      if (channel < arrival.size())
+        latest = std::max(latest, arrival[channel]);
+    for (const unsigned channel : channels_) {
+      if (channel >= delays_.size() || channel >= arrival.size())
+        continue;
+      const uint64_t difference = latest - arrival[channel];
+      if (difference > skyapo::plugin::MaxRealtimeLatencySamples)
+        throw std::runtime_error(
+            "PDC delay exceeds SkyAPO's realtime compensation safety limit");
+    }
+    for (const unsigned channel : channels_) {
+      if (channel >= delays_.size() || channel >= arrival.size())
+        continue;
+      const auto difference = static_cast<uint32_t>(latest - arrival[channel]);
+      setDelay(channel, static_cast<uint32_t>(difference));
+      updated[channel] = latest;
+    }
+  }
+  void process(float **output, float **input, unsigned frames) override {
+    for (unsigned channel = 0; channel < delays_.size(); ++channel) {
+      const uint32_t delay = delays_[channel];
+      if (!delay) {
+        std::copy_n(input[channel], frames, output[channel]);
+        continue;
+      }
+      auto &ring = rings_[channel];
+      size_t &cursor = cursors_[channel];
+      for (unsigned frame = 0; frame < frames; ++frame) {
+        const float delayed = ring[cursor];
+        ring[cursor] = input[channel][frame];
+        output[channel][frame] = delayed;
+        if (++cursor == ring.size())
+          cursor = 0;
+      }
+    }
+  }
+
+private:
+  void setDelay(unsigned channel, uint32_t delay) {
+    if (delays_[channel] == delay)
+      return;
+    delays_[channel] = delay;
+    rings_[channel].assign(delay, 0.0f);
+    cursors_[channel] = 0;
+  }
+
+  std::vector<unsigned> channels_;
+  std::vector<uint32_t> delays_;
+  std::vector<std::vector<float>> rings_;
+  std::vector<size_t> cursors_;
+};
+
+class PdcCopyFilter final : public CopyFilter {
+public:
+  explicit PdcCopyFilter(const std::vector<Assignment> &assignments)
+      : CopyFilter(assignments) {}
+
+  std::vector<std::wstring>
+  initialize(float sampleRate, unsigned maxFrames,
+             std::vector<std::wstring> names) override {
+    auto outputs = CopyFilter::initialize(sampleRate, maxFrames, names);
+    channelNames_ = std::move(names);
+    targets_.clear();
+    for (const auto &assignment : getAssignments()) {
+      Target target;
+      target.output = ChannelHelper::getChannelIndex(assignment.targetChannel,
+                                                     outputs, true);
+      if (target.output < 0)
+        throw std::runtime_error("Copy target channel could not be resolved");
+      for (const auto &summand : assignment.sourceSum) {
+        Term term;
+        term.channel = summand.channel.empty()
+                           ? -1
+                           : ChannelHelper::getChannelIndex(summand.channel,
+                                                            channelNames_);
+        if (!summand.channel.empty() && term.channel < 0)
+          throw std::runtime_error("Copy source channel could not be resolved");
+        term.constant = summand.channel.empty();
+        term.factor = static_cast<float>(
+            summand.isDecibel ? std::pow(10.0, summand.factor / 20.0)
+                              : summand.factor);
+        target.terms.push_back(std::move(term));
+      }
+      targets_.push_back(std::move(target));
+    }
+    return outputs;
+  }
+
+  void configure(const std::vector<uint64_t> &arrival,
+                 std::vector<uint64_t> &updated) {
+    // Validate all fan-in delay lengths before changing any ring in this
+    // filter. A rejected graph/latency update must not leave half the fan-in
+    // scheduled with its previous compensation.
+    for (const auto &target : targets_) {
+      uint64_t latest = 0;
+      for (const auto &term : target.terms)
+        if (!term.constant &&
+            static_cast<size_t>(term.channel) < arrival.size())
+          latest = std::max(latest, arrival[term.channel]);
+      for (const auto &term : target.terms) {
+        if (term.constant ||
+            static_cast<size_t>(term.channel) >= arrival.size())
+          continue;
+        if (latest - arrival[term.channel] >
+            skyapo::plugin::MaxRealtimeLatencySamples)
+          throw std::runtime_error("PDC Copy delay exceeds SkyAPO's realtime "
+                                   "compensation safety limit");
+      }
+    }
+    for (auto &target : targets_) {
+      uint64_t latest = 0;
+      for (const auto &term : target.terms)
+        if (!term.constant &&
+            static_cast<size_t>(term.channel) < arrival.size())
+          latest = std::max(latest, arrival[term.channel]);
+      if (target.output < 0 ||
+          static_cast<size_t>(target.output) >= updated.size())
+        continue;
+      for (auto &term : target.terms) {
+        uint32_t delay = 0;
+        if (!term.constant &&
+            static_cast<size_t>(term.channel) < arrival.size()) {
+          const uint64_t difference = latest - arrival[term.channel];
+          if (difference > skyapo::plugin::MaxRealtimeLatencySamples)
+            throw std::runtime_error("PDC Copy delay exceeds SkyAPO's realtime "
+                                     "compensation safety limit");
+          delay = static_cast<uint32_t>(difference);
+        }
+        if (term.delay != delay) {
+          term.delay = delay;
+          term.ring.assign(delay, 0.0f);
+          term.cursor = 0;
+        }
+      }
+      updated[target.output] = latest;
+    }
+  }
+
+  void process(float **output, float **input, unsigned frames) override {
+    for (auto &target : targets_) {
+      if (target.terms.empty())
+        continue;
+      for (unsigned frame = 0; frame < frames; ++frame) {
+        float sum = sample(target.terms.front(), input, frame);
+        sum *= target.terms.front().factor;
+        for (size_t index = 1; index < target.terms.size(); ++index) {
+          auto &term = target.terms[index];
+          sum += sample(term, input, frame) * term.factor;
+        }
+        output[target.output][frame] = sum;
+      }
+    }
+  }
+
+private:
+  struct Term {
+    int channel{-1};
+    float factor{1.0f};
+    bool constant{};
+    uint32_t delay{};
+    std::vector<float> ring;
+    size_t cursor{};
+  };
+  struct Target {
+    int output{-1};
+    std::vector<Term> terms;
+  };
+  static float sample(Term &term, float **input, unsigned frame) {
+    if (term.constant)
+      return 1.0f;
+    if (!term.delay)
+      return input[term.channel][frame];
+    const float value = term.ring[term.cursor];
+    term.ring[term.cursor] = input[term.channel][frame];
+    if (++term.cursor == term.ring.size())
+      term.cursor = 0;
+    return value;
+  }
+
+  std::vector<std::wstring> channelNames_;
+  std::vector<Target> targets_;
+};
+
+template <typename T, typename... Args> T *allocateFilter(Args &&...args) {
+  void *memory = MemoryHelper::alloc(sizeof(T));
+  try {
+    return new (memory) T(std::forward<Args>(args)...);
+  } catch (...) {
+    MemoryHelper::free(memory);
+    throw;
+  }
+}
+
 void stripInlineComment(std::string &line) {
   bool quoted = false;
   bool escaped = false;
@@ -295,8 +508,9 @@ void Engine::loadConfig(const std::string &path) {
                        "configuration finalization");
 
   std::vector<FilterNode> newGraph;
+  std::vector<std::unique_ptr<IFilter, FilterDeleter>> generatedFilters;
   try {
-    newGraph = buildGraph(candidate);
+    newGraph = buildGraph(candidate, generatedFilters);
   } catch (const std::exception &error) {
     const std::string message = error.what();
     for (const auto &parsed : candidate) {
@@ -326,6 +540,7 @@ void Engine::loadConfig(const std::string &path) {
     for (const unsigned channel : node.outputs)
       allChannelCount = std::max(allChannelCount, channel + 1);
   }
+  rebuildPdcPlan(newGraph, allChannelCount);
   auto freeInfos = [&infos] {
     for (auto *info : infos) {
       MemoryHelper::free(info->inChannels);
@@ -382,15 +597,20 @@ void Engine::loadConfig(const std::string &path) {
       built);
   for (auto &parsed : candidate)
     parsed.filter.release();
+  for (auto &filter : generatedFilters)
+    filter.release();
 
   graph.swap(newGraph);
+  this->allChannelCount = allChannelCount;
   configuration.swap(newConfiguration);
   descriptions.swap(newDescriptions);
   loadedConfigFiles.swap(configFiles);
   fixedBlock = newFixedBlock;
 }
 
-std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
+std::vector<Engine::FilterNode> Engine::buildGraph(
+    FilterList &candidate,
+    std::vector<std::unique_ptr<IFilter, FilterDeleter>> &generated) {
   std::vector<std::wstring> allNames = channelNames;
   std::vector<std::wstring> selectedNames = allNames;
   std::vector<FilterNode> result;
@@ -444,6 +664,11 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
     if (filter->getAllChannels())
       selectedNames = allNames;
     const auto inputNames = selectedNames;
+    if (auto *copy = dynamic_cast<CopyFilter *>(filter)) {
+      auto *adapted = allocateFilter<PdcCopyFilter>(copy->getAssignments());
+      parsed.filter.reset(adapted);
+      filter = adapted;
+    }
     if (auto *copy = dynamic_cast<CopyFilter *>(filter))
       for (const auto &assignment : copy->getAssignments())
         for (const auto &summand : assignment.sourceSum)
@@ -500,6 +725,35 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
                                  StringHelper::toString(name, 65001));
       node.inputs.push_back(static_cast<unsigned>(it - allNames.begin()));
     }
+    const bool pluginNode =
+        dynamic_cast<IPluginLatencyState *>(filter) != nullptr;
+    if (pluginNode) {
+      std::vector<unsigned> alignChannels;
+      alignChannels.reserve(inputNames.size());
+      for (const auto &name : inputNames) {
+        const auto it = std::find(allNames.begin(), allNames.end(), name);
+        alignChannels.push_back(static_cast<unsigned>(it - allNames.begin()));
+      }
+      auto *align = allocateFilter<PdcAlignmentFilter>(alignChannels);
+      std::vector<std::wstring> alignNames(allNames.begin(), allNames.end());
+      const auto alignOutputs = align->initialize(static_cast<float>(rate),
+                                                  maxFrameCount, alignNames);
+      std::unique_ptr<IFilter, FilterDeleter> alignOwner(align);
+      generated.push_back(std::move(alignOwner));
+      FilterNode alignNode;
+      alignNode.filter = align;
+      alignNode.pdcAlignment = true;
+      alignNode.alignmentChannels = std::move(alignChannels);
+      alignNode.inPlace = false;
+      alignNode.fixedBlock = false;
+      for (const auto &name : alignOutputs) {
+        const auto it = std::find(allNames.begin(), allNames.end(), name);
+        const unsigned channel = static_cast<unsigned>(it - allNames.begin());
+        alignNode.inputs.push_back(channel);
+        alignNode.outputs.push_back(channel);
+      }
+      result.push_back(std::move(alignNode));
+    }
     for (const auto &name : outputNames) {
       auto it = std::find(allNames.begin(), allNames.end(), name);
       if (it == allNames.end()) {
@@ -510,12 +764,86 @@ std::vector<Engine::FilterNode> Engine::buildGraph(FilterList &candidate) {
       }
     }
     node.filter = filter;
+    node.description = parsed.directive + " — " + parsed.source.string() + ":" +
+                       std::to_string(parsed.line);
     result.push_back(std::move(node));
     selectedNames =
         filter->getSelectChannels() ? std::move(outputNames) : savedSelection;
   }
 
+  const bool hasLatencyAwarePlugin =
+      std::any_of(result.begin(), result.end(), [](const FilterNode &node) {
+        return dynamic_cast<IPluginLatencyState *>(node.filter) != nullptr;
+      });
+  if (hasLatencyAwarePlugin) {
+    std::vector<unsigned> physicalChannels(channelCount);
+    for (unsigned channel = 0; channel < channelCount; ++channel)
+      physicalChannels[channel] = channel;
+    auto *alignment = allocateFilter<PdcAlignmentFilter>(physicalChannels);
+    alignment->initialize(static_cast<float>(rate), maxFrameCount, allNames);
+    generated.emplace_back(alignment);
+    FilterNode outputAlignment;
+    outputAlignment.filter = alignment;
+    outputAlignment.pdcAlignment = true;
+    outputAlignment.alignmentChannels = std::move(physicalChannels);
+    outputAlignment.inPlace = false;
+    outputAlignment.fixedBlock = false;
+    for (size_t channel = 0; channel < allNames.size(); ++channel) {
+      outputAlignment.inputs.push_back(static_cast<unsigned>(channel));
+      outputAlignment.outputs.push_back(static_cast<unsigned>(channel));
+    }
+    result.push_back(std::move(outputAlignment));
+  }
+
   return result;
+}
+
+void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
+                            unsigned laneCount) const {
+  std::vector<uint64_t> arrival(laneCount, 0);
+  for (auto &node : nodes) {
+    if (node.pdcAlignment) {
+      auto *alignment = dynamic_cast<PdcAlignmentFilter *>(node.filter);
+      if (!alignment)
+        throw std::runtime_error("invalid internal PDC alignment node");
+      const auto inputArrival = arrival;
+      alignment->configure(inputArrival, arrival);
+      continue;
+    }
+
+    if (auto *copy = dynamic_cast<PdcCopyFilter *>(node.filter)) {
+      const auto inputArrival = arrival;
+      copy->configure(inputArrival, arrival);
+      continue;
+    }
+
+    uint64_t latestInput = 0;
+    for (const unsigned input : node.inputs)
+      if (input < arrival.size())
+        latestInput = std::max(latestInput, arrival[input]);
+    const auto *plugin = dynamic_cast<const IPluginLatencyState *>(node.filter);
+    const uint64_t pluginLatency = plugin ? plugin->latencySamples() : 0;
+    if (pluginLatency > skyapo::plugin::MaxRealtimeLatencySamples)
+      throw std::runtime_error("PDC plugin latency exceeds SkyAPO's realtime "
+                               "compensation safety limit: " +
+                               node.description);
+    for (size_t output = 0; output < node.outputs.size(); ++output) {
+      const unsigned destination = node.outputs[output];
+      if (destination >= arrival.size())
+        continue;
+      uint64_t sourceLatency = latestInput;
+      const auto matchingInput =
+          std::find(node.inputs.begin(), node.inputs.end(), destination);
+      if (matchingInput != node.inputs.end())
+        sourceLatency = arrival[destination];
+      if (plugin && output < node.inputs.size() &&
+          output < node.outputs.size() && node.inputs[output] < arrival.size())
+        sourceLatency = arrival[node.inputs[output]];
+      if (pluginLatency > std::numeric_limits<uint64_t>::max() - sourceLatency)
+        throw std::runtime_error("PDC plugin latency overflow");
+      arrival[destination] = sourceLatency + pluginLatency;
+    }
+  }
 }
 
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
@@ -882,8 +1210,9 @@ std::vector<std::string> Engine::failedPluginDescriptions() const {
   for (size_t i = 0; i < graph.size(); ++i) {
     const auto *state =
         dynamic_cast<const IPluginFailureState *>(graph[i].filter);
-    if (state && state->processingFailed() && i < descriptions.size())
-      failures.push_back(state->failureIdentifier() + " — " + descriptions[i]);
+    if (state && state->processingFailed())
+      failures.push_back(state->failureIdentifier() + " — " +
+                         graph[i].description);
   }
   return failures;
 }
@@ -905,6 +1234,12 @@ std::optional<uint64_t> Engine::pluginLatencySamples() const noexcept {
   return total;
 }
 
+bool Engine::pluginLatencyCompensationActive() const noexcept {
+  return std::any_of(graph.begin(), graph.end(), [](const FilterNode &node) {
+    return dynamic_cast<const IPluginLatencyState *>(node.filter) != nullptr;
+  });
+}
+
 bool Engine::pluginLatencyRefreshPending() const noexcept {
   for (const auto &node : graph) {
     const auto *refresh =
@@ -922,6 +1257,8 @@ unsigned Engine::refreshPluginLatencies() {
     if (refresh && refresh->refreshPluginLatency())
       ++refreshed;
   }
+  if (refreshed)
+    rebuildPdcPlan(graph, allChannelCount);
   return refreshed;
 }
 

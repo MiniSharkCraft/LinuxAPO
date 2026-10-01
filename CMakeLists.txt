@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SkyAPO VERSION 0.1.0 LANGUAGES C CXX)
+project(SkyAPO VERSION 0.9.0 LANGUAGES C CXX)
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
@@ -628,6 +628,7 @@ endif()
 if(LILV_FOUND AND LV2_FOUND)
   set(SKYAPO_TEST_LV2_PATH "${CMAKE_CURRENT_BINARY_DIR}/test-plugins/lv2")
   set(SKYAPO_TEST_LV2_DIR "${SKYAPO_TEST_LV2_PATH}/skyapo-test.lv2")
+  set(SKYAPO_TEST_LV2_LATENCY_DIR "${SKYAPO_TEST_LV2_PATH}/skyapo-lv2-latency.lv2")
   add_library(skyapo-test-lv2 MODULE tests/plugins/test_gain.c)
   target_link_libraries(skyapo-test-lv2 PRIVATE PkgConfig::LV2)
   set_target_properties(skyapo-test-lv2 PROPERTIES
@@ -638,12 +639,23 @@ if(LILV_FOUND AND LV2_FOUND)
     "${SKYAPO_TEST_LV2_DIR}/manifest.ttl" COPYONLY)
   configure_file(tests/plugins/skyapo-test.lv2/plugin.ttl
     "${SKYAPO_TEST_LV2_DIR}/plugin.ttl" COPYONLY)
+  add_library(skyapo-test-lv2-latency MODULE tests/plugins/test_latency_lv2.c)
+  target_link_libraries(skyapo-test-lv2-latency PRIVATE PkgConfig::LV2)
+  set_target_properties(skyapo-test-lv2-latency PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "skyapo_test_latency"
+    LIBRARY_OUTPUT_DIRECTORY "${SKYAPO_TEST_LV2_LATENCY_DIR}")
+  configure_file(tests/plugins/skyapo-lv2-latency.lv2/manifest.ttl
+    "${SKYAPO_TEST_LV2_LATENCY_DIR}/manifest.ttl" COPYONLY)
+  configure_file(tests/plugins/skyapo-lv2-latency.lv2/plugin.ttl
+    "${SKYAPO_TEST_LV2_LATENCY_DIR}/plugin.ttl" COPYONLY)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_LV2=1)
   target_compile_definitions(skyapo-tests PRIVATE
     SKYAPO_TEST_LV2_PATH="${SKYAPO_TEST_LV2_PATH}")
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_LV2=1)
-  add_dependencies(skyapo-tests skyapo-test-lv2)
-  add_dependencies(skyapo-realtime-safety-tests skyapo-test-lv2)
+  add_dependencies(skyapo-tests skyapo-test-lv2 skyapo-test-lv2-latency)
+  add_dependencies(skyapo-realtime-safety-tests skyapo-test-lv2
+    skyapo-test-lv2-latency)
   add_executable(skyapo-lv2-oversize-test tests/plugin_oversize_test.cpp)
   target_include_directories(skyapo-lv2-oversize-test PRIVATE src/plugin)
   target_link_libraries(skyapo-lv2-oversize-test PRIVATE skyapo-core)
@@ -1016,6 +1028,38 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         lv2-live-param)
     set_tests_properties(skyapo-pipewire-e2e-lv2-live-parameter
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-dynamic-latency
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_latency_realtime.txt
+        lv2-latency-change)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-dynamic-latency
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-pdc-final
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_pdc_final.txt
+        lv2-pdc-final)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-final
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency;pdc"
       ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   endif()
   if(SKYAPO_HAVE_VST3 AND TARGET skyapo-test-vst3)

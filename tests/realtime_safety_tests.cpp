@@ -155,6 +155,8 @@ int main() {
     Engine plugin(48000, 2, 8192, {L"L", L"R"});
     plugin.loadConfig(pluginPath);
     std::vector<float> audio(2 * 8192);
+    realtime::allocations = 0;
+    realtime::deallocations = 0;
     for (unsigned iteration = 0; iteration < 1000; ++iteration) {
       plugin.setPluginParameter("https://skyapo.example/plugins/test-gain",
                                 "gain", iteration % 2 == 0 ? 0.25f : 0.75f);
@@ -167,6 +169,42 @@ int main() {
         realtime::Scope scope;
         plugin.process(audio.data(), frames);
       }
+    }
+    unlink(pluginPath);
+  }
+  {
+    char pluginPath[] = "/tmp/skyapo-lv2-latency-rt-XXXXXX";
+    int pluginFd = mkstemp(pluginPath);
+    if (pluginFd < 0)
+      return 1;
+    close(pluginFd);
+    {
+      std::ofstream f(pluginPath);
+      f << "Copy: L2=L R2=R\n"
+           "Plugin: LV2 "
+           "https://skyapo.example/plugins/test-latency-designated\n"
+           "Copy: L=0.5*L+0.5*L2\n";
+    }
+    Engine plugin(48000, 2, 8192, {L"L", L"R"});
+    plugin.loadConfig(pluginPath);
+    std::vector<float> audio(2 * 8192);
+    realtime::allocations = 0;
+    realtime::deallocations = 0;
+    for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      const unsigned frames = (iteration * 61) % 8192 + 1;
+      for (unsigned i = 0; i < frames * 2; ++i)
+        audio[i] = .1f * std::cos(float(i + iteration));
+      {
+        realtime::Scope scope;
+        plugin.process(audio.data(), frames);
+      }
+      if (realtime::allocations.load() != 0 ||
+          realtime::deallocations.load() != 0) {
+        std::cerr << "plugin/Copy PDC allocated in realtime processing\n";
+        return 1;
+      }
+      if (plugin.pluginLatencyRefreshPending())
+        plugin.refreshPluginLatencies();
     }
     unlink(pluginPath);
   }

@@ -1,6 +1,8 @@
 #include "LV2PluginHost.h"
 
 #include "IFilter.h"
+#include "IPluginLatencyRefresh.h"
+#include "IPluginFailureState.h"
 #include "IPluginLatencyState.h"
 #include "IPluginParameterControl.h"
 #include "IPluginBypassControl.h"
@@ -37,6 +39,8 @@
 namespace {
 namespace fs = std::filesystem;
 constexpr size_t MaxStateBytes = 16 * 1024 * 1024;
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "LV2 realtime latency snapshots require lock-free atomics");
 
 struct UridMapper {
   LV2_URID_Map map{this, mapUri};
@@ -243,8 +247,11 @@ LilvWorld *processWorld() {
 
 class LV2Instance final : public IPluginInstance,
                           public IPluginParameterControl,
-                          public IPluginStatePersistence {
-  enum class PortKind { AudioInput, AudioOutput, Control };
+                          public IPluginStatePersistence,
+                          public IPluginLatencyState,
+                          public IPluginLatencyRefresh,
+                          public IPluginFailureState {
+  enum class PortKind { AudioInput, AudioOutput, Control, LatencyOutput };
   struct Port {
     PortKind kind{};
     uint32_t index{};
@@ -281,13 +288,17 @@ public:
     LilvNode *inputPort = lilv_new_uri(world, LV2_CORE__InputPort);
     LilvNode *outputPort = lilv_new_uri(world, LV2_CORE__OutputPort);
     LilvNode *latencyProperty = lilv_new_uri(world, LV2_CORE__reportsLatency);
+    LilvNode *designationProperty = lilv_new_uri(world, LV2_CORE__designation);
+    LilvNode *latencyDesignation = lilv_new_uri(world, LV2_CORE__latency);
     if (!audioPort || !controlPort || !inputPort || !outputPort ||
-        !latencyProperty) {
+        !latencyProperty || !designationProperty || !latencyDesignation) {
       lilv_node_free(audioPort);
       lilv_node_free(controlPort);
       lilv_node_free(inputPort);
       lilv_node_free(outputPort);
       lilv_node_free(latencyProperty);
+      lilv_node_free(designationProperty);
+      lilv_node_free(latencyDesignation);
       throw std::runtime_error("cannot create LV2 port class URIs");
     }
 
@@ -301,7 +312,8 @@ public:
         if (featureUri != LV2_URID__map && featureUri != LV2_URID__unmap) {
           lilv_nodes_free(required);
           cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                       latencyProperty);
+                       latencyProperty, designationProperty,
+                       latencyDesignation);
           throw std::runtime_error(
               "LV2 plugin requires unsupported host feature " + featureUri);
         }
@@ -317,13 +329,35 @@ public:
       const bool control = lilv_port_is_a(plugin, descriptor, controlPort);
       const bool input = lilv_port_is_a(plugin, descriptor, inputPort);
       const bool output = lilv_port_is_a(plugin, descriptor, outputPort);
-      if (lilv_port_has_property(plugin, descriptor, latencyProperty)) {
-        cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                     latencyProperty);
-        throw std::runtime_error(
-            "LV2 plugin reports latency, but plugin delay compensation is not "
-            "implemented: " +
-            pluginUri);
+      LilvNodes *designations =
+          lilv_port_get_value(plugin, descriptor, designationProperty);
+      bool designatedLatency = false;
+      if (designations) {
+        for (LilvIter *designation = lilv_nodes_begin(designations);
+             !lilv_nodes_is_end(designations, designation);
+             designation = lilv_nodes_next(designations, designation))
+          designatedLatency |= lilv_node_equals(
+              lilv_nodes_get(designations, designation), latencyDesignation);
+        lilv_nodes_free(designations);
+      }
+      const bool reportsLatency =
+          lilv_port_has_property(plugin, descriptor, latencyProperty) ||
+          designatedLatency;
+      if (reportsLatency) {
+        if (!control || !output || latencyPortIndex >= 0) {
+          cleanupNodes(audioPort, controlPort, inputPort, outputPort,
+                       latencyProperty, designationProperty,
+                       latencyDesignation);
+          throw std::runtime_error(
+              "LV2 plugin must have exactly one latency output ControlPort: " +
+              pluginUri);
+        }
+        latencyPortIndex = static_cast<int32_t>(i);
+        ports[i].kind = PortKind::LatencyOutput;
+        ports[i].index = i;
+        ports[i].controlInput = false;
+        ports[i].control = 0.0f;
+        continue;
       }
       if (audio && input) {
         ports[i].kind = PortKind::AudioInput;
@@ -336,7 +370,8 @@ public:
       } else if (control) {
         if (!input && !output) {
           cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                       latencyProperty);
+                       latencyProperty, designationProperty,
+                       latencyDesignation);
           throw std::runtime_error("LV2 control port has no direction");
         }
         ports[i].kind = PortKind::Control;
@@ -346,7 +381,8 @@ public:
           const LilvNode *symbol = lilv_port_get_symbol(plugin, descriptor);
           if (!symbol) {
             cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                         latencyProperty);
+                         latencyProperty, designationProperty,
+                         latencyDesignation);
             throw std::runtime_error("LV2 input control port has no symbol");
           }
           ports[i].symbol = lilv_node_as_string(symbol);
@@ -390,15 +426,15 @@ public:
         lilv_node_free(maximum);
       } else {
         cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                     latencyProperty);
+                     latencyProperty, designationProperty, latencyDesignation);
         const LilvNode *name = lilv_port_get_name(plugin, descriptor);
         throw std::runtime_error(std::string("LV2 port '") +
                                  (name ? lilv_node_as_string(name) : "?") +
                                  "' is not a supported audio/control port");
       }
     }
-    cleanupNodes(audioPort, controlPort, inputPort, outputPort,
-                 latencyProperty);
+    cleanupNodes(audioPort, controlPort, inputPort, outputPort, latencyProperty,
+                 designationProperty, latencyDesignation);
     if (audioInputs != channels.size() || audioOutputs != channels.size())
       throw std::runtime_error("LV2 plugin audio port layout is " +
                                std::to_string(audioInputs) + " in / " +
@@ -457,7 +493,8 @@ public:
     stateInterface = static_cast<const LV2_State_Interface *>(
         lilv_instance_get_extension_data(instance, LV2_STATE__interface));
     for (auto &port : ports)
-      if (port.kind == PortKind::Control)
+      if (port.kind == PortKind::Control ||
+          port.kind == PortKind::LatencyOutput)
         lilv_instance_connect_port(instance, port.index, &port.control);
     if (!persistentIdentity.empty()) {
       savedStatePath = statePath(persistentIdentity);
@@ -495,6 +532,18 @@ public:
     }
     lilv_instance_activate(instance);
     active = true;
+    if (latencyPortIndex >= 0) {
+      // LV2 defines run(0) as the way to update immediate output controls,
+      // including the initial latency value, without processing audio.
+      lilv_instance_run(instance, 0);
+      uint32_t initialLatency{};
+      if (!readLatency(initialLatency))
+        throw std::runtime_error("LV2 plugin reports an invalid initial "
+                                 "latency value: " +
+                                 pluginUri);
+      observedLatency.store(initialLatency, std::memory_order_relaxed);
+      publishedLatency.store(initialLatency, std::memory_order_relaxed);
+    }
     instanceGuard.release();
   }
 
@@ -511,6 +560,27 @@ public:
   }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
+  }
+  uint32_t latencySamples() const noexcept override {
+    return publishedLatency.load(std::memory_order_acquire);
+  }
+  bool latencyRefreshPending() const noexcept override {
+    return observedLatency.load(std::memory_order_acquire) !=
+           publishedLatency.load(std::memory_order_acquire);
+  }
+  bool processingFailed() const noexcept override {
+    return latencyInvalid.load(std::memory_order_acquire) != 0;
+  }
+  const std::string &failureIdentifier() const noexcept override {
+    return pluginUri;
+  }
+  void latchProcessingFailure() noexcept override {
+    latencyInvalid.store(1, std::memory_order_release);
+  }
+  bool refreshPluginLatency() override {
+    const uint32_t updated = observedLatency.load(std::memory_order_acquire);
+    return publishedLatency.exchange(updated, std::memory_order_acq_rel) !=
+           updated;
   }
 
   const std::string &pluginIdentifier() const noexcept override {
@@ -585,7 +655,8 @@ public:
 
   void process(float **output, float **input,
                unsigned frames) noexcept override {
-    if (!instance || frames > maxFrameCount) {
+    if (!instance || frames > maxFrameCount ||
+        latencyInvalid.load(std::memory_order_acquire) != 0) {
       // Never expose stale samples when the host violates the negotiated
       // block bound. The CLAP and VST3 backends fail closed the same way.
       for (unsigned channel = 0; channel < channelCount; ++channel)
@@ -611,9 +682,28 @@ public:
       }
     } audioThreadScope;
     lilv_instance_run(instance, frames);
+    if (latencyPortIndex >= 0) {
+      uint32_t reported{};
+      if (!readLatency(reported)) {
+        latencyInvalid.store(1, std::memory_order_release);
+        for (unsigned channel = 0; channel < channelCount; ++channel)
+          std::fill_n(output[channel], frames, 0.0f);
+      } else {
+        observedLatency.store(reported, std::memory_order_release);
+      }
+    }
   }
 
 private:
+  bool readLatency(uint32_t &result) const noexcept {
+    const float value = ports[static_cast<size_t>(latencyPortIndex)].control;
+    constexpr uint32_t MaxLatencySamples = 1000000;
+    if (!std::isfinite(value) || value < 0.0f || std::floor(value) != value ||
+        value > static_cast<float>(MaxLatencySamples))
+      return false;
+    result = static_cast<uint32_t>(value);
+    return true;
+  }
   static const void *getStatePort(const char *symbol, void *opaque,
                                   uint32_t *size, uint32_t *type) {
     auto &self = *static_cast<LV2Instance *>(opaque);
@@ -649,12 +739,14 @@ private:
         parameter->value.store(restored, std::memory_order_relaxed);
   }
   static void cleanupNodes(LilvNode *a, LilvNode *b, LilvNode *c, LilvNode *d,
-                           LilvNode *e) {
+                           LilvNode *e, LilvNode *f, LilvNode *g) {
     lilv_node_free(a);
     lilv_node_free(b);
     lilv_node_free(c);
     lilv_node_free(d);
     lilv_node_free(e);
+    lilv_node_free(f);
+    lilv_node_free(g);
   }
 
   std::string pluginUri;
@@ -662,6 +754,10 @@ private:
   const LilvPlugin *pluginRef{};
   unsigned maxFrameCount;
   unsigned channelCount;
+  int32_t latencyPortIndex{-1};
+  std::atomic<uint32_t> observedLatency{0};
+  std::atomic<uint32_t> publishedLatency{0};
+  std::atomic<uint32_t> latencyInvalid{0};
   std::vector<Port> ports;
   LilvInstance *instance{};
   bool active = false;
@@ -680,6 +776,8 @@ private:
 class LV2PluginFilter final : public IFilter,
                               public AtomicPluginBypass,
                               public IPluginLatencyState,
+                              public IPluginLatencyRefresh,
+                              public IPluginFailureState,
                               public IPluginParameterControl,
                               public IPluginStatePersistence {
 public:
@@ -711,14 +809,46 @@ public:
   }
 
   void process(float **output, float **input, unsigned frames) override {
+    if (processingFailed()) {
+      for (unsigned channel = 0; channel < channelCount; ++channel)
+        std::fill_n(output[channel], frames, 0.0f);
+      return;
+    }
     if (copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
   }
   uint32_t latencySamples() const noexcept override {
-    // Instances with an LV2 latency-reporting port are rejected during host
-    // construction until delay compensation is implemented.
-    return 0;
+    return instance && !processingFailed() ? instance->latencySamples() : 0;
+  }
+  bool latencyRefreshPending() const noexcept override {
+    const auto *refresh =
+        dynamic_cast<const IPluginLatencyRefresh *>(instance.get());
+    return refresh && refresh->latencyRefreshPending();
+  }
+  bool refreshPluginLatency() override {
+    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
+    if (!refresh || !refresh->refreshPluginLatency())
+      return false;
+    const auto latency = instance->latencySamples();
+    if (latency > skyapo::plugin::MaxRealtimeLatencySamples) {
+      latchProcessingFailure();
+      // Keep the daemon alive: this instance is silenced and reports zero
+      // latency, then Engine rebuilds downstream compensation off-thread.
+      return true;
+    }
+    prepareBypassDelay(latency, channelCount);
+    return true;
+  }
+  bool processingFailed() const noexcept override {
+    return instance && instance->processingFailed();
+  }
+  void latchProcessingFailure() noexcept override {
+    if (auto *failure = dynamic_cast<IPluginFailureState *>(instance.get()))
+      failure->latchProcessingFailure();
+  }
+  const std::string &failureIdentifier() const noexcept override {
+    return pluginUri;
   }
   const std::string &pluginIdentifier() const noexcept override {
     return pluginUri;

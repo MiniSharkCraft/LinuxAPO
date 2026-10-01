@@ -470,6 +470,7 @@ const Catalog &catalog() {
 class VST3Instance final : public IPluginInstance,
                            public IPluginParameterControl,
                            public IPluginLatencyRefresh,
+                           public IPluginFailureState,
                            public IPluginStatePersistence {
 public:
   struct LiveParameter {
@@ -750,6 +751,12 @@ public:
   bool processingFailed() const noexcept override {
     return processingError.load(std::memory_order_acquire);
   }
+  const std::string &failureIdentifier() const noexcept override {
+    return pluginUid;
+  }
+  void latchProcessingFailure() noexcept override {
+    processingError.store(true, std::memory_order_release);
+  }
 
   void setParameterValue(const std::string &symbol, float value) override {
     const auto id = parseParameterId(symbol);
@@ -929,6 +936,11 @@ public:
     return outputChannels;
   }
   void process(float **output, float **input, unsigned frames) override {
+    if (processingFailed()) {
+      for (unsigned channel = 0; channel < channelCount; ++channel)
+        std::fill_n(output[channel], frames, 0.0f);
+      return;
+    }
     if (copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
@@ -936,11 +948,15 @@ public:
   bool processingFailed() const noexcept override {
     return instance && instance->processingFailed();
   }
+  void latchProcessingFailure() noexcept override {
+    if (auto *failure = dynamic_cast<IPluginFailureState *>(instance.get()))
+      failure->latchProcessingFailure();
+  }
   const std::string &failureIdentifier() const noexcept override {
     return pluginUid;
   }
   uint32_t latencySamples() const noexcept override {
-    return instance ? instance->latencySamples() : 0;
+    return instance && !processingFailed() ? instance->latencySamples() : 0;
   }
   bool latencyRefreshPending() const noexcept override {
     const auto *refresh =
@@ -951,7 +967,14 @@ public:
     auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
     if (!refresh || !refresh->refreshPluginLatency())
       return false;
-    prepareBypassDelay(instance->latencySamples(), channelCount);
+    const auto latency = instance->latencySamples();
+    if (latency > skyapo::plugin::MaxRealtimeLatencySamples) {
+      latchProcessingFailure();
+      // Keep the daemon alive: this instance is silenced and reports zero
+      // latency, then Engine rebuilds downstream compensation off-thread.
+      return true;
+    }
+    prepareBypassDelay(latency, channelCount);
     return true;
   }
   const std::string &pluginIdentifier() const noexcept override {

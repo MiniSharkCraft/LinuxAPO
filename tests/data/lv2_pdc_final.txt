@@ -1,0 +1,3 @@
+Channel: L
+Plugin: LV2 https://skyapo.example/plugins/test-latency-mono
+Channel: L R

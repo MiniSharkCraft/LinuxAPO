@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pprint import pformat
 
 
 def run(args, env, timeout=8, check=True):
@@ -94,6 +95,33 @@ def assert_virtual_source(pw_dump, env, expected_id):
     raise RuntimeError(f"PipeWire node {expected_id} disappeared from pw-dump")
 
 
+def summarize_graph_dump(raw):
+    objects = json.loads(raw)
+    nodes = set()
+    summary = []
+    for item in objects:
+        info = item.get("info", {})
+        props = info.get("props", item.get("props", {}))
+        if item.get("type", "").endswith(":Node"):
+            name = props.get("node.name", "")
+            if name in ("skyapo.virtual_mic", "skyapo.test.consumer",
+                        "skyapo.test.input"):
+                nodes.add(str(item.get("id")))
+                summary.append(item)
+    for item in objects:
+        info = item.get("info", {})
+        props = info.get("props", item.get("props", {}))
+        kind = item.get("type", "")
+        if kind.endswith(":Port") and str(props.get("node.id", "")) in nodes:
+            summary.append(item)
+        elif kind.endswith(":Link"):
+            endpoints = {str(info.get("output-node-id", "")),
+                         str(info.get("input-node-id", ""))}
+            if endpoints & nodes:
+                summary.append(item)
+    return pformat(summary, width=100)
+
+
 def start_private_pipewire(pipewire, config, env, logs, runtime):
     process = subprocess.Popen(
         [str(pipewire), "--config", str(config)], env=env,
@@ -140,7 +168,8 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "vst3-latency-change", "clap-latency-change", "renegotiate",
+        "vst3-latency-change", "clap-latency-change",
+        "lv2-latency-change", "lv2-pdc-final", "renegotiate",
         "transition-format", "device-filter",
         "device-switch"
     ):
@@ -151,7 +180,7 @@ def main():
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
             "vst2-live-param|plugin-bypass|vst3-latency-change|"
-            "clap-latency-change|"
+            "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
             "renegotiate|transition-format|"
             "device-filter|device-switch")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
@@ -168,6 +197,8 @@ def main():
     vst2_live = mode == "vst2-live-param"
     vst3_latency_change = mode == "vst3-latency-change"
     clap_latency_change = mode == "clap-latency-change"
+    lv2_latency_change = mode == "lv2-latency-change"
+    lv2_pdc_final = mode == "lv2-pdc-final"
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
     plugin_bypass = mode == "plugin-bypass"
@@ -177,6 +208,8 @@ def main():
     device_switch = mode == "device-switch"
     plugin_chain = (plugin_live or plugin_bypass or latency_plugin or
                     vst3_latency_change or clap_latency_change)
+    plugin_chain = plugin_chain or lv2_latency_change
+    plugin_chain = plugin_chain or lv2_pdc_final
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
             "https://skyapo.example/plugins/test-gain", "gain")
@@ -280,7 +313,9 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
-            expected_filters = 1 if vst2_live else (2 if plugin_chain else 1)
+            expected_filters = (1 if vst2_live else
+                                (3 if lv2_pdc_final else
+                                 (2 if plugin_chain else 1)))
             channel_positions = "MONO" if mono else "FL FR"
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
@@ -293,7 +328,11 @@ def main():
             if latency_plugin:
                 expected_status.append(
                     "Plugin-reported latency sum: 64 samples "
-                    "(no delay compensation)")
+                    "(sum only; not end-to-end latency)")
+            if lv2_pdc_final:
+                expected_status.append(
+                    "Plugin latency compensation: active "
+                    "(plugin-reported latency only)")
             for expected in expected_status:
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
@@ -302,10 +341,13 @@ def main():
                 raise RuntimeError(
                     f"unexpected DSP amplitude ratio:\n{status}")
 
-            if vst3_latency_change or clap_latency_change:
-                plugin_format = "VST3" if vst3_latency_change else "CLAP"
+            if vst3_latency_change or clap_latency_change or lv2_latency_change:
+                plugin_format = ("VST3" if vst3_latency_change else
+                                 ("CLAP" if clap_latency_change else "LV2"))
                 notification_name = ("kLatencyChanged" if vst3_latency_change
-                                     else "host.latency.changed")
+                                     else ("host.latency.changed" if
+                                           clap_latency_change else
+                                           "LV2 latency output"))
                 deadline = time.monotonic() + 8
                 latency_status = status
                 while time.monotonic() < deadline:
@@ -314,9 +356,13 @@ def main():
                             f"skyapod exited during {plugin_format} latency refresh")
                     result = run([str(cli), "status"], env, check=False)
                     latency_status = result.stdout
+                    expected_latency = ("Plugin-reported latency sum: 32 samples "
+                                        if lv2_latency_change else
+                                        "Plugin-reported latency sum: 64 samples ")
                     if (result.returncode == 0 and
-                            "Plugin-reported latency sum: 64 samples "
-                            "(no delay compensation)" in latency_status and
+                            (expected_latency +
+                             "(sum only; not end-to-end latency)")
+                            in latency_status and
                             "Plugin latency refreshes: 1" in latency_status):
                         break
                     time.sleep(0.05)
@@ -329,8 +375,8 @@ def main():
                         f"{plugin_format} latency refresh reported an error:\n"
                         f"{latency_status}")
                 status = latency_status
-                print(f"{plugin_format} {notification_name} refreshed the live "
-                      "latency snapshot from 32 to 64 samples on the control loop.")
+                print(f"{plugin_format} latency output refreshed the live "
+                      "snapshot on the control loop.")
 
             old_virtual_id = virtual_source_id(status)
             old_capture_id = re.search(r"^Capture node: (\d+)", status,
@@ -501,22 +547,29 @@ def main():
                           f"{float(ratio.group(1)):.6f}.")
                     sample_rate = new_rate
 
-            link_id = destroy_capture_link(pw_cli, pw_dump, env, status)
-            deadline = time.monotonic() + 8
-            recovered_status = ""
-            expected_links = f"Active capture links: {channel_count}/{channel_count}"
-            while time.monotonic() < deadline:
-                if daemon_process.poll() is not None:
-                    raise RuntimeError("skyapod exited after capture-link removal")
-                result = run([str(cli), "status"], env, timeout=5, check=False)
-                recovered_status = result.stdout
-                if result.returncode == 0 and expected_links in recovered_status:
-                    break
-                time.sleep(0.1)
+            if lv2_pdc_final:
+                # Keep the input graph steady while measuring channel phase:
+                # the purpose of this case is physical capture through the
+                # mono-latency plugin and PDC into an independent PipeWire
+                # consumer, not link-removal recovery.
+                link_id = "not removed (PDC measurement)"
             else:
-                raise RuntimeError(
-                    f"capture link {link_id} was not restored:\n{recovered_status}")
-            status = recovered_status
+                link_id = destroy_capture_link(pw_cli, pw_dump, env, status)
+                deadline = time.monotonic() + 8
+                recovered_status = ""
+                expected_links = f"Active capture links: {channel_count}/{channel_count}"
+                while time.monotonic() < deadline:
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError("skyapod exited after capture-link removal")
+                    result = run([str(cli), "status"], env, timeout=5, check=False)
+                    recovered_status = result.stdout
+                    if result.returncode == 0 and expected_links in recovered_status:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        f"capture link {link_id} was not restored:\n{recovered_status}")
+                status = recovered_status
 
             if source_replug or server_restart:
                 print("Stopping selected deterministic source…", flush=True)
@@ -594,9 +647,10 @@ def main():
                       f"{channel_count} capture links.")
                 recovered_status = relinked_status
 
-            expected_db = (-12.020599913 if
-                           (latency_plugin or clap_latency_change) else
-                           (-3.0 if transition_format else -6.0))
+            expected_db = (0.0 if lv2_pdc_final else
+                           (-12.020599913 if
+                            (latency_plugin or clap_latency_change) else
+                            (-3.0 if transition_format else -6.0)))
             if plugin_live:
                 live_value = "0.75" if (vst2_live or mode == "plugin-live-param") else "0.25"
                 changed = run([str(cli), "plugin", "set",
@@ -775,11 +829,66 @@ def main():
 
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
             consumer_args += ["--expected-rate", str(sample_rate)]
+            if lv2_pdc_final:
+                consumer_args += ["--expect-identical-channels"]
             if plugin_chain:
                 consumer_args += ["--expected-db", str(expected_db)]
             elif include_reload or transition_format:
                 consumer_args += ["--expected-db", str(expected_db)]
-            captured = run(consumer_args, env, timeout=12)
+            consumer_graph = ""
+            consumer_graph_summary = ""
+            try:
+                if lv2_pdc_final:
+                    consumer_process = subprocess.Popen(
+                        consumer_args, env=env, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(0.2)
+                    consumer_graph = run(
+                        [str(pw_dump)], env, timeout=5,
+                        check=False).stdout
+                    consumer_graph_summary = summarize_graph_dump(
+                        consumer_graph)
+                    consumer_stdout, consumer_stderr = consumer_process.communicate(
+                        timeout=12)
+                    captured = subprocess.CompletedProcess(
+                        consumer_args, consumer_process.returncode,
+                        consumer_stdout, consumer_stderr)
+                    if captured.returncode:
+                        raise RuntimeError(
+                            f"consumer exited with status {captured.returncode}: "
+                            f"{' '.join(consumer_args)}\n"
+                            f"stdout:\n{captured.stdout}\nstderr:\n"
+                            f"{captured.stderr}")
+                else:
+                    captured = run(consumer_args, env, timeout=12)
+            except RuntimeError as error:
+                if not lv2_pdc_final:
+                    raise
+                current_status = run([str(cli), "status"], env,
+                                     timeout=5, check=False)
+                graph = run([str(pw_dump)], env, timeout=5, check=False)
+                try:
+                    graph_summary = summarize_graph_dump(graph.stdout)
+                except (json.JSONDecodeError, TypeError):
+                    graph_summary = graph.stdout
+                raise RuntimeError(
+                    f"{error}\n--- status at consumer failure ---\n"
+                    f"{current_status.stdout}\n"
+                    f"--- pw-dump during consumer capture ---\n"
+                    f"{consumer_graph_summary}\n"
+                    f"--- pw-dump at consumer failure ---\n"
+                    f"{graph_summary}\n{graph.stderr}") from error
+            if lv2_pdc_final:
+                final_status = run([str(cli), "status"], env).stdout
+                if ("Plugin-reported latency sum: 32 samples "
+                        "(sum only; not end-to-end latency)" not in final_status or
+                        "Plugin latency refreshes: 1" not in final_status or
+                        "Plugin latency compensation: active "
+                        "(plugin-reported latency only)" not in final_status):
+                    raise RuntimeError(
+                        "runtime did not refresh LV2 latency after the PDC "
+                        f"transition recording:\n{final_status}")
+                status = final_status
             if f"Sample rate: {sample_rate} Hz" not in captured.stdout:
                 raise RuntimeError(
                     f"independent consumer did not negotiate {sample_rate} Hz:\n"
@@ -791,6 +900,15 @@ def main():
                     f"capture output did not report expected "
                     f"{expected_db:g} dB:\n"
                     f"{captured.stdout}")
+            if lv2_pdc_final:
+                channel_match = re.search(
+                    r"Inter-channel difference ratio: ([0-9.]+)",
+                    captured.stdout)
+                if (not channel_match or
+                        float(channel_match.group(1)) >= 0.01):
+                    raise RuntimeError(
+                        "recorded stereo channels were not aligned after the "
+                        f"mono latency plugin/PDC path:\n{captured.stdout}")
             print(f"Private PipeWire {mode} recovery and capture passed "
                   f"(destroyed link {link_id}).")
             print(status.rstrip())

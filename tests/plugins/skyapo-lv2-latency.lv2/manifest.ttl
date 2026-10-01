@@ -1,0 +1,27 @@
+@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://skyapo.example/plugins/test-latency-legacy>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<https://skyapo.example/plugins/test-latency-designated>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<https://skyapo.example/plugins/test-latency-invalid>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<https://skyapo.example/plugins/test-latency-mono>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<https://skyapo.example/plugins/test-latency-oversize>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .

@@ -250,6 +250,233 @@ int main() {
       return 1;
     }
 
+  for (const char *uri :
+       {"https://skyapo.example/plugins/test-latency-legacy",
+        "https://skyapo.example/plugins/test-latency-designated"}) {
+    if (!write(path, std::string("Plugin: LV2 ") + uri + "\n"))
+      return 1;
+    Engine latencyEngine(48000, 2, 128, {L"L", L"R"});
+    latencyEngine.loadConfig(path);
+    const auto initialLatency = latencyEngine.pluginLatencySamples();
+    if (!initialLatency || *initialLatency != 64) {
+      std::cerr << "LV2 latency port did not publish its run(0) snapshot ("
+                << (initialLatency ? std::to_string(*initialLatency)
+                                   : "unknown")
+                << "), filters=" << latencyEngine.filterDescriptions().size()
+                << ", id=" << uri << "\n";
+      return 1;
+    }
+    float latencyImpulse[192]{};
+    latencyImpulse[0] = 1.0f;
+    latencyImpulse[1] = -0.5f;
+    latencyEngine.process(latencyImpulse, 96);
+    const bool latencyPending = latencyEngine.pluginLatencyRefreshPending();
+    const unsigned latencyRefreshes = latencyEngine.refreshPluginLatencies();
+    const auto refreshedLatency = latencyEngine.pluginLatencySamples();
+    if (std::abs(latencyImpulse[128] - 1.0f) > 1e-6f ||
+        std::abs(latencyImpulse[129] + 0.5f) > 1e-6f || !latencyPending ||
+        latencyRefreshes != 1 || !refreshedLatency || *refreshedLatency != 32) {
+      std::cerr << "LV2 reported-latency fixture impulse offset mismatch: "
+                << latencyImpulse[128] << ", " << latencyImpulse[129]
+                << ", pending=" << latencyPending
+                << ", refreshes=" << latencyRefreshes << ", latency="
+                << (refreshedLatency ? std::to_string(*refreshedLatency)
+                                     : "unknown")
+                << '\n';
+      return 1;
+    }
+
+    latencyEngine.setPluginBypass(uri, true);
+    float refreshedBypassImpulse[128]{};
+    refreshedBypassImpulse[0] = 0.75f;
+    refreshedBypassImpulse[1] = -0.25f;
+    latencyEngine.process(refreshedBypassImpulse, 64);
+    if (std::abs(refreshedBypassImpulse[64] - 0.75f) > 1e-6f ||
+        std::abs(refreshedBypassImpulse[65] + 0.25f) > 1e-6f) {
+      std::cerr << "LV2 bypass ring did not rebuild for refreshed latency\n";
+      return 1;
+    }
+
+    Engine bypassEngine(48000, 2, 128, {L"L", L"R"});
+    bypassEngine.loadConfig(path);
+    bypassEngine.setPluginBypass(uri, true);
+    float bypassImpulse[192]{};
+    bypassImpulse[0] = 0.75f;
+    bypassImpulse[1] = -0.25f;
+    bypassEngine.process(bypassImpulse, 96);
+    if (std::abs(bypassImpulse[128] - 0.75f) > 1e-6f ||
+        std::abs(bypassImpulse[129] + 0.25f) > 1e-6f) {
+      std::cerr << "LV2 host bypass did not preserve reported latency\n";
+      return 1;
+    }
+  }
+
+  if (!write(path, "Copy: L2=L R2=R\n"
+                   "Plugin: LV2 https://skyapo.example/plugins/"
+                   "test-latency-designated\n"
+                   "Copy: L=0.5*L+0.5*L2\n"))
+    return 1;
+  Engine compensated(48000, 2, 128, {L"L", L"R"});
+  compensated.loadConfig(path);
+  float branchImpulse[192]{};
+  branchImpulse[0] = 1.0f;
+  branchImpulse[1] = 1.0f;
+  compensated.process(branchImpulse, 96);
+  for (unsigned frame = 0; frame < 64; ++frame)
+    if (std::abs(branchImpulse[frame * 2]) > 1e-6f ||
+        std::abs(branchImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "PDC failed to align the pre-plugin Copy branch at frame "
+                << frame << '\n';
+      return 1;
+    }
+  if (std::abs(branchImpulse[64 * 2] - 1.0f) > 1e-6f ||
+      std::abs(branchImpulse[64 * 2 + 1] - 1.0f) > 1e-6f ||
+      !compensated.pluginLatencyRefreshPending() ||
+      compensated.refreshPluginLatencies() != 1) {
+    std::cerr << "PDC Copy fan-in did not align the initial 64-sample plugin "
+                 "latency\n";
+    return 1;
+  }
+  float refreshedBranchImpulse[192]{};
+  refreshedBranchImpulse[0] = 1.0f;
+  refreshedBranchImpulse[1] = 1.0f;
+  compensated.process(refreshedBranchImpulse, 96);
+  for (unsigned frame = 0; frame < 32; ++frame)
+    if (std::abs(refreshedBranchImpulse[frame * 2]) > 1e-6f ||
+        std::abs(refreshedBranchImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "PDC did not rebuild the dynamic 32-sample alignment at "
+                   "frame "
+                << frame << '\n';
+      return 1;
+    }
+  if (std::abs(refreshedBranchImpulse[32 * 2] - 1.0f) > 1e-6f ||
+      std::abs(refreshedBranchImpulse[32 * 2 + 1] - 1.0f) > 1e-6f) {
+    std::cerr
+        << "PDC Copy fan-in did not follow the refreshed plugin latency\n";
+    return 1;
+  }
+
+  if (!write(path,
+             "Channel: L\n"
+             "Plugin: LV2 https://skyapo.example/plugins/test-latency-mono\n"
+             "Channel: L R\n"))
+    return 1;
+  Engine outputAligned(48000, 2, 1024, {L"L", L"R"});
+  outputAligned.loadConfig(path);
+  float outputImpulse[192]{};
+  outputImpulse[0] = 1.0f;
+  outputImpulse[1] = 1.0f;
+  outputAligned.process(outputImpulse, 96);
+  for (unsigned frame = 0; frame < 64; ++frame)
+    if (std::abs(outputImpulse[frame * 2]) > 1e-6f ||
+        std::abs(outputImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "PDC did not align final physical output channels at frame "
+                << frame << '\n';
+      return 1;
+    }
+  if (std::abs(outputImpulse[64 * 2] - 1.0f) > 1e-6f ||
+      std::abs(outputImpulse[64 * 2 + 1] - 1.0f) > 1e-6f ||
+      outputAligned.refreshPluginLatencies() != 1) {
+    std::cerr << "PDC final output alignment missed the 64-sample latency\n";
+    return 1;
+  }
+  float refreshedOutputImpulse[192]{};
+  refreshedOutputImpulse[0] = 1.0f;
+  refreshedOutputImpulse[1] = 1.0f;
+  outputAligned.process(refreshedOutputImpulse, 96);
+  for (unsigned frame = 0; frame < 32; ++frame)
+    if (std::abs(refreshedOutputImpulse[frame * 2]) > 1e-6f ||
+        std::abs(refreshedOutputImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "PDC final channels did not follow dynamic latency at frame "
+                << frame << '\n';
+      return 1;
+    }
+  if (std::abs(refreshedOutputImpulse[32 * 2] - 1.0f) > 1e-6f ||
+      std::abs(refreshedOutputImpulse[32 * 2 + 1] - 1.0f) > 1e-6f) {
+    std::cerr
+        << "PDC final output alignment missed refreshed 32-sample latency\n";
+    return 1;
+  }
+  double channelError = 0.0;
+  double channelEnergy = 0.0;
+  double phase = 0.0;
+  for (unsigned block = 0; block < 8; ++block) {
+    float stereoSine[2048]{};
+    for (unsigned frame = 0; frame < 1024; ++frame) {
+      const float sample = static_cast<float>(std::sin(phase));
+      phase += 2.0 * 3.14159265358979323846 * 440.0 / 48000.0;
+      stereoSine[frame * 2] = sample;
+      stereoSine[frame * 2 + 1] = sample;
+    }
+    outputAligned.process(stereoSine, 1024);
+    if (block >= 2)
+      for (unsigned frame = 0; frame < 1024; ++frame) {
+        const double left = stereoSine[frame * 2];
+        const double right = stereoSine[frame * 2 + 1];
+        channelError += (left - right) * (left - right);
+        channelEnergy += left * left + right * right;
+      }
+  }
+  const double channelDifference =
+      channelEnergy > 0.0 ? std::sqrt(channelError / channelEnergy) : 1.0;
+  if (channelDifference > 1e-4) {
+    std::cerr << "PDC final stereo channels differ after latency settles: "
+              << channelDifference << '\n';
+    return 1;
+  }
+
+  if (!write(
+          path,
+          "Plugin: LV2 https://skyapo.example/plugins/test-latency-oversize\n"))
+    return 1;
+  Engine oversizedLatency(48000, 2, 128, {L"L", L"R"});
+  oversizedLatency.loadConfig(path);
+  float oversizedBlock[16];
+  std::fill(std::begin(oversizedBlock), std::end(oversizedBlock), 0.5f);
+  oversizedLatency.process(oversizedBlock, 8);
+  const unsigned oversizedRefreshes = oversizedLatency.refreshPluginLatencies();
+  std::fill(std::begin(oversizedBlock), std::end(oversizedBlock), 0.5f);
+  oversizedLatency.process(oversizedBlock, 8);
+  const auto oversizedFailures = oversizedLatency.failedPluginDescriptions();
+  if (oversizedRefreshes != 1 ||
+      oversizedLatency.pluginLatencyRefreshPending() ||
+      oversizedFailures.size() != 1 ||
+      oversizedFailures[0].find("test-latency-oversize") == std::string::npos ||
+      oversizedLatency.pluginLatencySamples().value_or(1) != 0 ||
+      std::any_of(std::begin(oversizedBlock), std::end(oversizedBlock),
+                  [](float sample) { return sample != 0.0f; })) {
+    std::cerr
+        << "oversize dynamic LV2 latency was not safely disabled; refreshes="
+        << oversizedRefreshes
+        << ", pending=" << oversizedLatency.pluginLatencyRefreshPending()
+        << ", failures=" << oversizedFailures.size()
+        << ", samples=" << oversizedBlock[0] << '\n';
+    return 1;
+  }
+
+  if (!write(
+          path,
+          "Plugin: LV2 https://skyapo.example/plugins/test-latency-invalid\n"))
+    return 1;
+  Engine invalidLatency(48000, 2, 128, {L"L", L"R"});
+  invalidLatency.loadConfig(path);
+  float invalidLatencyBlock[192];
+  std::fill(std::begin(invalidLatencyBlock), std::end(invalidLatencyBlock),
+            0.5f);
+  invalidLatency.process(invalidLatencyBlock, 96);
+  const auto invalidFailures = invalidLatency.failedPluginDescriptions();
+  if (invalidFailures.size() != 1 ||
+      invalidFailures[0].find("test-latency-invalid") == std::string::npos ||
+      std::any_of(std::begin(invalidLatencyBlock),
+                  std::end(invalidLatencyBlock),
+                  [](float sample) { return sample != 0.0f; })) {
+    std::cerr
+        << "invalid LV2 latency output was not latched and silenced; failures="
+        << invalidFailures.size() << ", samples=" << invalidLatencyBlock[0]
+        << ", " << invalidLatencyBlock[64] << '\n';
+    return 1;
+  }
+
   if (!write(
           path,
           "Plugin: LV2 https://skyapo.example/plugins/test-gain gain=0.25\n"))
@@ -1325,6 +1552,17 @@ int main() {
   if (std::abs(copiedSamples[0] - 10.0f) > 1e-5f ||
       std::abs(copiedSamples[1] - 1.0f) > 1e-5f) {
     std::cerr << "upstream Copy channel swap mismatch\n";
+    return 1;
+  }
+  if (!write(path, "Copy: L=0.5*L+0.25\n"))
+    return 1;
+  Engine copiedConstant(48000, 2, 128, {L"L", L"R"});
+  copiedConstant.loadConfig(path);
+  float copiedConstantSamples[2] = {2.0f, -4.0f};
+  copiedConstant.process(copiedConstantSamples, 1);
+  if (std::abs(copiedConstantSamples[0] - 1.25f) > 1e-5f ||
+      std::abs(copiedConstantSamples[1] + 4.0f) > 1e-5f) {
+    std::cerr << "Copy constant summand changed upstream EAPO semantics\n";
     return 1;
   }
   if (!write(path, "Copy: L=R R=L\nChannel: C\nPreamp: -6 dB\n"))
