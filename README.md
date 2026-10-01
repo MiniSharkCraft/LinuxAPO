@@ -5,9 +5,9 @@
 [![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?logo=cmake&logoColor=white)](https://cmake.org/cmake/help/latest/)
 [![PipeWire](https://img.shields.io/badge/PipeWire-realtime-a83b8f)](https://pipewire.org/)
 [![Release](https://img.shields.io/badge/release-v0.9.0_beta-blue)](https://github.com/MiniSharkCraft/LinuxAPO/tree/v0.9.0)
-[![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)](COPYING)
+[![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/COPYING)
 [![Qt](https://img.shields.io/badge/Qt-6%20optional-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qt-6/)
-[![Nix](https://img.shields.io/badge/Nix-flake-5277C3?logo=nixos&logoColor=white)](flake.nix)
+[![Nix](https://img.shields.io/badge/Nix-flake-5277C3?logo=nixos&logoColor=white)](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/flake.nix)
 
 **LinuxAPO (project name: SkyAPO)** is a native Linux port of Equalizer APO using the upstream DSP engine, PipeWire realtime audio processing, and native Linux plugin hosting.
 
@@ -54,7 +54,7 @@ The currently supported config subset includes:
 - `GraphicEQ:` and `Convolution:` when built with FFTW3f
 - `LoudnessCorrection:` in daemon mode when the PipeWire volume provider is available
 
-Unsupported active directives are reported with file/line diagnostics rather than silently ignored. See [config compatibility](docs/CONFIG.md) and the [Windows config migration guide](docs/MIGRATION.md).
+Unsupported active directives are reported with file/line diagnostics rather than silently ignored. See [config compatibility](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/CONFIG.md) and the [Windows config migration guide](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/MIGRATION.md).
 
 Example from `examples/basic.txt`:
 
@@ -69,15 +69,15 @@ Filter: ON PK Fc 100 Hz Gain 6 dB Q 1.0
 - **CLAP:** native host.
 - **VST3:** native host for single-main-bus mono/stereo effects.
 
-Hosts provide a limited set of parameter/config override, host bypass, state and reported-latency/PDC features depending on format. See [plugin support and limitations](docs/PLUGINS.md). Fixture tests and PipeWire E2E tests verify specific paths; they do not establish compatibility with arbitrary plugins.
+Hosts provide a limited set of parameter/config override, host bypass, state and reported-latency/PDC features depending on format. See [plugin support and limitations](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/PLUGINS.md). Fixture tests and PipeWire E2E tests verify specific paths; they do not establish compatibility with arbitrary plugins.
 
 Plugins currently run **in-process**. A plugin crash or hang may crash or stall the daemon. Use trusted plugins only. Auxiliary buses, plugin UI, full end-to-end latency reporting and process isolation are not supported.
 
-An FST-based VST2-ABI path is **experimental and opt-in**; it is disabled in default builds and packages. LinuxAPO does not bundle yabridge, Wine, Windows plugins or user plugin binaries. Some yabridge-generated Linux wrappers may load as ordinary Linux plugins, but support and realtime behavior are not guaranteed; observed wrappers may report `realtime: no`. See [VST2 prototype notes](docs/VST2_PROTOTYPE.md).
+An FST-based VST2-ABI path is **experimental and opt-in**; it is disabled in default builds and packages. LinuxAPO does not bundle yabridge, Wine, Windows plugins or user plugin binaries. Some yabridge-generated Linux wrappers may load as ordinary Linux plugins, but support and realtime behavior are not guaranteed; observed wrappers may report `realtime: no`. See [VST2 prototype notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/VST2_PROTOTYPE.md).
 
 ## Editor, daemon and CLI
 
-The optional Qt 6 Widgets editor provides device/daemon/config workflows, preserves untouched config text and offers visual editing for selected filters. It does not provide a plugin GUI, syntax highlighting or full Windows editor parity. See [UI notes](docs/UI.md).
+The optional Qt 6 Widgets editor provides device/daemon/config workflows, preserves untouched config text and offers visual editing for selected filters. It does not provide a plugin GUI, syntax highlighting or full Windows editor parity. See [UI notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/UI.md).
 
 The daemon runs as the current user; it does not require root. Common commands:
 
@@ -102,7 +102,7 @@ skyapo stop
 - RPM x86_64: `skyapo-0.9.0-1.x86_64.rpm`
 - Generic Linux x86_64: `skyapo-0.9.0-linux-x86_64.tar.zst`
 
-Until assets are published, build the Arch package from a complete source checkout with `cd packaging && makepkg -si`, or build other packages from source as described in [build and packaging notes](docs/BUILDING.md). The generic tar archive targets a dynamic host ABI and is not a cross-distribution runtime guarantee.
+Until assets are published, build the Arch package from a complete source checkout with `cd packaging && makepkg -si`, or build other packages from source as described in [build and packaging notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/BUILDING.md). The generic tar archive targets a dynamic host ABI and is not a cross-distribution runtime guarantee.
 
 A Nix flake package is available for `x86_64-linux`. The package intentionally omits the optional Qt editor and hardware-dependent E2E tests:
 
@@ -125,7 +125,7 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-For distro dependencies, sanitizers and packaging details, see [docs/BUILDING.md](docs/BUILDING.md).
+For distro dependencies, sanitizers and packaging details, see [docs/BUILDING.md](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/BUILDING.md).
 
 ## Quick start
 
@@ -179,20 +179,20 @@ These are local recorded results, not hosted CI results or certification across 
 - Plugin crash/hang isolation, auxiliary buses, broad third-party/yabridge compatibility and total end-to-end latency remain unverified or unsupported.
 - Hardware recording evidence currently covers one Linux/PipeWire workstation. Package assets still need to be uploaded separately.
 
-See the [1.0.0 deferred backlog](ROADMAP.md#deferred-to-100) for details. **0.9.0 is a beta daily-use preview, not production-final.**
+See the [1.0.0 deferred backlog](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/ROADMAP.md#deferred-to-100) for details. **0.9.0 is a beta daily-use preview, not production-final.**
 
 ## Contributing
 
-Bug reports should include the distribution, PipeWire version, daemon diagnostics, a minimal sanitized config and reproduction steps. Do not attach microphone recordings, plugin binaries or credentials. Start with [architecture](docs/ARCHITECTURE.md), [porting notes](docs/PORTING.md) and [troubleshooting](docs/TROUBLESHOOTING.md).
+Bug reports should include the distribution, PipeWire version, daemon diagnostics, a minimal sanitized config and reproduction steps. Do not attach microphone recordings, plugin binaries or credentials. Start with [architecture](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/ARCHITECTURE.md), [porting notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/PORTING.md) and [troubleshooting](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/TROUBLESHOOTING.md).
 
 Runtime/audio changes should be tested proportionally: CTest, sanitizers where appropriate and private PipeWire E2E. A “daemon running” message alone does not prove processed samples reached the virtual microphone; verify recorded output independently.
 
 ## Attribution and license
 
-LinuxAPO reuses and adapts DSP/editor code from **Equalizer APO** by Jonas Thedering. The upstream source, Git history and copyright headers are preserved separately at `upstream/equalizerapo`. See the [official SourceForge repository](https://git.code.sf.net/p/equalizerapo/code), the [porting audit](docs/PORTING.md) and [third-party notices](docs/THIRD_PARTY_NOTICES.md).
+LinuxAPO reuses and adapts DSP/editor code from **Equalizer APO** by Jonas Thedering. The upstream source, Git history and copyright headers are preserved separately at `upstream/equalizerapo`. See the [official SourceForge repository](https://git.code.sf.net/p/equalizerapo/code), the [porting audit](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/PORTING.md) and [third-party notices](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/THIRD_PARTY_NOTICES.md).
 
-Equalizer APO's license states GNU General Public License version 2, **or (at your option) any later version**. The complete text is in [COPYING](COPYING) and the upstream submodule at `upstream/equalizerapo/License.txt`. SPDX identifier: `GPL-2.0-or-later`. Third-party SDKs and dependencies retain their own licenses; consult their notices and pinned submodules. LinuxAPO does not bundle user plugins, yabridge, Wine or Windows plugin binaries.
+Equalizer APO's license states GNU General Public License version 2, **or (at your option) any later version**. The complete text is in [COPYING](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/COPYING) and the upstream submodule at `upstream/equalizerapo/License.txt`. SPDX identifier: `GPL-2.0-or-later`. Third-party SDKs and dependencies retain their own licenses; consult their notices and pinned submodules. LinuxAPO does not bundle user plugins, yabridge, Wine or Windows plugin binaries.
 
 ## Acknowledgements
 
-Thanks to Jonas Thedering and Equalizer APO contributors, and to the CLAP, Steinberg VST3, FST, MuParserX, PipeWire, Lilv, FFTW, libsndfile, Qt and other upstream projects whose DSP, APIs and tools this project builds upon. Their specific license texts and attributions are listed in [third-party notices](docs/THIRD_PARTY_NOTICES.md).
+Thanks to Jonas Thedering and Equalizer APO contributors, and to the CLAP, Steinberg VST3, FST, MuParserX, PipeWire, Lilv, FFTW, libsndfile, Qt and other upstream projects whose DSP, APIs and tools this project builds upon. Their specific license texts and attributions are listed in [third-party notices](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/THIRD_PARTY_NOTICES.md).
