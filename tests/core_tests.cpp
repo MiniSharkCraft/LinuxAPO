@@ -397,6 +397,34 @@ int main() {
         << "PDC final output alignment missed refreshed 32-sample latency\n";
     return 1;
   }
+
+  std::string excessivePdc =
+      "Channel: L\n"
+      "Plugin: LV2 https://skyapo.example/plugins/test-latency-large\n"
+      "Channel: L R\n"
+      "Copy: L2=L";
+  for (unsigned term = 0; term < 430; ++term)
+    excessivePdc += "+R";
+  excessivePdc += "\n";
+  if (!write(path, excessivePdc))
+    return 1;
+  bool rejectedPdcBudget = false;
+  try {
+    Engine excessivePdcEngine(48000, 2, 128, {L"L", L"R"});
+    excessivePdcEngine.loadConfig(path);
+  } catch (const std::exception &error) {
+    rejectedPdcBudget =
+        std::string(error.what()).find("16 MiB realtime ring-buffer budget") !=
+        std::string::npos;
+    if (!rejectedPdcBudget)
+      std::cerr << "Unexpected PDC budget error: " << error.what() << '\n';
+  }
+  if (!rejectedPdcBudget) {
+    std::cerr << "PDC aggregate ring-buffer budget did not reject excessive "
+                 "Copy fan-in\n";
+    return 1;
+  }
+
   double channelError = 0.0;
   double channelEnergy = 0.0;
   double phase = 0.0;

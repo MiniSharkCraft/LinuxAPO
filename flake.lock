@@ -1,0 +1,148 @@
+{
+  "nodes": {
+    "clap": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785274186,
+        "narHash": "sha256-CHhQO/RdNWuhOeoY/xUZg/rvpMy4g0gu1JwkspOOqG4=",
+        "ref": "refs/heads/main",
+        "rev": "a47f6badb49d948fd009998f28309cdab78979c9",
+        "revCount": 1725,
+        "type": "git",
+        "url": "https://github.com/free-audio/clap.git"
+      },
+      "original": {
+        "rev": "a47f6badb49d948fd009998f28309cdab78979c9",
+        "type": "git",
+        "url": "https://github.com/free-audio/clap.git"
+      }
+    },
+    "equalizerapo": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1764350306,
+        "narHash": "sha256-c0SPp3gKSnKWYg+rasvu1ivrTyA7MzUbYLDgDbs7snI=",
+        "ref": "refs/heads/main",
+        "rev": "bbfcc3e5024cbb9d61ba75fc88d78605cc4c9687",
+        "revCount": 88,
+        "type": "git",
+        "url": "https://git.code.sf.net/p/equalizerapo/code"
+      },
+      "original": {
+        "rev": "bbfcc3e5024cbb9d61ba75fc88d78605cc4c9687",
+        "type": "git",
+        "url": "https://git.code.sf.net/p/equalizerapo/code"
+      }
+    },
+    "fst": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1745335799,
+        "narHash": "sha256-EVZ/VFL43R969L/oYs6tLmr9yu6ZTF2mUq4Ext4Tj9w=",
+        "ref": "refs/heads/main",
+        "rev": "647af068765b75867e3a28b4dd8991ab9ed47f7c",
+        "revCount": 978,
+        "type": "git",
+        "url": "https://git.iem.at/zmoelnig/FST.git"
+      },
+      "original": {
+        "rev": "647af068765b75867e3a28b4dd8991ab9ed47f7c",
+        "type": "git",
+        "url": "https://git.iem.at/zmoelnig/FST.git"
+      }
+    },
+    "muparserx-archive": {
+      "flake": false,
+      "locked": {
+        "path": "./packaging/muparserx_v3_0_1.zip",
+        "type": "path"
+      },
+      "original": {
+        "path": "./packaging/muparserx_v3_0_1.zip",
+        "type": "path"
+      },
+      "parent": []
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790689126,
+        "narHash": "sha256-ilerN1WLSvF+HMjziC/Wv99J5y02maDH+6hZPwsORKg=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b4fd65b198c599cbe814fcb9f42d25d021595ec9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "clap": "clap",
+        "equalizerapo": "equalizerapo",
+        "fst": "fst",
+        "muparserx-archive": "muparserx-archive",
+        "nixpkgs": "nixpkgs",
+        "vst3-base": "vst3-base",
+        "vst3-pluginterfaces": "vst3-pluginterfaces",
+        "vst3-public-sdk": "vst3-public-sdk"
+      }
+    },
+    "vst3-base": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786455290,
+        "narHash": "sha256-yLb94fx1YdM2v4F6tTkkXvyopKHosj4Fblm7q1/OlQc=",
+        "ref": "refs/heads/master",
+        "rev": "fcf9da0bd27a16f7f03773a3a39822f28f5c8477",
+        "revCount": 23,
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_base.git"
+      },
+      "original": {
+        "rev": "fcf9da0bd27a16f7f03773a3a39822f28f5c8477",
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_base.git"
+      }
+    },
+    "vst3-pluginterfaces": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786455308,
+        "narHash": "sha256-Ey9+zHhsVuj9bqmBqCOQ/Ls6uwYcOzfgxxWefZJHIm0=",
+        "ref": "refs/heads/master",
+        "rev": "4f547e8e102b47de4a8b8aaf343c73b700786372",
+        "revCount": 26,
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_pluginterfaces.git"
+      },
+      "original": {
+        "rev": "4f547e8e102b47de4a8b8aaf343c73b700786372",
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_pluginterfaces.git"
+      }
+    },
+    "vst3-public-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786455309,
+        "narHash": "sha256-2ma79LNOMBu98EHT++eqbOR9fjaWrQnVm0qwAEs3XL4=",
+        "ref": "refs/heads/master",
+        "rev": "586dc5e6c8012c3e4b01c79389375cbe96bdb1da",
+        "revCount": 38,
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_public_sdk.git"
+      },
+      "original": {
+        "rev": "586dc5e6c8012c3e4b01c79389375cbe96bdb1da",
+        "type": "git",
+        "url": "https://github.com/steinbergmedia/vst3_public_sdk.git"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

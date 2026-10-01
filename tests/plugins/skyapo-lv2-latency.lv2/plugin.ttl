@@ -43,3 +43,10 @@
              [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 2 ; lv2:symbol "out_l" ; lv2:name "Output Left" ] ,
              [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 3 ; lv2:symbol "out_r" ; lv2:name "Output Right" ] ,
              [ a lv2:OutputPort, lv2:ControlPort ; lv2:index 4 ; lv2:symbol "latency" ; lv2:name "Latency" ; lv2:designation lv2:latency ; lv2:minimum 0 ; lv2:maximum 1000000 ] .
+
+<https://skyapo.example/plugins/test-latency-large>
+    a lv2:Plugin ;
+    doap:name "SkyAPO Test LV2 Large Static Latency" ;
+    lv2:port [ a lv2:InputPort, lv2:AudioPort ; lv2:index 0 ; lv2:symbol "in" ; lv2:name "Input" ] ,
+             [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 1 ; lv2:symbol "out" ; lv2:name "Output" ] ,
+             [ a lv2:OutputPort, lv2:ControlPort ; lv2:index 2 ; lv2:symbol "latency" ; lv2:name "Latency" ; lv2:designation lv2:latency ; lv2:minimum 0 ; lv2:maximum 1000000 ] .

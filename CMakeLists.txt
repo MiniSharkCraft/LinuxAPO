@@ -19,6 +19,7 @@ option(SKYAPO_ENABLE_FST_VST2_HOST
   "Enable the experimental in-process FST-based legacy plugin host" OFF)
 option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
   "Run an isolated PipeWire server and verify captured SkyAPO DSP output" OFF)
+option(SKYAPO_ENABLE_CPACK "Enable DEB and RPM generators for CPack" ON)
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
@@ -41,8 +42,10 @@ endif()
 
 if(SKYAPO_ENABLE_MUPARSERX)
   set(SKYAPO_MUPARSERX_SHA256 "11689042843844638414af070f928ef5200461dc59fa237bad4a01531f982609")
-  set(SKYAPO_MUPARSERX_ARCHIVE "" CACHE FILEPATH
-      "Path to the pinned MuParserX 3.0.1 archive (otherwise downloaded from SourceForge)")
+  set(SKYAPO_MUPARSERX_ARCHIVE
+      "${CMAKE_CURRENT_SOURCE_DIR}/packaging/muparserx_v3_0_1.zip"
+      CACHE FILEPATH
+      "Path to the pinned MuParserX 3.0.1 archive (empty downloads it from SourceForge)")
   if(SKYAPO_MUPARSERX_ARCHIVE)
     file(SHA256 "${SKYAPO_MUPARSERX_ARCHIVE}" SKYAPO_MUPARSERX_ARCHIVE_SHA256)
     if(NOT SKYAPO_MUPARSERX_ARCHIVE_SHA256 STREQUAL SKYAPO_MUPARSERX_SHA256)
@@ -200,6 +203,7 @@ if(SKYAPO_HAVE_MUPARSERX)
   target_link_libraries(skyapo-core PUBLIC skyapo-muparserx)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_MUPARSERX=1 _UNICODE)
 endif()
+
 if(MUPARSER_FOUND)
   target_link_libraries(skyapo-core PUBLIC PkgConfig::MUPARSER)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_MUPARSER=1)
@@ -1178,4 +1182,49 @@ if(SKYAPO_HAVE_MUPARSERX)
   install(FILES "${SKYAPO_MUPARSERX_ROOT}/License.txt"
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
     RENAME MuParserX-License.txt)
+endif()
+
+if(SKYAPO_ENABLE_CPACK)
+  set(CPACK_PACKAGE_NAME "skyapo")
+  set(CPACK_PACKAGE_VENDOR "SkyAPO contributors")
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+      "Equalizer APO DSP engine with a native PipeWire audio backend")
+  set(CPACK_PACKAGE_CONTACT "SkyAPO maintainers")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+  set(CPACK_PACKAGE_FILE_NAME
+      "skyapo-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
+  set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+  set(CPACK_GENERATOR "DEB;RPM")
+
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "SkyAPO maintainers")
+  set(CPACK_DEBIAN_PACKAGE_SECTION "sound")
+  set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+  set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+  # Declare the Debian runtime packages for each optional feature detected at
+  # configure time. This avoids dpkg-shlibdeps depending on the host's package
+  # database when cross-building a .deb from another Linux distribution.
+  set(_skyapo_debian_dependencies "libsndfile1;libpipewire-0.3-0")
+  if(FFTW3F_FOUND)
+    list(APPEND _skyapo_debian_dependencies "libfftw3-single3")
+  endif()
+  if(LILV_FOUND)
+    list(APPEND _skyapo_debian_dependencies "liblilv-0-0")
+  endif()
+  if(MUPARSER_FOUND)
+    list(APPEND _skyapo_debian_dependencies "libmuparser2v5")
+  endif()
+  if(SKYAPO_BUILD_UI AND Qt6Widgets_FOUND)
+    list(APPEND _skyapo_debian_dependencies "libqt6widgets6")
+  endif()
+  list(JOIN _skyapo_debian_dependencies ", " CPACK_DEBIAN_PACKAGE_DEPENDS)
+  set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
+  set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
+
+  set(CPACK_RPM_PACKAGE_LICENSE
+      "GPL-2.0-or-later AND BSD-2-Clause AND MIT AND LGPL-3.0-only")
+  set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
+  set(CPACK_RPM_PACKAGE_RELEASE "1")
+  set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
+  set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
+  include(CPack)
 endif()

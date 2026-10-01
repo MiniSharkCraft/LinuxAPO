@@ -9,10 +9,8 @@ depends=('pipewire' 'libsndfile' 'fftw' 'lilv' 'qt6-base' 'hicolor-icon-theme')
 makedepends=('cmake' 'gcc' 'git' 'pkgconf')
 # Makepkg runs this PKGBUILD from its containing directory. Using PWD avoids
 # namcap treating the sibling checkout as a package install-time dependency.
-source=("skyapo::git+file://${PWD}/.."
-        'muparserx_v3_0_1.zip::https://sourceforge.net/p/equalizerapo/wiki/Developer%20documentation/attachment/muparserx_v3_0_1.zip')
-sha256sums=('SKIP'
-            '11689042843844638414af070f928ef5200461dc59fa237bad4a01531f982609')
+source=("skyapo::git+file://${PWD}/..")
+sha256sums=('SKIP')
 
 # `git+file://` checks out committed Git state; it does not snapshot the
 # developer's modified or untracked files. Refuse a misleading package build
@@ -51,7 +49,7 @@ build() {
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=lib \
-    -DSKYAPO_MUPARSERX_ARCHIVE="$srcdir/muparserx_v3_0_1.zip"
+    -DSKYAPO_MUPARSERX_ARCHIVE="$srcdir/skyapo/packaging/muparserx_v3_0_1.zip"
   cmake --build "$srcdir/skyapo-build" --parallel "$jobs"
 }
 

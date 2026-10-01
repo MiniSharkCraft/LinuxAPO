@@ -25,3 +25,8 @@
     a lv2:Plugin ;
     lv2:binary <skyapo_test_latency.so> ;
     rdfs:seeAlso <plugin.ttl> .
+
+<https://skyapo.example/plugins/test-latency-large>
+    a lv2:Plugin ;
+    lv2:binary <skyapo_test_latency.so> ;
+    rdfs:seeAlso <plugin.ttl> .

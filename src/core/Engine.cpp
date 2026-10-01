@@ -70,6 +70,19 @@
 #endif
 
 namespace {
+// Bound aggregate PDC storage as well as each individual delay. A valid but
+// adversarial Copy fan-in can otherwise create thousands of individually
+// bounded rings and exhaust memory while loading or refreshing a graph.
+constexpr uint64_t MaxPdcRingSamples = 4ULL * 1024ULL * 1024ULL;
+
+void accountPdcRing(uint64_t &usedSamples, uint64_t ringSamples) {
+  if (ringSamples > MaxPdcRingSamples - usedSamples)
+    throw std::runtime_error(
+        "PDC compensation exceeds SkyAPO's 16 MiB realtime ring-buffer "
+        "budget");
+  usedSamples += ringSamples;
+}
+
 class PdcAlignmentFilter final : public IFilter {
 public:
   explicit PdcAlignmentFilter(std::vector<unsigned> channels)
@@ -86,7 +99,8 @@ public:
     return names;
   }
   void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated) {
+                 std::vector<uint64_t> &updated,
+                 uint64_t &pdcRingSamples) {
     uint64_t latest = 0;
     for (const unsigned channel : channels_)
       if (channel < arrival.size())
@@ -103,6 +117,7 @@ public:
       if (channel >= delays_.size() || channel >= arrival.size())
         continue;
       const auto difference = static_cast<uint32_t>(latest - arrival[channel]);
+      accountPdcRing(pdcRingSamples, difference);
       setDelay(channel, static_cast<uint32_t>(difference));
       updated[channel] = latest;
     }
@@ -178,7 +193,8 @@ public:
   }
 
   void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated) {
+                 std::vector<uint64_t> &updated,
+                 uint64_t &pdcRingSamples) {
     // Validate all fan-in delay lengths before changing any ring in this
     // filter. A rejected graph/latency update must not leave half the fan-in
     // scheduled with its previous compensation.
@@ -217,6 +233,7 @@ public:
                                      "compensation safety limit");
           delay = static_cast<uint32_t>(difference);
         }
+        accountPdcRing(pdcRingSamples, delay);
         if (term.delay != delay) {
           term.delay = delay;
           term.ring.assign(delay, 0.0f);
@@ -801,19 +818,20 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
 void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
                             unsigned laneCount) const {
   std::vector<uint64_t> arrival(laneCount, 0);
+  uint64_t pdcRingSamples = 0;
   for (auto &node : nodes) {
     if (node.pdcAlignment) {
       auto *alignment = dynamic_cast<PdcAlignmentFilter *>(node.filter);
       if (!alignment)
         throw std::runtime_error("invalid internal PDC alignment node");
       const auto inputArrival = arrival;
-      alignment->configure(inputArrival, arrival);
+      alignment->configure(inputArrival, arrival, pdcRingSamples);
       continue;
     }
 
     if (auto *copy = dynamic_cast<PdcCopyFilter *>(node.filter)) {
       const auto inputArrival = arrival;
-      copy->configure(inputArrival, arrival);
+      copy->configure(inputArrival, arrival, pdcRingSamples);
       continue;
     }
 

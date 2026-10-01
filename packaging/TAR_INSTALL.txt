@@ -1,0 +1,18 @@
+SkyAPO generic Linux x86_64 archive
+
+This archive contains a versioned usr/ tree. It does not register a system
+package, enable a service, or overwrite files during extraction.
+
+For a rootless private copy, extract this directory somewhere you own, then
+run its usr/bin/skyapo and usr/bin/skyapod directly. The included user service
+unit is configured for a system /usr prefix; do not link or enable that unit
+from a private extraction. Distribution packages install it at the expected
+path and set its executable location consistently.
+
+For a system-wide copy, use a distribution package where available. If you
+manually copy files into /usr, record the installed paths and remove only
+those exact paths when uninstalling; do not recursively delete /usr.
+
+Runtime requirements are the distribution's PipeWire, libsndfile, FFTW3f,
+Lilv/LV2 and C++ runtime libraries matching the build. This archive is not a
+static binary and is not a cross-distribution ABI guarantee.
