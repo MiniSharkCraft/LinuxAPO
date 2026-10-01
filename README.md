@@ -4,7 +4,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
 [![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?logo=cmake&logoColor=white)](https://cmake.org/cmake/help/latest/)
 [![PipeWire](https://img.shields.io/badge/PipeWire-realtime-a83b8f)](https://pipewire.org/)
-[![Release](https://img.shields.io/badge/release-v0.9.0_beta-blue)](https://github.com/MiniSharkCraft/LinuxAPO/tree/v0.9.0)
+[![Release](https://img.shields.io/badge/release-v0.9.0_beta-blue)](https://github.com/MiniSharkCraft/LinuxAPO/releases/tag/v0.9.0)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green)](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/COPYING)
 [![Qt](https://img.shields.io/badge/Qt-6%20optional-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qt-6/)
 [![Nix](https://img.shields.io/badge/Nix-flake-5277C3?logo=nixos&logoColor=white)](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/flake.nix)
@@ -95,14 +95,21 @@ skyapo stop
 
 ## Installation
 
-**GitHub Release assets have not been uploaded yet.** No download links are provided until the assets exist. The following candidate artifacts were built and checked locally; they are not currently downloadable from this repository:
+The verified 0.9.0 beta packages are available from the [GitHub Release](https://github.com/MiniSharkCraft/LinuxAPO/releases/tag/v0.9.0):
 
-- Arch Linux: `skyapo-0.9.0-9-x86_64.pkg.tar.zst`
-- Debian/Ubuntu amd64: `skyapo_0.9.0_amd64.deb`
-- RPM x86_64: `skyapo-0.9.0-1.x86_64.rpm`
-- Generic Linux x86_64: `skyapo-0.9.0-linux-x86_64.tar.zst`
+- [Arch Linux x86_64](https://github.com/MiniSharkCraft/LinuxAPO/releases/download/v0.9.0/skyapo-0.9.0-9-x86_64.pkg.tar.zst) — `skyapo-0.9.0-9-x86_64.pkg.tar.zst`
+- [Debian/Ubuntu amd64](https://github.com/MiniSharkCraft/LinuxAPO/releases/download/v0.9.0/skyapo_0.9.0_amd64.deb) — `skyapo_0.9.0_amd64.deb`
+- [RPM x86_64](https://github.com/MiniSharkCraft/LinuxAPO/releases/download/v0.9.0/skyapo-0.9.0-1.x86_64.rpm) — `skyapo-0.9.0-1.x86_64.rpm`
+- [Generic Linux x86_64](https://github.com/MiniSharkCraft/LinuxAPO/releases/download/v0.9.0/skyapo-0.9.0-linux-x86_64.tar.zst) — `skyapo-0.9.0-linux-x86_64.tar.zst`
+- [SHA256SUMS](https://github.com/MiniSharkCraft/LinuxAPO/releases/download/v0.9.0/SHA256SUMS)
 
-Until assets are published, build the Arch package from a complete source checkout with `cd packaging && makepkg -si`, or build other packages from source as described in [build and packaging notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/BUILDING.md). The generic tar archive targets a dynamic host ABI and is not a cross-distribution runtime guarantee.
+Download the manifest and the selected package, then verify its entry with, for example:
+
+```sh
+grep 'skyapo_0.9.0_amd64.deb$' SHA256SUMS | sha256sum --check -
+```
+
+You can also build the Arch package from a complete source checkout with `cd packaging && makepkg -si`, or build other packages from source as described in [build and packaging notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/BUILDING.md). The generic tar archive targets a dynamic host ABI and is not a cross-distribution runtime guarantee.
 
 A Nix flake package is available for `x86_64-linux`. The package intentionally omits the optional Qt editor and hardware-dependent E2E tests:
 
@@ -177,7 +184,7 @@ These are local recorded results, not hosted CI results or certification across 
 - Hosted CI results are pending.
 - Legal/distribution review and VST2/FST scope remain open; the experimental host is disabled by default.
 - Plugin crash/hang isolation, auxiliary buses, broad third-party/yabridge compatibility and total end-to-end latency remain unverified or unsupported.
-- Hardware recording evidence currently covers one Linux/PipeWire workstation. Package assets still need to be uploaded separately.
+- Hardware recording evidence currently covers one Linux/PipeWire workstation. Package downloads are available, but clean install/lifecycle behavior is not verified across distributions.
 
 See the [1.0.0 deferred backlog](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/ROADMAP.md#deferred-to-100) for details. **0.9.0 is a beta daily-use preview, not production-final.**
 
