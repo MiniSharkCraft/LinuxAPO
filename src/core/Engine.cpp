@@ -1212,6 +1212,12 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     }
     if (made.empty()) {
       const auto name = StringHelper::toString(originalCommand, 65001);
+      if (originalCommand == L"VSTPlugin")
+        throw std::runtime_error(
+            normalizedPath.string() + ":" + std::to_string(lineNo) +
+            ": VSTPlugin compatibility syntax requires the opt-in FST VST2 "
+            "host and a Linux-compatible module; Windows DLL loading is not "
+            "provided");
       const bool known =
           originalCommand == L"Preamp" || originalCommand == L"Delay" ||
           originalCommand == L"Channel" || originalCommand == L"Copy" ||

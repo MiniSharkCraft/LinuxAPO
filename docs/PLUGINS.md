@@ -56,6 +56,21 @@ SkyAPO now has an opt-in FST-backed VST2 ABI processing path, not merely a stand
 Plugin: VST2 "/path/to/effect.so" 0=0.5
 ```
 
+The opt-in host also accepts a restricted upstream-compatible directive form:
+
+```text
+VSTPlugin: Library "effect.so" Gain 0.5
+```
+
+`Library` paths are resolved relative to the config file when not absolute;
+parameter names must uniquely match the module's reported VST2 parameter name,
+and values use the normalized `[0, 1]` range. `ChunkData` is rejected with an
+explicit diagnostic because this host does not implement VST2 chunk state.
+The library must be a Linux-loadable module (including a yabridge-produced
+Linux wrapper where permitted); this does not load Windows `.dll` files or
+translate Windows installation paths. The directive is rejected when the
+opt-in FST VST2 host is not built/enabled.
+
 This loads the module in-process, accepts 32-bit float mono/stereo effects that expose `processReplacing`, applies numeric parameter-index overrides during graph construction, supports temporary host dry bypass, latches processing failures, and reports the plugin's initial `AEffect::initialDelay` snapshot. This is not plugin discovery: `skyapo plugin list/info` do not enumerate VST2 modules. Live parameter changes by numeric index or unique display name are available through the shared CLI control API; they are temporary and coalesced through preallocated lock-free latest-value mailboxes, with `setParameter` consumed at a process-block boundary. Saved state/chunks, UI, automation/events, shell plugins, multiple buses, broader callbacks, crash isolation and arbitrary third-party compatibility are not implemented. A crashing or malicious module can still terminate or compromise `skyapod`. The default build and Arch package keep the option disabled. In the private PipeWire E2E, an independent consumer recorded 143360 frames after a live parameter update and measured RMS ratio `1.000044` against the expected output; SkyAPO reported zero callback allocations/deallocations and zero overruns. This is fixture evidence. A locally installed yabridge 5.1.1 Blue Cat Gain 3 VST2 wrapper also loaded and traversed offline rendering at 44.1 kHz stereo, but default and `0=0.0`/`0=1.0` overrides all measured unity output; yabridge reported `realtime: no`. This limited probe does not establish a parameter effect, independent PipeWire consumption, realtime safety, or general third-party compatibility. See `docs/VST2_PROTOTYPE.md` for the exact scope and test commands.
 
 The adapter uses the pinned, independently reverse-engineered [FST](https://git.iem.at/zmoelnig/FST) API (`upstream/fst`), not Steinberg or EAPO `aeffect.h` / `aeffectx.h`. FST is GPL-3.0-or-later, incomplete, and its README warns about the `VST` trademark and compatibility naming. Steinberg's [current licensing FAQ](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Licensing.html) says source sharing is allowed without redistributing Steinberg's VST2 headers, while distributing a VST2 host binary requires a VST2 agreement signed before October 2018. That FAQ does not itself determine the legal status of SkyAPO's independently implemented FST path. FST's license, trademark warning, the combined SkyAPO/EAPO licensing obligations, packaging and public product claims still require qualified review; do not treat this implementation or the absence of Steinberg headers as clearance. The GPL/LMMS-derived EAPO header `upstream/equalizerapo/helpers/aeffectx.h` is not a Steinberg license and is not used by this host.

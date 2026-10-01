@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <filesystem>
 #include <new>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -89,9 +91,63 @@ IFilter *allocateVST2Filter(VST2PluginHost &host, std::string modulePath,
 
 class VST2FilterFactory final : public IFilterFactory {
 public:
-  std::vector<IFilter *> createFilter(const std::wstring &,
+  std::vector<IFilter *> createFilter(const std::wstring &configPath,
                                       std::wstring &command,
                                       std::wstring &parameters) override {
+    if (command == L"VSTPlugin") {
+      std::wistringstream input(parameters);
+      std::wstring key, value;
+      std::optional<std::wstring> library;
+      std::vector<PluginParameterValue> overrides;
+      while (input >> std::quoted(key)) {
+        if (!(input >> std::quoted(value)))
+          throw std::runtime_error("VSTPlugin: expected key/value pairs such "
+                                   "as Library \"plugin.so\"");
+        if (key == L"Library") {
+          if (library || value.empty())
+            throw std::runtime_error(
+                "VSTPlugin: Library must be specified exactly once");
+          library = value;
+          continue;
+        }
+        if (key == L"ChunkData")
+          throw std::runtime_error("VSTPlugin: ChunkData state is not "
+                                   "supported by SkyAPO's Linux VST2 host");
+
+        const auto symbol = StringHelper::toString(key, 65001);
+        const auto valueText = StringHelper::toString(value, 65001);
+        size_t consumed = 0;
+        float parameterValue = 0.0f;
+        try {
+          parameterValue = std::stof(valueText, &consumed);
+        } catch (const std::exception &) {
+          throw std::runtime_error("VSTPlugin: invalid value for parameter '" +
+                                   symbol + "'");
+        }
+        if (consumed != valueText.size() || !std::isfinite(parameterValue) ||
+            std::any_of(
+                overrides.begin(), overrides.end(),
+                [&](const auto &entry) { return entry.symbol == symbol; }))
+          throw std::runtime_error(
+              "VSTPlugin: invalid or duplicate parameter '" + symbol + "'");
+        overrides.push_back({symbol, parameterValue});
+      }
+      if (!library)
+        throw std::runtime_error("VSTPlugin: missing Library value");
+      std::filesystem::path modulePath(StringHelper::toString(*library, 65001));
+      if (StringHelper::toLowerCase(modulePath.extension().wstring()) ==
+          L".dll")
+        throw std::runtime_error(
+            "VSTPlugin: Windows DLL loading is not supported; configure a "
+            "Linux-loadable module");
+      if (modulePath.is_relative()) {
+        const std::filesystem::path sourcePath(
+            StringHelper::toString(configPath, 65001));
+        modulePath = (sourcePath.parent_path() / modulePath).lexically_normal();
+      }
+      return {
+          allocateVST2Filter(host, modulePath.string(), std::move(overrides))};
+    }
     if (command != L"Plugin")
       return {};
     std::wistringstream input(parameters);

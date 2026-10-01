@@ -168,16 +168,35 @@ public:
       }
       std::vector<bool> assigned(parameterInfos.size(), false);
       for (const auto &overrideValue : overrides) {
+        size_t index = parameterInfos.size();
         size_t consumed = 0;
-        unsigned long index = 0;
         try {
-          index = std::stoul(overrideValue.symbol, &consumed);
-        } catch (const std::exception &) {
-          throw std::runtime_error(
-              "VST2: parameter IDs must be decimal indices");
+          const auto numeric = std::stoul(overrideValue.symbol, &consumed);
+          if (consumed == overrideValue.symbol.size()) {
+            if (numeric >= parameterInfos.size())
+              throw std::runtime_error(
+                  "VST2: parameter index is out of range: " +
+                  overrideValue.symbol);
+            index = static_cast<size_t>(numeric);
+          }
+        } catch (const std::invalid_argument &) {
+          consumed = 0;
+        } catch (const std::out_of_range &) {
+          throw std::runtime_error("VST2: parameter index is out of range: " +
+                                   overrideValue.symbol);
         }
-        if (consumed != overrideValue.symbol.size() ||
-            index >= parameterInfos.size() || assigned[index] ||
+        if (index == parameterInfos.size()) {
+          for (size_t candidate = 0; candidate < parameterInfos.size();
+               ++candidate) {
+            if (parameterInfos[candidate].name != overrideValue.symbol)
+              continue;
+            if (index != parameterInfos.size())
+              throw std::runtime_error("VST2: parameter name is ambiguous: " +
+                                       overrideValue.symbol);
+            index = candidate;
+          }
+        }
+        if (index >= parameterInfos.size() || assigned[index] ||
             !effect->setParameter || !std::isfinite(overrideValue.value) ||
             overrideValue.value < 0.0f || overrideValue.value > 1.0f)
           throw std::runtime_error("VST2: invalid parameter override '" +

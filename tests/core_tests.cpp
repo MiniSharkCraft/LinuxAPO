@@ -218,6 +218,25 @@ int main() {
   }
   skyapo::platform::LoudnessVolumeProvider::publish(false, 0.0f);
 
+#ifndef SKYAPO_HAVE_FST_VST2
+  if (!write(path, "VSTPlugin: Library \"example.so\" Gain 0.5\n"))
+    return 1;
+  bool legacyVst2Explained = false;
+  try {
+    Engine unavailableLegacyVst2(48000, 2, 128, {L"L", L"R"});
+    unavailableLegacyVst2.loadConfig(path);
+  } catch (const std::exception &error) {
+    legacyVst2Explained =
+        std::string(error.what()).find("requires the opt-in FST VST2 host") !=
+        std::string::npos;
+  }
+  if (!legacyVst2Explained) {
+    std::cerr << "VSTPlugin without the opt-in host did not produce an "
+                 "actionable diagnostic\n";
+    return 1;
+  }
+#endif
+
 #ifdef SKYAPO_TEST_LV2
   if (!write(path, "Plugin: LV2 https://skyapo.example/plugins/test-gain\n"))
     return 1;
@@ -571,6 +590,64 @@ int main() {
 #endif
 
 #ifdef SKYAPO_TEST_VST2
+  const fs::path legacyModule =
+      fs::path(path).parent_path() /
+      ("skyapo-vst2-relative-" + std::to_string(getpid()) + ".so");
+  std::error_code moduleCopyError;
+  fs::copy_file(SKYAPO_TEST_VST2_PATH, legacyModule, fs::copy_options::none,
+                moduleCopyError);
+  if (moduleCopyError) {
+    std::cerr << "cannot stage relative VST2 compatibility fixture: "
+              << moduleCopyError.message() << '\n';
+    return 1;
+  }
+  {
+    const std::string legacyVst2Config = "VSTPlugin: Library \"" +
+                                         legacyModule.filename().string() +
+                                         "\" Gain 0.25\n";
+    if (!write(path, legacyVst2Config))
+      return 1;
+    Engine legacyVst2Plugin(48000, 2, 128, {L"L", L"R"});
+    legacyVst2Plugin.loadConfig(path);
+    float legacyVst2Samples[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+    const float legacyVst2Expected[8] = {.05f, -.1f,  .15f,  -.2f,
+                                         .25f, -.25f, .125f, -.125f};
+    legacyVst2Plugin.process(legacyVst2Samples, 4);
+    for (unsigned i = 0; i < 8; ++i)
+      if (std::abs(legacyVst2Samples[i] - legacyVst2Expected[i]) > 1e-6f) {
+        std::cerr << "legacy VSTPlugin named parameter mapping mismatch at "
+                  << i << '\n';
+        return 1;
+      }
+  }
+  fs::remove(legacyModule, moduleCopyError);
+  if (moduleCopyError) {
+    std::cerr << "cannot remove staged VST2 compatibility fixture: "
+              << moduleCopyError.message() << '\n';
+    return 1;
+  }
+  for (const auto *invalid : {
+           "VSTPlugin: Library \"" SKYAPO_TEST_VST2_PATH
+           "\" ChunkData \"legacy-state\"\n",
+           "VSTPlugin: Gain 0.25\n",
+           "VSTPlugin: Library \"legacy.dll\" Gain 0.25\n",
+       }) {
+    if (!write(path, invalid))
+      return 1;
+    bool rejected = false;
+    try {
+      Engine invalidLegacyVst2(48000, 2, 128, {L"L", L"R"});
+      invalidLegacyVst2.loadConfig(path);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    if (!rejected) {
+      std::cerr << "unsupported legacy VSTPlugin state or missing Library "
+                   "was accepted\n";
+      return 1;
+    }
+  }
+
   const std::string vst2Config =
       "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 0=0.25\n";
   if (!write(path, vst2Config))
