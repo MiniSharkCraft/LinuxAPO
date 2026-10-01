@@ -165,7 +165,7 @@ The following results were recorded for the 0.9.0 candidate on the current Linux
 - ASan/UBSan/LeakSanitizer suite: **35/35 passed**; this sanitizer run did not include PipeWire hardware E2E.
 - Nix flake package build/check and package smoke: **passed**.
 - Arch, DEB, RPM and generic tar candidate checksums and staged payload smoke: **passed**. These checks are not equivalent to dependency-populated clean installs on every target distribution.
-- Physical PipeWire recording and numerical `Preamp: -6 dB` measurement are documented in [realtime verification](docs/REALTIME.md).
+- Physical PipeWire recording and numerical `Preamp: -6 dB` measurement are documented in [realtime verification](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/REALTIME.md).
 
 These are local recorded results, not hosted CI results or certification across machines.
 
