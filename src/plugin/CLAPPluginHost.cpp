@@ -1,6 +1,7 @@
 #include "CLAPPluginHost.h"
 #include "IPluginFailureState.h"
 #include "IPluginLatencyState.h"
+#include "IPluginLatencyRefresh.h"
 #include "IPluginParameterControl.h"
 #include "IPluginBypassControl.h"
 #include "IPluginSourceContext.h"
@@ -409,18 +410,40 @@ std::shared_ptr<ClapLibrary> openLibrary(const fs::path &path) {
 }
 
 thread_local const clap_host_t *currentClapAudioHost = nullptr;
+struct ClapHostContext {
+  pthread_t mainThread{};
+  std::atomic<bool> restartRequested{false};
+  std::atomic<bool> latencyChanged{false};
+};
 bool CLAP_ABI hostIsMainThread(const clap_host_t *host) {
   return host && host->host_data &&
-         pthread_equal(*static_cast<const pthread_t *>(host->host_data),
-                       pthread_self());
+         pthread_equal(
+             static_cast<const ClapHostContext *>(host->host_data)->mainThread,
+             pthread_self());
 }
 bool CLAP_ABI hostIsAudioThread(const clap_host_t *host) {
   return host && currentClapAudioHost == host;
 }
 const clap_host_thread_check_t threadCheck{hostIsMainThread, hostIsAudioThread};
+void CLAP_ABI hostLatencyChanged(const clap_host_t *host) {
+  if (host && host->host_data)
+    static_cast<ClapHostContext *>(host->host_data)
+        ->latencyChanged.store(true, std::memory_order_release);
+}
+void CLAP_ABI hostRequestRestart(const clap_host_t *host) {
+  if (host && host->host_data)
+    static_cast<ClapHostContext *>(host->host_data)
+        ->restartRequested.store(true, std::memory_order_release);
+}
+const clap_host_latency_t hostLatency{hostLatencyChanged};
 const void *CLAP_ABI hostExtension(const clap_host_t *, const char *id) {
-  return id && std::strcmp(id, CLAP_EXT_THREAD_CHECK) == 0 ? &threadCheck
-                                                           : nullptr;
+  if (!id)
+    return nullptr;
+  if (std::strcmp(id, CLAP_EXT_THREAD_CHECK) == 0)
+    return &threadCheck;
+  if (std::strcmp(id, CLAP_EXT_LATENCY) == 0)
+    return &hostLatency;
+  return nullptr;
 }
 void CLAP_ABI hostRequest(const clap_host_t *) {}
 bool CLAP_ABI rejectEvent(const clap_output_events_t *,
@@ -430,6 +453,7 @@ bool CLAP_ABI rejectEvent(const clap_output_events_t *,
 
 class CLAPInstance final : public IPluginInstance,
                            public IPluginParameterControl,
+                           public IPluginLatencyRefresh,
                            public IPluginStatePersistence {
 public:
   CLAPInstance(std::shared_ptr<ClapLibrary> lib,
@@ -438,21 +462,22 @@ public:
                const std::vector<std::wstring> &channels,
                const std::vector<PluginParameterValue> &overrides,
                std::string stateIdentity = {})
-      : library(std::move(lib)), pluginId(std::move(id)), maxFrameCount(maxFrames),
+      : library(std::move(lib)), pluginId(std::move(id)),
+        sampleRate(sampleRate), maxFrameCount(maxFrames),
         inputChannels(channels.size()), outputChannels(channels.size()),
         persistentIdentity(std::move(stateIdentity)) {
     if (!std::isfinite(sampleRate) || sampleRate < 8000 || !maxFrames ||
         channels.empty())
       throw std::runtime_error("invalid CLAP audio configuration");
     host.clap_version = CLAP_VERSION;
-    mainThread = pthread_self();
-    host.host_data = &mainThread;
+    hostContext.mainThread = pthread_self();
+    host.host_data = &hostContext;
     host.name = "SkyAPO";
     host.vendor = "SkyAPO project";
     host.url = "https://github.com/skyapo/skyapo";
     host.version = SKYAPO_VERSION;
     host.get_extension = hostExtension;
-    host.request_restart = hostRequest;
+    host.request_restart = hostRequestRestart;
     host.request_process = hostRequest;
     host.request_callback = hostRequest;
 
@@ -643,12 +668,74 @@ public:
     }
   }
 
-  const std::string &uri() const noexcept override { return pluginId; }
+  const std::string &uri() const noexcept override {
+    return pluginId;
+  }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfo;
   }
   uint32_t latencySamples() const noexcept override {
-    return latency;
+    return latency.load(std::memory_order_acquire);
+  }
+  bool latencyRefreshPending() const noexcept override {
+    return hostContext.restartRequested.load(std::memory_order_acquire) ||
+           hostContext.latencyChanged.load(std::memory_order_acquire);
+  }
+  bool refreshPluginLatency() override {
+    const bool restart =
+        hostContext.restartRequested.exchange(false, std::memory_order_acq_rel);
+    const bool latencyChanged =
+        hostContext.latencyChanged.exchange(false, std::memory_order_acq_rel);
+    if (!restart && !latencyChanged)
+      return false;
+    if (latencyChanged && !latencyExtension) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error(
+          "CLAP plugin notified a latency change without clap.latency: " +
+          pluginId);
+    }
+    if (processing) {
+      plugin->stop_processing(plugin);
+      processing = false;
+    }
+    if (active) {
+      plugin->deactivate(plugin);
+      active = false;
+    }
+    if (!plugin->activate(plugin, sampleRate, 1, maxFrameCount)) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error("CLAP plugin failed to reactivate for latency "
+                               "change: " +
+                               pluginId);
+    }
+    active = true;
+    clap_audio_port_info_t updatedInput{}, updatedOutput{};
+    if (ports->count(plugin, true) != 1 || ports->count(plugin, false) != 1 ||
+        !ports->get(plugin, 0, true, &updatedInput) ||
+        !ports->get(plugin, 0, false, &updatedOutput) ||
+        updatedInput.channel_count != inputInfo.channel_count ||
+        updatedOutput.channel_count != outputInfo.channel_count ||
+        !(updatedInput.flags & CLAP_AUDIO_PORT_IS_MAIN) ||
+        !(updatedOutput.flags & CLAP_AUDIO_PORT_IS_MAIN)) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error(
+          "CLAP restart changed the unsupported audio bus layout: " + pluginId);
+    }
+    const uint32_t updatedLatency =
+        latencyExtension ? latencyExtension->get(plugin) : 0;
+    const uint32_t previousLatency =
+        latency.exchange(updatedLatency, std::memory_order_acq_rel);
+    // The snapshot above covers changed() notifications emitted during
+    // activate, so avoid a duplicate lifecycle cycle on the next timer tick.
+    hostContext.latencyChanged.store(false, std::memory_order_release);
+    if (!plugin->start_processing(plugin)) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error("CLAP plugin failed to resume after latency "
+                               "change: " +
+                               pluginId);
+    }
+    processing = true;
+    return updatedLatency != previousLatency;
   }
   std::vector<std::wstring>
   initialize(float, unsigned,
@@ -815,16 +902,16 @@ private:
   static const clap_event_header_t *CLAP_ABI
   parameterEventAt(const clap_input_events_t *list, uint32_t index) {
     const auto *self = static_cast<const CLAPInstance *>(list->ctx);
-    return index < self->eventBatchCount
-               ? &self->eventBatch[index].header
-               : nullptr;
+    return index < self->eventBatchCount ? &self->eventBatch[index].header
+                                         : nullptr;
   }
 
   std::shared_ptr<ClapLibrary> library;
   std::string pluginId;
+  double sampleRate;
   unsigned maxFrameCount;
+  ClapHostContext hostContext{};
   clap_host_t host{};
-  pthread_t mainThread{};
   const clap_plugin_t *plugin{};
   const clap_plugin_audio_ports_t *ports{};
   const clap_plugin_params_t *parameterExtension{};
@@ -843,7 +930,7 @@ private:
   clap_audio_port_info_t inputInfo{}, outputInfo{};
   bool active = false, processing = false;
   std::atomic<bool> processingError{false};
-  uint32_t latency{};
+  std::atomic<uint32_t> latency{0};
   std::vector<float *> inputChannels, outputChannels;
   clap_audio_buffer_t inputBuffer{}, outputBuffer{};
   clap_input_events_t emptyInputEvents{};
@@ -855,6 +942,7 @@ private:
 class CLAPPluginFilter final : public IFilter,
                                public AtomicPluginBypass,
                                public IPluginParameterControl,
+                               public IPluginLatencyRefresh,
                                public IPluginFailureState,
                                public IPluginLatencyState,
                                public IPluginStatePersistence {
@@ -865,9 +953,12 @@ public:
       : host(host), pluginId(std::move(id)),
         parameterOverrides(std::move(overrides)), source(std::move(source)),
         line(line) {}
-  bool getInPlace() override { return false; }
-  std::vector<std::wstring> initialize(float sampleRate, unsigned maxFrames,
-                                      std::vector<std::wstring> channels) override {
+  bool getInPlace() override {
+    return false;
+  }
+  std::vector<std::wstring>
+  initialize(float sampleRate, unsigned maxFrames,
+             std::vector<std::wstring> channels) override {
     channelCount = static_cast<unsigned>(channels.size());
     instance = host.createForConfig(pluginId, sampleRate, maxFrames, channels,
                                     parameterOverrides, source, line);
@@ -889,6 +980,18 @@ public:
   uint32_t latencySamples() const noexcept override {
     return instance ? instance->latencySamples() : 0;
   }
+  bool latencyRefreshPending() const noexcept override {
+    const auto *refresh =
+        dynamic_cast<const IPluginLatencyRefresh *>(instance.get());
+    return refresh && refresh->latencyRefreshPending();
+  }
+  bool refreshPluginLatency() override {
+    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
+    if (!refresh || !refresh->refreshPluginLatency())
+      return false;
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return true;
+  }
   const std::string &pluginIdentifier() const noexcept override {
     return pluginId;
   }
@@ -897,8 +1000,8 @@ public:
       throw std::runtime_error("CLAP plugin is not active: " + pluginId);
     auto *control = dynamic_cast<IPluginParameterControl *>(instance.get());
     if (!control)
-      throw std::runtime_error("CLAP plugin does not support live parameters: " +
-                               pluginId);
+      throw std::runtime_error(
+          "CLAP plugin does not support live parameters: " + pluginId);
     control->setParameterValue(symbol, value);
   }
   bool savePersistentPluginState() override {
@@ -1037,16 +1140,17 @@ PluginDescription CLAPPluginHost::describe(const std::string &id) const {
   if (found == catalog.end())
     throw std::runtime_error("CLAP plugin not found: " + id);
   PluginDescription result{id, found->name, {}};
-  pthread_t mainThread = pthread_self();
+  ClapHostContext hostContext{};
+  hostContext.mainThread = pthread_self();
   clap_host_t host{};
   host.clap_version = CLAP_VERSION;
-  host.host_data = &mainThread;
+  host.host_data = &hostContext;
   host.name = "SkyAPO";
   host.vendor = "SkyAPO project";
   host.url = "https://github.com/skyapo/skyapo";
   host.version = SKYAPO_VERSION;
   host.get_extension = hostExtension;
-  host.request_restart = hostRequest;
+  host.request_restart = hostRequestRestart;
   host.request_process = hostRequest;
   host.request_callback = hostRequest;
   const clap_plugin_t *plugin = found->library->factory->create_plugin(

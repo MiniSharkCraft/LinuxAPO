@@ -4,6 +4,7 @@
 #include "IFilterFactory.h"
 #include "IPluginFailureState.h"
 #include "IPluginLatencyState.h"
+#include "IPluginLatencyRefresh.h"
 #include "IPluginParameterControl.h"
 #include "IPluginBypassControl.h"
 #include "IPluginSourceContext.h"
@@ -17,6 +18,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/base/funknownimpl.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include "pluginterfaces/vst/vstspeaker.h"
 
@@ -50,6 +52,38 @@ constexpr std::array<uint8_t, 8> VST3StateMagic{'S', 'K', 'Y', 'V',
 struct VST3StateData {
   std::string component;
   std::string controller;
+};
+
+class VST3RestartHandler final
+    : public Steinberg::U::Implements<
+          Steinberg::U::Directly<Steinberg::Vst::IComponentHandler>> {
+public:
+  Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override {
+    return Steinberg::kNotImplemented;
+  }
+  Steinberg::tresult PLUGIN_API
+  performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override {
+    return Steinberg::kNotImplemented;
+  }
+  Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override {
+    return Steinberg::kNotImplemented;
+  }
+  Steinberg::tresult PLUGIN_API
+  restartComponent(Steinberg::int32 flags) override {
+    pendingFlags.fetch_or(static_cast<uint32_t>(flags),
+                          std::memory_order_release);
+    return Steinberg::kResultOk;
+  }
+
+  uint32_t takePendingFlags() noexcept {
+    return pendingFlags.exchange(0, std::memory_order_acq_rel);
+  }
+  bool hasPendingFlags() const noexcept {
+    return pendingFlags.load(std::memory_order_acquire) != 0;
+  }
+
+private:
+  std::atomic<uint32_t> pendingFlags{0};
 };
 
 uint64_t stateHash(std::string_view text) {
@@ -435,6 +469,7 @@ const Catalog &catalog() {
 
 class VST3Instance final : public IPluginInstance,
                            public IPluginParameterControl,
+                           public IPluginLatencyRefresh,
                            public IPluginStatePersistence {
 public:
   struct LiveParameter {
@@ -468,6 +503,14 @@ public:
       throw std::runtime_error("VST3 class lacks IComponent/IAudioProcessor: " +
                                pluginUid);
     parameterController = provider->getControllerPtr();
+    if (parameterController) {
+      componentHandler = Steinberg::owned(new VST3RestartHandler);
+      if (parameterController->setComponentHandler(componentHandler.get()) !=
+          Steinberg::kResultOk)
+        throw std::runtime_error(
+            "VST3 controller rejected the host component handler: " +
+            pluginUid);
+    }
     std::optional<VST3StateData> savedState;
     if (!persistentIdentity.empty()) {
       savedStatePath = statePathFor(persistentIdentity);
@@ -609,6 +652,8 @@ public:
   }
 
   ~VST3Instance() override {
+    if (parameterController)
+      (void)parameterController->setComponentHandler(nullptr);
     if (processing)
       processor->setProcessing(false);
     if (active)
@@ -625,7 +670,56 @@ public:
     return parameterInfos;
   }
   uint32_t latencySamples() const noexcept override {
-    return latency;
+    return latency.load(std::memory_order_acquire);
+  }
+  bool latencyRefreshPending() const noexcept override {
+    return componentHandler && componentHandler->hasPendingFlags();
+  }
+  bool refreshPluginLatency() override {
+    if (!componentHandler)
+      return false;
+    using namespace Steinberg::Vst;
+    const uint32_t flags = componentHandler->takePendingFlags();
+    if (!flags)
+      return false;
+    const uint32_t latencyFlag = static_cast<uint32_t>(kLatencyChanged);
+    if (flags & ~latencyFlag) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error(
+          "VST3 plugin requested unsupported component restart flags: " +
+          std::to_string(flags & ~latencyFlag) + " (" + pluginUid + ")");
+    }
+    if (!(flags & latencyFlag))
+      return false;
+
+    // SDK contract: latency is queried after deactivation/reactivation.
+    // Runtime invokes this on its serialized control loop after draining audio.
+    if (processing) {
+      (void)processor->setProcessing(false);
+      processing = false;
+    }
+    if (active) {
+      if (component->setActive(false) != Steinberg::kResultOk) {
+        processingError.store(true, std::memory_order_release);
+        throw std::runtime_error(
+            "VST3 plugin failed to deactivate for latency change: " +
+            pluginUid);
+      }
+      active = false;
+    }
+    if (component->setActive(true) != Steinberg::kResultOk) {
+      processingError.store(true, std::memory_order_release);
+      throw std::runtime_error(
+          "VST3 plugin failed to reactivate after latency change: " +
+          pluginUid);
+    }
+    active = true;
+    const uint32_t updatedLatency = processor->getLatencySamples();
+    const uint32_t previousLatency =
+        latency.exchange(updatedLatency, std::memory_order_acq_rel);
+    (void)processor->setProcessing(true);
+    processing = true;
+    return updatedLatency != previousLatency;
   }
   std::vector<std::wstring>
   initialize(float, unsigned,
@@ -785,8 +879,9 @@ private:
   std::string pluginUid;
   size_t channelCount{};
   unsigned maxFrameCount{};
-  uint32_t latency{};
+  std::atomic<uint32_t> latency{0};
   std::unique_ptr<Steinberg::Vst::PlugProvider> provider;
+  Steinberg::IPtr<VST3RestartHandler> componentHandler;
   Steinberg::IPtr<Steinberg::Vst::IComponent> component;
   Steinberg::FUnknownPtr<Steinberg::Vst::IAudioProcessor> processor;
   std::unique_ptr<float *[]> inputs, outputs;
@@ -806,6 +901,7 @@ private:
 class VST3PluginFilter final : public IFilter,
                                public AtomicPluginBypass,
                                public IPluginParameterControl,
+                               public IPluginLatencyRefresh,
                                public IPluginFailureState,
                                public IPluginLatencyState,
                                public IPluginStatePersistence {
@@ -845,6 +941,18 @@ public:
   }
   uint32_t latencySamples() const noexcept override {
     return instance ? instance->latencySamples() : 0;
+  }
+  bool latencyRefreshPending() const noexcept override {
+    const auto *refresh =
+        dynamic_cast<const IPluginLatencyRefresh *>(instance.get());
+    return refresh && refresh->latencyRefreshPending();
+  }
+  bool refreshPluginLatency() override {
+    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
+    if (!refresh || !refresh->refreshPluginLatency())
+      return false;
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return true;
   }
   const std::string &pluginIdentifier() const noexcept override {
     return pluginUid;

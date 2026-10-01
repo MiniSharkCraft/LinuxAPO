@@ -585,6 +585,64 @@ int main() {
     std::cerr << "VST3 dry bypass did not align an impulse across blocks\n";
     return 1;
   }
+  constexpr const char *vst3DynamicLatencyUid =
+      "534B5941504F00010000000000000004";
+  if (!write(path, "Plugin: VST3 " + std::string(vst3DynamicLatencyUid) + "\n"))
+    return 1;
+  Engine vst3DynamicLatency(48000, 2, 128, {L"L", L"R"});
+  vst3DynamicLatency.loadConfig(path);
+  if (vst3DynamicLatency.pluginLatencySamples() != 32 ||
+      !vst3DynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr << "VST3 dynamic-latency notification was not latched\n";
+    return 1;
+  }
+  if (vst3DynamicLatency.refreshPluginLatencies() != 1 ||
+      vst3DynamicLatency.pluginLatencySamples() != 64 ||
+      vst3DynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr
+        << "VST3 control-thread latency refresh did not publish 64 samples\n";
+    return 1;
+  }
+  float dynamicLatencyInput[128]{};
+  dynamicLatencyInput[0] = 0.25f;
+  dynamicLatencyInput[1] = -0.5f;
+  vst3DynamicLatency.process(dynamicLatencyInput, 64);
+  if (std::any_of(std::begin(dynamicLatencyInput),
+                  std::end(dynamicLatencyInput),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "VST3 dynamic latency did not delay the first 64 samples\n";
+    return 1;
+  }
+  float dynamicallyDelayed[2]{};
+  vst3DynamicLatency.process(dynamicallyDelayed, 1);
+  if (std::abs(dynamicallyDelayed[0] - 0.25f) > 1e-6f ||
+      std::abs(dynamicallyDelayed[1] + 0.5f) > 1e-6f) {
+    std::cerr << "VST3 dynamic-latency impulse offset mismatch\n";
+    return 1;
+  }
+
+  Engine vst3DynamicBypass(48000, 2, 128, {L"L", L"R"});
+  vst3DynamicBypass.loadConfig(path);
+  vst3DynamicBypass.setPluginBypass(vst3DynamicLatencyUid, true);
+  if (vst3DynamicBypass.refreshPluginLatencies() != 1 ||
+      vst3DynamicBypass.pluginLatencySamples() != 64) {
+    std::cerr << "VST3 bypass graph did not refresh dynamic latency\n";
+    return 1;
+  }
+  float dynamicBypassImpulse[128]{};
+  dynamicBypassImpulse[0] = 0.25f;
+  dynamicBypassImpulse[1] = -0.5f;
+  vst3DynamicBypass.process(dynamicBypassImpulse, 64);
+  float dynamicBypassOutput[2]{};
+  vst3DynamicBypass.process(dynamicBypassOutput, 1);
+  if (std::any_of(std::begin(dynamicBypassImpulse),
+                  std::end(dynamicBypassImpulse),
+                  [](float sample) { return std::abs(sample) > 1e-6f; }) ||
+      std::abs(dynamicBypassOutput[0] - 0.25f) > 1e-6f ||
+      std::abs(dynamicBypassOutput[1] + 0.5f) > 1e-6f) {
+    std::cerr << "VST3 bypass delay ring was not rebuilt for new latency\n";
+    return 1;
+  }
   if (!write(path, "Plugin: VST3 " + vst3Uid + " 7=0.25\n"))
     return 1;
   Engine vst3Override(48000, 2, 128, {L"L", L"R"});
@@ -679,6 +737,60 @@ int main() {
   if (std::abs(clapBypassDelayed[0] - 0.25f) > 1e-6f ||
       std::abs(clapBypassDelayed[1]) > 1e-6f) {
     std::cerr << "CLAP dry bypass did not align an impulse across blocks\n";
+    return 1;
+  }
+  if (!write(path, "Plugin: CLAP org.skyapo.test.dynamic-latency\n"))
+    return 1;
+  Engine clapDynamicLatency(48000, 2, 128, {L"L", L"R"});
+  clapDynamicLatency.loadConfig(path);
+  if (clapDynamicLatency.pluginLatencySamples() != 32 ||
+      !clapDynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr << "CLAP host.latency.changed notification was not latched\n";
+    return 1;
+  }
+  if (clapDynamicLatency.refreshPluginLatencies() != 1 ||
+      clapDynamicLatency.pluginLatencySamples() != 64 ||
+      clapDynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr
+        << "CLAP control-thread latency refresh did not publish 64 samples\n";
+    return 1;
+  }
+  float clapDynamicImpulse[128]{};
+  clapDynamicImpulse[0] = 0.25f;
+  clapDynamicImpulse[1] = -0.5f;
+  clapDynamicLatency.process(clapDynamicImpulse, 64);
+  if (std::any_of(std::begin(clapDynamicImpulse), std::end(clapDynamicImpulse),
+                  [](float sample) { return std::abs(sample) > 1e-6f; })) {
+    std::cerr << "CLAP dynamic latency did not delay its first 64 samples\n";
+    return 1;
+  }
+  float clapDynamicOutput[2]{};
+  clapDynamicLatency.process(clapDynamicOutput, 1);
+  if (std::abs(clapDynamicOutput[0] - 0.125f) > 1e-6f ||
+      std::abs(clapDynamicOutput[1] + 0.25f) > 1e-6f) {
+    std::cerr << "CLAP dynamic-latency impulse offset mismatch\n";
+    return 1;
+  }
+  Engine clapDynamicBypass(48000, 2, 128, {L"L", L"R"});
+  clapDynamicBypass.loadConfig(path);
+  clapDynamicBypass.setPluginBypass("org.skyapo.test.dynamic-latency", true);
+  if (clapDynamicBypass.refreshPluginLatencies() != 1 ||
+      clapDynamicBypass.pluginLatencySamples() != 64) {
+    std::cerr << "CLAP bypass graph did not refresh dynamic latency\n";
+    return 1;
+  }
+  float clapDynamicBypassInput[128]{};
+  clapDynamicBypassInput[0] = 0.25f;
+  clapDynamicBypassInput[1] = -0.5f;
+  clapDynamicBypass.process(clapDynamicBypassInput, 64);
+  float clapDynamicBypassOutput[2]{};
+  clapDynamicBypass.process(clapDynamicBypassOutput, 1);
+  if (std::any_of(std::begin(clapDynamicBypassInput),
+                  std::end(clapDynamicBypassInput),
+                  [](float sample) { return std::abs(sample) > 1e-6f; }) ||
+      std::abs(clapDynamicBypassOutput[0] - 0.25f) > 1e-6f ||
+      std::abs(clapDynamicBypassOutput[1] + 0.5f) > 1e-6f) {
+    std::cerr << "CLAP bypass delay ring was not rebuilt for new latency\n";
     return 1;
   }
   if (!write(path, "Plugin: CLAP org.skyapo.test.latency\n"

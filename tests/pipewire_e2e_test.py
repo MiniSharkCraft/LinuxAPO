@@ -140,7 +140,8 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "renegotiate", "transition-format", "device-filter",
+        "vst3-latency-change", "clap-latency-change", "renegotiate",
+        "transition-format", "device-filter",
         "device-switch"
     ):
         raise RuntimeError(
@@ -149,7 +150,9 @@ def main():
             "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
-            "vst2-live-param|plugin-bypass|renegotiate|transition-format|"
+            "vst2-live-param|plugin-bypass|vst3-latency-change|"
+            "clap-latency-change|"
+            "renegotiate|transition-format|"
             "device-filter|device-switch")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
@@ -163,6 +166,8 @@ def main():
     source_replug = mode == "source-replug"
     server_restart = mode == "server-restart"
     vst2_live = mode == "vst2-live-param"
+    vst3_latency_change = mode == "vst3-latency-change"
+    clap_latency_change = mode == "clap-latency-change"
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
     plugin_bypass = mode == "plugin-bypass"
@@ -170,7 +175,8 @@ def main():
     transition_format = mode == "transition-format"
     device_filter = mode == "device-filter"
     device_switch = mode == "device-switch"
-    plugin_chain = plugin_live or plugin_bypass or latency_plugin
+    plugin_chain = (plugin_live or plugin_bypass or latency_plugin or
+                    vst3_latency_change or clap_latency_change)
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
             "https://skyapo.example/plugins/test-gain", "gain")
@@ -295,6 +301,36 @@ def main():
                     "DSP amplitude ratio: 0.501187" not in status):
                 raise RuntimeError(
                     f"unexpected DSP amplitude ratio:\n{status}")
+
+            if vst3_latency_change or clap_latency_change:
+                plugin_format = "VST3" if vst3_latency_change else "CLAP"
+                notification_name = ("kLatencyChanged" if vst3_latency_change
+                                     else "host.latency.changed")
+                deadline = time.monotonic() + 8
+                latency_status = status
+                while time.monotonic() < deadline:
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            f"skyapod exited during {plugin_format} latency refresh")
+                    result = run([str(cli), "status"], env, check=False)
+                    latency_status = result.stdout
+                    if (result.returncode == 0 and
+                            "Plugin-reported latency sum: 64 samples "
+                            "(no delay compensation)" in latency_status and
+                            "Plugin latency refreshes: 1" in latency_status):
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        f"{plugin_format} {notification_name} did not refresh the runtime "
+                        f"latency snapshot:\n{latency_status}")
+                if "Plugin latency update error:" in latency_status:
+                    raise RuntimeError(
+                        f"{plugin_format} latency refresh reported an error:\n"
+                        f"{latency_status}")
+                status = latency_status
+                print(f"{plugin_format} {notification_name} refreshed the live "
+                      "latency snapshot from 32 to 64 samples on the control loop.")
 
             old_virtual_id = virtual_source_id(status)
             old_capture_id = re.search(r"^Capture node: (\d+)", status,
@@ -558,7 +594,8 @@ def main():
                       f"{channel_count} capture links.")
                 recovered_status = relinked_status
 
-            expected_db = (-12.020599913 if latency_plugin else
+            expected_db = (-12.020599913 if
+                           (latency_plugin or clap_latency_change) else
                            (-3.0 if transition_format else -6.0))
             if plugin_live:
                 live_value = "0.75" if (vst2_live or mode == "plugin-live-param") else "0.25"

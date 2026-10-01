@@ -5,6 +5,7 @@
 #include "../plugin/IPluginParameterControl.h"
 #include "../plugin/IPluginIdentity.h"
 #include "../plugin/IPluginLatencyState.h"
+#include "../plugin/IPluginLatencyRefresh.h"
 #include "../plugin/IPluginSourceContext.h"
 #include "../plugin/IPluginStatePersistence.h"
 #include "FilterConfiguration.h"
@@ -902,6 +903,26 @@ std::optional<uint64_t> Engine::pluginLatencySamples() const noexcept {
     total += samples;
   }
   return total;
+}
+
+bool Engine::pluginLatencyRefreshPending() const noexcept {
+  for (const auto &node : graph) {
+    const auto *refresh =
+        dynamic_cast<const IPluginLatencyRefresh *>(node.filter);
+    if (refresh && refresh->latencyRefreshPending())
+      return true;
+  }
+  return false;
+}
+
+unsigned Engine::refreshPluginLatencies() {
+  unsigned refreshed = 0;
+  for (const auto &node : graph) {
+    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
+    if (refresh && refresh->refreshPluginLatency())
+      ++refreshed;
+  }
+  return refreshed;
 }
 
 unsigned Engine::savePersistentPluginStates() {

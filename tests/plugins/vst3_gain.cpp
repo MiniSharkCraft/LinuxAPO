@@ -161,6 +161,76 @@ private:
   std::array<std::array<float, DelaySamples>, 2> history{};
   uint32_t cursor{};
 };
+
+class TestDynamicLatency final : public SingleComponentEffect {
+public:
+  static FUnknown *create(void *) {
+    return static_cast<IAudioProcessor *>(new TestDynamicLatency);
+  }
+
+  tresult PLUGIN_API initialize(FUnknown *context) override {
+    const auto result = SingleComponentEffect::initialize(context);
+    if (result != kResultOk)
+      return result;
+    addAudioInput(STR16("Input"), SpeakerArr::kStereo);
+    addAudioOutput(STR16("Output"), SpeakerArr::kStereo);
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API setActive(TBool state) override {
+    if (!state) {
+      cursor = 0;
+      for (auto &channel : history)
+        channel.fill(0.0f);
+      return kResultOk;
+    }
+    if (changeLatencyOnNextActivation) {
+      latency = 64;
+      changeLatencyOnNextActivation = false;
+    }
+    return kResultOk;
+  }
+
+  tresult PLUGIN_API setProcessing(TBool state) override {
+    if (state && !notified) {
+      notified = true;
+      changeLatencyOnNextActivation = true;
+      if (auto *handler = getComponentHandler())
+        return handler->restartComponent(kLatencyChanged);
+    }
+    return kResultOk;
+  }
+
+  uint32 PLUGIN_API getLatencySamples() override {
+    return latency;
+  }
+
+  tresult PLUGIN_API process(ProcessData &data) override {
+    if (data.numInputs != 1 || data.numOutputs != 1 || !data.inputs ||
+        !data.outputs || data.inputs[0].numChannels != 2 ||
+        data.outputs[0].numChannels != 2 ||
+        data.symbolicSampleSize != kSample32)
+      return kResultFalse;
+    for (int32 frame = 0; frame < data.numSamples; ++frame) {
+      for (int32 channel = 0; channel < 2; ++channel) {
+        auto *input = data.inputs[0].channelBuffers32[channel];
+        auto *output = data.outputs[0].channelBuffers32[channel];
+        output[frame] = history[channel][cursor];
+        history[channel][cursor] = input[frame];
+      }
+      cursor = (cursor + 1) % latency;
+    }
+    data.outputs[0].silenceFlags = 0;
+    return kResultOk;
+  }
+
+private:
+  std::array<std::array<float, 64>, 2> history{};
+  uint32 latency{32};
+  uint32 cursor{};
+  bool notified{};
+  bool changeLatencyOnNextActivation{};
+};
 } // namespace
 
 BEGIN_FACTORY("SkyAPO Tests", "https://example.invalid/skyapo", "", 0)
@@ -176,4 +246,8 @@ DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000003),
            PClassInfo::kManyInstances, kVstAudioEffectClass,
            "SkyAPO Test 64-Sample Delay", Vst::kDistributable, "Fx", "1.0.0",
            kVstVersionString, TestLatencyDelay::create)
+DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000004),
+           PClassInfo::kManyInstances, kVstAudioEffectClass,
+           "SkyAPO Test Dynamic Latency", Vst::kDistributable, "Fx", "1.0.0",
+           kVstVersionString, TestDynamicLatency::create)
 END_FACTORY

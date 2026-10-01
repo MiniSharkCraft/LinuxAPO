@@ -65,6 +65,9 @@ public:
   }
   std::vector<std::string> failedPluginDescriptions() const;
   std::optional<uint64_t> pluginLatencySamples() const noexcept;
+  bool pluginLatencyRefreshPending() const noexcept;
+  // Control-thread only; realtime callbacks must be quiesced and drained.
+  unsigned refreshPluginLatencies();
   // Control-thread only: caller must quiesce the audio graph first.
   unsigned savePersistentPluginStates();
   void setPluginParameter(const std::string &pluginId,

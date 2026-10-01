@@ -148,6 +148,7 @@ struct Runtime {
   unsigned transitionLength{};
   unsigned transitionDurationMs{10};
   uint64_t formatRebuildsDuringTransition{};
+  unsigned pluginLatencyRefreshes{};
   std::atomic<bool> resetMetrics{false};
   std::atomic<unsigned> rate{0}, quantum{0}, requestedRate{0},
       requestedQuantum{0};
@@ -157,6 +158,7 @@ struct Runtime {
   double rawSum = 0, processedSum = 0;
   unsigned channels = 0;
   std::string configError;
+  std::string pluginLatencyError;
   pw_filter_state state = PW_FILTER_STATE_UNCONNECTED;
   explicit Runtime(volatile sig_atomic_t &stop) : stopping(stop) {
     ownInputs.fill(SPA_ID_INVALID);
@@ -616,6 +618,34 @@ struct Runtime {
   static void selectionChanged(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
     r.reclaimRetired();
+    if (!r.pending.load(std::memory_order_seq_cst)) {
+      auto *engine = r.active.load(std::memory_order_seq_cst);
+      if (engine && engine->pluginLatencyRefreshPending()) {
+        if (!r.quiesceAndDrain()) {
+          r.pluginLatencyError =
+              "timed out draining callbacks for VST3 latency refresh";
+        } else {
+          try {
+            r.reclaimRetired();
+            engine = r.active.load(std::memory_order_seq_cst);
+            const unsigned count =
+                engine ? engine->refreshPluginLatencies() : 0;
+            if (count) {
+              r.pluginLatencyRefreshes += count;
+              r.pluginLatencyError.clear();
+              std::cerr << "skyapod: refreshed latency for " << count
+                        << " plugin instance(s)\n";
+              r.resetMetrics.store(true, std::memory_order_release);
+            }
+          } catch (const std::exception &e) {
+            r.pluginLatencyError = e.what();
+            std::cerr << "skyapod: plugin latency refresh failed: "
+                      << r.pluginLatencyError << '\n';
+          }
+          r.resumeAudio();
+        }
+      }
+    }
     try {
       if (settings::device() != r.device.name)
         r.fail("device selection changed");
@@ -794,6 +824,7 @@ struct Runtime {
       << (pending.load(std::memory_order_seq_cst) ? "crossfading" : "stable")
       << "\nFormat rebuilds during transition: "
       << formatRebuildsDuringTransition
+      << "\nPlugin latency refreshes: " << pluginLatencyRefreshes
       << "\nChannel positions:";
     for (auto &p : ports)
       s << ' ' << p.channel;
@@ -859,9 +890,11 @@ struct Runtime {
          "shared-library C allocators excluded\n";
     if (!configError.empty())
       s << "Config reload error: " << configError << '\n';
+    if (!pluginLatencyError.empty())
+      s << "Plugin latency update error: " << pluginLatencyError << '\n';
     s << "Plugin failures:";
-    const auto failures = e ? e->failedPluginDescriptions()
-                            : std::vector<std::string>{};
+    const auto failures =
+        e ? e->failedPluginDescriptions() : std::vector<std::string>{};
     if (failures.empty()) {
       s << " (none)\n";
     } else {

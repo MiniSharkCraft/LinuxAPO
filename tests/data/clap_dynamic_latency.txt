@@ -1,0 +1,2 @@
+Preamp: -6 dB
+Plugin: CLAP org.skyapo.test.dynamic-latency

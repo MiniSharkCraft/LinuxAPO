@@ -982,6 +982,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
       ENVIRONMENT
         "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-clap-dynamic-latency
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_dynamic_latency.txt
+        clap-latency-change)
+    set_tests_properties(skyapo-pipewire-e2e-clap-dynamic-latency
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
+      ENVIRONMENT
+        "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
   endif()
   if(LILV_FOUND AND LV2_FOUND)
     add_test(NAME skyapo-pipewire-e2e-lv2-live-parameter
@@ -1017,6 +1034,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         vst3-live-param)
     set_tests_properties(skyapo-pipewire-e2e-vst3-live-parameter
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-vst3-dynamic-latency
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_latency_change.txt
+        vst3-latency-change)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-dynamic-latency
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
       ENVIRONMENT
         "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
   endif()

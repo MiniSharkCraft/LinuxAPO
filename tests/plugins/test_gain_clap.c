@@ -12,6 +12,9 @@ typedef struct gain_data {
   uint32_t latency_cursor;
   float latency_history[2][64];
   bool failFirstProcess;
+  bool dynamicLatency;
+  bool latencyChangeAnnounced;
+  unsigned activationCount;
   unsigned processCalls;
   atomic_bool processing;
 } gain_data;
@@ -36,20 +39,39 @@ static void CLAP_ABI plugin_destroy(const clap_plugin_t *plugin) {
 }
 static bool CLAP_ABI plugin_activate(const clap_plugin_t *plugin, double rate,
                                      uint32_t min_frames, uint32_t max_frames) {
-  (void)plugin;
+  gain_data *data = plugin->plugin_data;
+  if (data->dynamicLatency) {
+    if (data->activationCount++ == 0) {
+      data->host->request_restart(data->host);
+    } else if (!data->latencyChangeAnnounced) {
+      data->latency_samples = 64;
+      const clap_host_latency_t *latency =
+          data->host->get_extension(data->host, CLAP_EXT_LATENCY);
+      if (latency) {
+        data->latencyChangeAnnounced = true;
+        latency->changed(data->host);
+      }
+    }
+  }
   return rate >= 8000.0 && min_frames >= 1 && max_frames >= min_frames;
 }
 static void CLAP_ABI plugin_deactivate(const clap_plugin_t *plugin) {
-  (void)plugin;
+  gain_data *data = plugin->plugin_data;
+  data->latency_cursor = 0;
+  memset(data->latency_history, 0, sizeof(data->latency_history));
 }
 static bool CLAP_ABI plugin_start(const clap_plugin_t *plugin) {
   (void)plugin;
   return true;
 }
-static void CLAP_ABI plugin_stop(const clap_plugin_t *plugin) { (void)plugin; }
-static void CLAP_ABI plugin_reset(const clap_plugin_t *plugin) { (void)plugin; }
-static clap_process_status CLAP_ABI plugin_process(const clap_plugin_t *plugin,
-                                                  const clap_process_t *process) {
+static void CLAP_ABI plugin_stop(const clap_plugin_t *plugin) {
+  (void)plugin;
+}
+static void CLAP_ABI plugin_reset(const clap_plugin_t *plugin) {
+  (void)plugin;
+}
+static clap_process_status CLAP_ABI
+plugin_process(const clap_plugin_t *plugin, const clap_process_t *process) {
   gain_data *data = plugin->plugin_data;
   if (data->failFirstProcess && data->processCalls++ == 0)
     return CLAP_PROCESS_ERROR;
@@ -285,7 +307,8 @@ static const clap_plugin_descriptor_t error_descriptor = {
     .manual_url = "",
     .support_url = "",
     .version = "1.0.0",
-    .description = "Test-only CLAP effect that errors on its first process call",
+    .description =
+        "Test-only CLAP effect that errors on its first process call",
     .features = NULL};
 
 static const clap_plugin_descriptor_t latency_descriptor = {
@@ -300,14 +323,28 @@ static const clap_plugin_descriptor_t latency_descriptor = {
     .description = "Test-only CLAP stereo effect with 64 samples of latency",
     .features = NULL};
 
-static const clap_plugin_t *CLAP_ABI create_plugin(
-    const clap_plugin_factory_t *factory, const clap_host_t *host,
-    const char *plugin_id) {
+static const clap_plugin_descriptor_t dynamic_latency_descriptor = {
+    .clap_version = CLAP_VERSION,
+    .id = "org.skyapo.test.dynamic-latency",
+    .name = "SkyAPO CLAP Test Dynamic Latency",
+    .vendor = "SkyAPO tests",
+    .url = "https://example.invalid/skyapo-test-dynamic-latency",
+    .manual_url = "",
+    .support_url = "",
+    .version = "1.0.0",
+    .description =
+        "Test-only CLAP effect changing latency from 32 to 64 samples",
+    .features = NULL};
+
+static const clap_plugin_t *CLAP_ABI
+create_plugin(const clap_plugin_factory_t *factory, const clap_host_t *host,
+              const char *plugin_id) {
   (void)factory;
-  const bool failFirstProcess =
-      strcmp(plugin_id, error_descriptor.id) == 0;
+  const bool failFirstProcess = strcmp(plugin_id, error_descriptor.id) == 0;
   const bool reportsLatency = strcmp(plugin_id, latency_descriptor.id) == 0;
-  if (!failFirstProcess && !reportsLatency &&
+  const bool dynamicLatency =
+      strcmp(plugin_id, dynamic_latency_descriptor.id) == 0;
+  if (!failFirstProcess && !reportsLatency && !dynamicLatency &&
       strcmp(plugin_id, descriptor.id) != 0)
     return NULL;
   clap_plugin_t *plugin = calloc(1, sizeof(*plugin));
@@ -320,11 +357,15 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
   data->host = host;
   data->gain = 0.5;
   atomic_init(&data->processing, false);
-  data->latency_samples = reportsLatency ? 64 : 0;
+  data->latency_samples = reportsLatency ? 64 : (dynamicLatency ? 32 : 0);
   data->failFirstProcess = failFirstProcess;
-  plugin->desc = failFirstProcess
-                     ? &error_descriptor
-                     : (reportsLatency ? &latency_descriptor : &descriptor);
+  data->dynamicLatency = dynamicLatency;
+  plugin->desc =
+      failFirstProcess
+          ? &error_descriptor
+          : (reportsLatency ? &latency_descriptor
+                            : (dynamicLatency ? &dynamic_latency_descriptor
+                                              : &descriptor));
   plugin->plugin_data = data;
   plugin->init = plugin_init;
   plugin->destroy = plugin_destroy;
@@ -340,18 +381,19 @@ static const clap_plugin_t *CLAP_ABI create_plugin(
 }
 static uint32_t CLAP_ABI plugin_count(const clap_plugin_factory_t *factory) {
   (void)factory;
-  return 3;
+  return 4;
 }
-static const clap_plugin_descriptor_t *CLAP_ABI plugin_descriptor(
-    const clap_plugin_factory_t *factory, uint32_t index) {
+static const clap_plugin_descriptor_t *CLAP_ABI
+plugin_descriptor(const clap_plugin_factory_t *factory, uint32_t index) {
   (void)factory;
   return index == 0   ? &descriptor
          : index == 1 ? &error_descriptor
          : index == 2 ? &latency_descriptor
+         : index == 3 ? &dynamic_latency_descriptor
                       : NULL;
 }
 static const clap_plugin_factory_t factory = {plugin_count, plugin_descriptor,
-                                               create_plugin};
+                                              create_plugin};
 static bool CLAP_ABI entry_init(const char *path) {
   atomic_store(&destroyed_plugin_count, 0);
   return path != NULL;
