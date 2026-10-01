@@ -9,6 +9,7 @@
 
 ## Unreleased
 
+- Refresh CLI/daemon/benchmark man-page version headers to 0.9.0, document safe package removal and the in-process plugin trust boundary, clarify fixture-backed CLAP latency/PDC support, and update the PipeWire suite total from 47 to the verified 57 tests.
 - Port the pinned upstream Equalizer APO MuParserX `StringOperators` and `LogicalOperators` into checked build-tree adaptations; production config now supports upstream string-aware `+` and infix `not`, with numerical parser-path regression coverage. Revalidated the live Built-in Audio → SkyAPO Virtual Mic path at 48 kHz/Q1024: an independent recorder captured 192000 frames with correlation 1 and −6 dB RMS ratio, and callback audits reported 0 allocations/deallocations and 0 overruns.
 - Add an experimental opt-in FST/VST2 filter host to `skyapo-core`, with live parameter control through block-boundary mailboxes and private PipeWire fixture coverage. A locally installed yabridge VST2 wrapper now has load/init and offline traversal evidence only; no parameter effect or realtime compatibility is claimed.
 - Improve editor runtime status summaries for streaming, PipeWire connecting/unconnected/paused/error, and daemon offline/unresponsive states; unknown states remain explicit, and recovery is not inferred when CLI status does not provide it.
