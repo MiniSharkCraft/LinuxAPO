@@ -59,7 +59,7 @@ def run_ui_smoke(executable, env):
         process.communicate(timeout=5)
 
 
-def validate_desktop_metadata(root):
+def validate_desktop_metadata(root, application_version):
     """Reject syntactically valid packages with stale launch metadata."""
     metainfo_path = root / "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml"
     try:
@@ -72,6 +72,13 @@ def validate_desktop_metadata(root):
         raise RuntimeError("AppStream component ID must use the canonical SkyAPO application ID")
     if component.findtext("name") != "SkyAPO":
         raise RuntimeError("AppStream component name is missing or incorrect")
+    releases = component.findall("./releases/release")
+    if not releases or releases[0].get("version") != application_version:
+        published = releases[0].get("version") if releases else "missing"
+        raise RuntimeError(
+            "AppStream release version does not match the packaged binary: "
+            f"{published!r} != {application_version!r}"
+        )
     homepage = component.find("url[@type='homepage']")
     if homepage is not None:
         address = (homepage.text or "").strip()
@@ -142,7 +149,13 @@ def main():
             raise RuntimeError(
                 f"package is missing required man page: {base.relative_to(root)}"
             )
-    validate_desktop_metadata(root)
+    version_output = run(
+        [str(root / "usr/bin/skyapo"), "--version"], os.environ.copy()
+    ).stdout.splitlines()
+    if not version_output or not version_output[0].startswith("SkyAPO "):
+        raise RuntimeError("packaged skyapo --version returned an unknown version")
+    application_version = version_output[0].removeprefix("SkyAPO ").strip()
+    validate_desktop_metadata(root, application_version)
     qt_license = (root / "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt").read_text(errors="replace")
     if "GNU LESSER GENERAL PUBLIC LICENSE" not in qt_license:
         raise RuntimeError("package Qt LGPL license text is invalid")

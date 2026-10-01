@@ -27,6 +27,16 @@ prepare() {
   fi
 
   cd "$srcdir/skyapo"
+  local expected_revision checked_out_revision
+  expected_revision="$(git -C "$_skyapo_source_root" rev-parse HEAD)"
+  checked_out_revision="$(git -C "$srcdir/skyapo" rev-parse HEAD)"
+  if [[ "$checked_out_revision" != "$expected_revision" ]]; then
+    printf '==> Updating cached source checkout %s -> %s\n' \
+      "$checked_out_revision" "$expected_revision"
+    git -C "$srcdir/skyapo" fetch --quiet "$_skyapo_source_root" \
+      "$expected_revision"
+    git -C "$srcdir/skyapo" checkout --detach "$expected_revision"
+  fi
   git submodule update --init --recursive
 }
 
