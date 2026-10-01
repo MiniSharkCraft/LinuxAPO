@@ -414,7 +414,8 @@ int main() {
     excessivePdcEngine.loadConfig(path);
   } catch (const std::exception &error) {
     rejectedPdcBudget =
-        std::string(error.what()).find("16 MiB realtime ring-buffer budget") !=
+        std::string(error.what())
+            .find("shared 16 MiB per-graph realtime ring-buffer budget") !=
         std::string::npos;
     if (!rejectedPdcBudget)
       std::cerr << "Unexpected PDC budget error: " << error.what() << '\n';
@@ -422,6 +423,36 @@ int main() {
   if (!rejectedPdcBudget) {
     std::cerr << "PDC aggregate ring-buffer budget did not reject excessive "
                  "Copy fan-in\n";
+    return 1;
+  }
+
+  std::string combinedRingBudget =
+      "Delay: 1000000 Samples\n"
+      "Channel: L\n"
+      "Plugin: LV2 https://skyapo.example/plugins/test-latency-large\n"
+      "Channel: L R\n"
+      "Copy: L2=L";
+  for (unsigned term = 0; term < 230; ++term)
+    combinedRingBudget += "+R";
+  combinedRingBudget += "\n";
+  if (!write(path, combinedRingBudget))
+    return 1;
+  bool rejectedCombinedRingBudget = false;
+  try {
+    Engine combinedRingEngine(48000, 2, 128, {L"L", L"R"});
+    combinedRingEngine.loadConfig(path);
+  } catch (const std::exception &error) {
+    rejectedCombinedRingBudget =
+        std::string(error.what())
+            .find("shared 16 MiB per-graph realtime ring-buffer budget") !=
+        std::string::npos;
+    if (!rejectedCombinedRingBudget)
+      std::cerr << "Unexpected combined Delay/PDC budget error: "
+                << error.what() << '\n';
+  }
+  if (!rejectedCombinedRingBudget) {
+    std::cerr << "EAPO Delay and Copy-PDC rings did not share the 16 MiB "
+                 "per-graph budget\n";
     return 1;
   }
 
@@ -1560,6 +1591,75 @@ int main() {
       return 1;
     }
 
+  if (!write(path, "Delay: 0 Samples\n"))
+    return 1;
+  Engine zeroDelay(48000, 2, 128, {L"L", L"R"});
+  zeroDelay.loadConfig(path);
+  float zeroDelaySamples[4] = {0.25f, -0.5f, 1.0f, -2.0f};
+  zeroDelay.process(zeroDelaySamples, 2);
+  const float zeroDelayExpected[4] = {0.25f, -0.5f, 1.0f, -2.0f};
+  for (unsigned i = 0; i < 4; ++i)
+    if (std::abs(zeroDelaySamples[i] - zeroDelayExpected[i]) > 1e-6f) {
+      std::cerr << "zero-sample EAPO Delay was not a safe identity at sample "
+                << i << '\n';
+      return 1;
+    }
+
+  if (!write(path, "Copy: L2=L R2=R\n"
+                   "Channel: L2 R2\n"
+                   "Delay: 4 Samples\n"
+                   "Copy: L=0.5*L+0.5*L2 R=0.5*R+0.5*R2\n"))
+    return 1;
+  Engine delayedBranch(48000, 2, 16, {L"L", L"R"});
+  delayedBranch.loadConfig(path);
+  float delayBranchImpulse[24]{};
+  delayBranchImpulse[0] = 1.0f;
+  delayBranchImpulse[1] = -0.5f;
+  delayedBranch.process(delayBranchImpulse, 12);
+  for (unsigned frame = 0; frame < 12; ++frame) {
+    const float expectedLeft = frame == 4 ? 1.0f : 0.0f;
+    const float expectedRight = frame == 4 ? -0.5f : 0.0f;
+    if (std::abs(delayBranchImpulse[frame * 2] - expectedLeft) > 1e-5f ||
+        std::abs(delayBranchImpulse[frame * 2 + 1] - expectedRight) > 1e-5f) {
+      std::cerr << "EAPO Delay was not included in Copy-path PDC at frame "
+                << frame << ": " << delayBranchImpulse[frame * 2] << ", "
+                << delayBranchImpulse[frame * 2 + 1] << '\n';
+      return 1;
+    }
+  }
+
+  if (!write(path, "Delay: 5000000000 Samples\n"))
+    return 1;
+  Engine oversizedDelay(48000, 2, 16, {L"L", L"R"});
+  bool oversizedDelayRejected = false;
+  try {
+    oversizedDelay.loadConfig(path);
+  } catch (const std::exception &ex) {
+    oversizedDelayRejected =
+        std::string(ex.what()).find("supported range") != std::string::npos;
+  }
+  if (!oversizedDelayRejected) {
+    std::cerr << "out-of-range EAPO Delay was not rejected before upstream "
+                 "buffer initialization\n";
+    return 1;
+  }
+
+  if (!write(path, "Delay: 1100000 Samples\nDelay: 1100000 Samples\n"))
+    return 1;
+  Engine aggregateDelay(48000, 2, 16, {L"L", L"R"});
+  bool aggregateDelayRejected = false;
+  try {
+    aggregateDelay.loadConfig(path);
+  } catch (const std::exception &ex) {
+    const std::string message(ex.what());
+    aggregateDelayRejected =
+        message.find("16 MiB per-graph") != std::string::npos &&
+        message.find(":2:") != std::string::npos;
+  }
+  if (!aggregateDelayRejected) {
+    std::cerr << "aggregate EAPO Delay buffer budget was not enforced\n";
+    return 1;
+  }
   if (!write(path, "Channel: L\nPreamp: -6 dB\n"))
     return 1;
   Engine selected(48000, 2, 128, {L"L", L"R"});
@@ -1633,15 +1733,25 @@ int main() {
       "upstream/equalizerapo/Setup/config/selective_delay.txt";
   Engine upstreamCopyGraph(48000, 2, 128, {L"L", L"R"});
   upstreamCopyGraph.loadConfig(upstreamSelectiveCopy.string());
-  float upstreamCopySamples[2] = {0.75f, -0.25f};
-  upstreamCopyGraph.process(upstreamCopySamples, 1);
+  constexpr unsigned upstreamDelayFrames = 96001; // settle filter after 500 ms
+  std::vector<float> upstreamCopySamples(upstreamDelayFrames * 2);
+  for (unsigned frame = 0; frame < upstreamDelayFrames; ++frame) {
+    upstreamCopySamples[frame * 2] = 0.75f;
+    upstreamCopySamples[frame * 2 + 1] = -0.25f;
+  }
+  for (unsigned offset = 0; offset < upstreamDelayFrames;) {
+    const unsigned frames = std::min(128u, upstreamDelayFrames - offset);
+    upstreamCopyGraph.process(upstreamCopySamples.data() + offset * 2, frames);
+    offset += frames;
+  }
+  const float delayedLeft = upstreamCopySamples[upstreamDelayFrames * 2 - 2];
+  const float delayedRight = upstreamCopySamples[upstreamDelayFrames * 2 - 1];
   if (upstreamCopyGraph.filterCount() != 6 ||
-      std::abs(upstreamCopySamples[0] - 0.375f) > 1e-4f ||
-      std::abs(upstreamCopySamples[1] + 0.125f) > 1e-4f) {
+      std::abs(delayedLeft - 0.375f) > 1e-3f ||
+      std::abs(delayedRight + 0.125f) > 1e-3f) {
     std::cerr << "unmodified upstream selective_delay config failed through "
                  "the actual Copy/FilterConfiguration path: "
-              << upstreamCopySamples[0] << ", " << upstreamCopySamples[1]
-              << '\n';
+              << delayedLeft << ", " << delayedRight << '\n';
     return 1;
   }
   if (!write(path, "Copy: L=unknown\n"))

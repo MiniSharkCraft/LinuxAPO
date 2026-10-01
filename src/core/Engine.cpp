@@ -19,6 +19,7 @@
 #include "ChannelFilterFactory.h"
 #include "CopyFilter.h"
 #include "CopyFilterFactory.h"
+#include "DelayFilter.h"
 #include "DelayFilterFactory.h"
 #ifdef SKYAPO_HAVE_CONVOLUTION
 #include "ConvolutionFilter.h"
@@ -70,18 +71,50 @@
 #endif
 
 namespace {
-// Bound aggregate PDC storage as well as each individual delay. A valid but
-// adversarial Copy fan-in can otherwise create thousands of individually
-// bounded rings and exhaust memory while loading or refreshing a graph.
+// Bound aggregate PDC storage. A valid but adversarial Copy fan-in can
+// otherwise create thousands of rings and exhaust memory while loading or
+// refreshing a graph.
 constexpr uint64_t MaxPdcRingSamples = 4ULL * 1024ULL * 1024ULL;
 
-void accountPdcRing(uint64_t &usedSamples, uint64_t ringSamples) {
-  if (ringSamples > MaxPdcRingSamples - usedSamples)
+void accountDelayLine(uint64_t &usedSamples, uint64_t delaySamples,
+                      size_t channelCount) {
+  if (usedSamples > MaxPdcRingSamples ||
+      (channelCount &&
+       delaySamples > (MaxPdcRingSamples - usedSamples) / channelCount))
     throw std::runtime_error(
-        "PDC compensation exceeds SkyAPO's 16 MiB realtime ring-buffer "
+        "EAPO Delay buffers exceed SkyAPO's 16 MiB per-graph audio-buffer "
         "budget");
+  usedSamples += delaySamples * channelCount;
+}
+
+void accountPdcRing(uint64_t &usedSamples, uint64_t ringSamples) {
+  if (usedSamples > MaxPdcRingSamples ||
+      ringSamples > MaxPdcRingSamples - usedSamples)
+    throw std::runtime_error(
+        "PDC compensation and EAPO Delay exceed SkyAPO's shared 16 MiB "
+        "per-graph realtime ring-buffer budget");
   usedSamples += ringSamples;
 }
+
+class ZeroDelayFilter final : public IFilter {
+public:
+  bool getInPlace() override {
+    return true;
+  }
+  std::vector<std::wstring>
+  initialize(float, unsigned, std::vector<std::wstring> names) override {
+    channelCount_ = static_cast<unsigned>(names.size());
+    return names;
+  }
+  void process(float **output, float **input, unsigned frameCount) override {
+    for (unsigned channel = 0; channel < channelCount_; ++channel)
+      if (output[channel] != input[channel])
+        std::copy_n(input[channel], frameCount, output[channel]);
+  }
+
+private:
+  unsigned channelCount_{};
+};
 
 class PdcAlignmentFilter final : public IFilter {
 public:
@@ -105,22 +138,20 @@ public:
     for (const unsigned channel : channels_)
       if (channel < arrival.size())
         latest = std::max(latest, arrival[channel]);
+    uint64_t plannedRingSamples = pdcRingSamples;
     for (const unsigned channel : channels_) {
       if (channel >= delays_.size() || channel >= arrival.size())
         continue;
-      const uint64_t difference = latest - arrival[channel];
-      if (difference > skyapo::plugin::MaxRealtimeLatencySamples)
-        throw std::runtime_error(
-            "PDC delay exceeds SkyAPO's realtime compensation safety limit");
+      accountPdcRing(plannedRingSamples, latest - arrival[channel]);
     }
     for (const unsigned channel : channels_) {
       if (channel >= delays_.size() || channel >= arrival.size())
         continue;
       const auto difference = static_cast<uint32_t>(latest - arrival[channel]);
-      accountPdcRing(pdcRingSamples, difference);
       setDelay(channel, static_cast<uint32_t>(difference));
       updated[channel] = latest;
     }
+    pdcRingSamples = plannedRingSamples;
   }
   void process(float **output, float **input, unsigned frames) override {
     for (unsigned channel = 0; channel < delays_.size(); ++channel) {
@@ -198,6 +229,7 @@ public:
     // Validate all fan-in delay lengths before changing any ring in this
     // filter. A rejected graph/latency update must not leave half the fan-in
     // scheduled with its previous compensation.
+    uint64_t plannedRingSamples = pdcRingSamples;
     for (const auto &target : targets_) {
       uint64_t latest = 0;
       for (const auto &term : target.terms)
@@ -208,10 +240,7 @@ public:
         if (term.constant ||
             static_cast<size_t>(term.channel) >= arrival.size())
           continue;
-        if (latest - arrival[term.channel] >
-            skyapo::plugin::MaxRealtimeLatencySamples)
-          throw std::runtime_error("PDC Copy delay exceeds SkyAPO's realtime "
-                                   "compensation safety limit");
+        accountPdcRing(plannedRingSamples, latest - arrival[term.channel]);
       }
     }
     for (auto &target : targets_) {
@@ -228,12 +257,8 @@ public:
         if (!term.constant &&
             static_cast<size_t>(term.channel) < arrival.size()) {
           const uint64_t difference = latest - arrival[term.channel];
-          if (difference > skyapo::plugin::MaxRealtimeLatencySamples)
-            throw std::runtime_error("PDC Copy delay exceeds SkyAPO's realtime "
-                                     "compensation safety limit");
           delay = static_cast<uint32_t>(difference);
         }
-        accountPdcRing(pdcRingSamples, delay);
         if (term.delay != delay) {
           term.delay = delay;
           term.ring.assign(delay, 0.0f);
@@ -242,6 +267,7 @@ public:
       }
       updated[target.output] = latest;
     }
+    pdcRingSamples = plannedRingSamples;
   }
 
   void process(float **output, float **input, unsigned frames) override {
@@ -632,6 +658,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
   std::vector<std::wstring> selectedNames = allNames;
   std::vector<FilterNode> result;
   result.reserve(candidate.size());
+  uint64_t delayBufferSamples = 0;
 
   for (auto &parsed : candidate) {
     IFilter *filter = parsed.filter.get();
@@ -681,6 +708,36 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     if (filter->getAllChannels())
       selectedNames = allNames;
     const auto inputNames = selectedNames;
+    uint32_t fixedLatencySamples = 0;
+    uint64_t fixedBufferSamples = 0;
+    if (const auto *delay = dynamic_cast<const DelayFilter *>(filter)) {
+      const double requested = delay->getDelay();
+      const double effectiveRate =
+          static_cast<double>(static_cast<float>(rate));
+      const double exactSamples =
+          delay->getIsMs() ? effectiveRate * requested / 1000.0 : requested;
+      if (!std::isfinite(requested) || requested < 0.0 ||
+          !std::isfinite(exactSamples) || exactSamples < 0.0 ||
+          exactSamples >
+              static_cast<double>(std::numeric_limits<uint32_t>::max()) - 0.5)
+        throw std::runtime_error(
+            location + "Delay must resolve to a finite nonnegative sample "
+                       "count in the supported range");
+      const auto roundedSamples =
+          static_cast<uint64_t>(std::floor(exactSamples + 0.5));
+      try {
+        accountDelayLine(delayBufferSamples, roundedSamples, inputNames.size());
+      } catch (const std::exception &error) {
+        throw std::runtime_error(location + error.what());
+      }
+      fixedLatencySamples = static_cast<uint32_t>(roundedSamples);
+      fixedBufferSamples = roundedSamples * inputNames.size();
+      if (roundedSamples == 0) {
+        auto *identity = allocateFilter<ZeroDelayFilter>();
+        parsed.filter.reset(identity);
+        filter = identity;
+      }
+    }
     if (auto *copy = dynamic_cast<CopyFilter *>(filter)) {
       auto *adapted = allocateFilter<PdcCopyFilter>(copy->getAssignments());
       parsed.filter.reset(adapted);
@@ -781,6 +838,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
       }
     }
     node.filter = filter;
+    node.fixedLatencySamples = fixedLatencySamples;
+    node.fixedBufferSamples = fixedBufferSamples;
     node.description = parsed.directive + " — " + parsed.source.string() + ":" +
                        std::to_string(parsed.line);
     result.push_back(std::move(node));
@@ -788,11 +847,12 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
         filter->getSelectChannels() ? std::move(outputNames) : savedSelection;
   }
 
-  const bool hasLatencyAwarePlugin =
+  const bool hasLatencyAwareProcessing =
       std::any_of(result.begin(), result.end(), [](const FilterNode &node) {
-        return dynamic_cast<IPluginLatencyState *>(node.filter) != nullptr;
+        return dynamic_cast<IPluginLatencyState *>(node.filter) != nullptr ||
+               node.fixedLatencySamples != 0;
       });
-  if (hasLatencyAwarePlugin) {
+  if (hasLatencyAwareProcessing) {
     std::vector<unsigned> physicalChannels(channelCount);
     for (unsigned channel = 0; channel < channelCount; ++channel)
       physicalChannels[channel] = channel;
@@ -819,6 +879,13 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
                             unsigned laneCount) const {
   std::vector<uint64_t> arrival(laneCount, 0);
   uint64_t pdcRingSamples = 0;
+  for (const auto &node : nodes) {
+    if (node.fixedBufferSamples > MaxPdcRingSamples - pdcRingSamples)
+      throw std::runtime_error(
+          "EAPO Delay buffers exceed SkyAPO's shared 16 MiB per-graph "
+          "realtime ring-buffer budget");
+    pdcRingSamples += node.fixedBufferSamples;
+  }
   for (auto &node : nodes) {
     if (node.pdcAlignment) {
       auto *alignment = dynamic_cast<PdcAlignmentFilter *>(node.filter);
@@ -857,9 +924,13 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
       if (plugin && output < node.inputs.size() &&
           output < node.outputs.size() && node.inputs[output] < arrival.size())
         sourceLatency = arrival[node.inputs[output]];
-      if (pluginLatency > std::numeric_limits<uint64_t>::max() - sourceLatency)
+      const uint64_t fixedLatency = node.fixedLatencySamples;
+      if (pluginLatency > std::numeric_limits<uint64_t>::max() - fixedLatency)
+        throw std::runtime_error("PDC node latency overflow");
+      const uint64_t nodeLatency = pluginLatency + fixedLatency;
+      if (nodeLatency > std::numeric_limits<uint64_t>::max() - sourceLatency)
         throw std::runtime_error("PDC plugin latency overflow");
-      arrival[destination] = sourceLatency + pluginLatency;
+      arrival[destination] = sourceLatency + nodeLatency;
     }
   }
 }

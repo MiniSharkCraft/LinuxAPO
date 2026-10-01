@@ -1,0 +1,4 @@
+Copy: L2=L R2=R
+Channel: L2 R2
+Delay: 64 Samples
+Copy: L=0.5*L+0.5*L2 R=0.5*R+0.5*R2

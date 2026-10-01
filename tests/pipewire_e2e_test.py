@@ -171,7 +171,7 @@ def main():
         "vst3-latency-change", "clap-latency-change",
         "lv2-latency-change", "lv2-pdc-final", "renegotiate",
         "transition-format", "device-filter",
-        "device-switch"
+        "device-switch", "delay-pdc"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
@@ -182,7 +182,7 @@ def main():
             "vst2-live-param|plugin-bypass|vst3-latency-change|"
             "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
             "renegotiate|transition-format|"
-            "device-filter|device-switch")
+            "device-filter|device-switch|delay-pdc")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
@@ -199,6 +199,7 @@ def main():
     clap_latency_change = mode == "clap-latency-change"
     lv2_latency_change = mode == "lv2-latency-change"
     lv2_pdc_final = mode == "lv2-pdc-final"
+    delay_pdc = mode == "delay-pdc"
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
     plugin_bypass = mode == "plugin-bypass"
@@ -313,9 +314,10 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
-            expected_filters = (1 if vst2_live else
+            expected_filters = (4 if delay_pdc else
+                                (1 if vst2_live else
                                 (3 if lv2_pdc_final else
-                                 (2 if plugin_chain else 1)))
+                                 (2 if plugin_chain else 1))))
             channel_positions = "MONO" if mono else "FL FR"
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
@@ -336,10 +338,14 @@ def main():
             for expected in expected_status:
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
-            if (not plugin_chain and
+            if (not plugin_chain and not delay_pdc and
                     "DSP amplitude ratio: 0.501187" not in status):
                 raise RuntimeError(
                     f"unexpected DSP amplitude ratio:\n{status}")
+            # Runtime RMS is cumulative from the instant the PipeWire graph
+            # starts, so it includes initial Delay-line silence. The actual
+            # steady-state PDC assertion is made by the independent consumer
+            # below over a multi-second recording.
 
             if vst3_latency_change or clap_latency_change or lv2_latency_change:
                 plugin_format = ("VST3" if vst3_latency_change else
@@ -647,7 +653,7 @@ def main():
                       f"{channel_count} capture links.")
                 recovered_status = relinked_status
 
-            expected_db = (0.0 if lv2_pdc_final else
+            expected_db = (0.0 if (lv2_pdc_final or delay_pdc) else
                            (-12.020599913 if
                             (latency_plugin or clap_latency_change) else
                             (-3.0 if transition_format else -6.0)))
@@ -829,11 +835,11 @@ def main():
 
             consumer_args = [str(consumer)] + (["--mono"] if mono else [])
             consumer_args += ["--expected-rate", str(sample_rate)]
-            if lv2_pdc_final:
+            if lv2_pdc_final or delay_pdc:
                 consumer_args += ["--expect-identical-channels"]
             if plugin_chain:
                 consumer_args += ["--expected-db", str(expected_db)]
-            elif include_reload or transition_format:
+            elif include_reload or transition_format or delay_pdc:
                 consumer_args += ["--expected-db", str(expected_db)]
             consumer_graph = ""
             consumer_graph_summary = ""

@@ -101,6 +101,11 @@ private:
     // Internal channel-lane alignment inserted before each plugin stage.
     bool pdcAlignment{};
     std::vector<unsigned> alignmentChannels;
+    // Fixed latency contributed by an upstream filter such as EAPO Delay.
+    uint32_t fixedLatencySamples{};
+    // Float samples allocated by fixed-latency filters; shares the graph PDC
+    // ring budget so Delay and compensation cannot each consume 16 MiB.
+    uint64_t fixedBufferSamples{};
     bool inPlace;
     bool fixedBlock;
   };
