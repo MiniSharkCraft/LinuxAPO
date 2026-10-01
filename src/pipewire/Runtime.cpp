@@ -308,7 +308,7 @@ struct Runtime {
     const auto saved = saveCurrentPluginStates();
     if (saved)
       std::cerr << "skyapod: saved state for " << saved
-                << " CLAP plugin instance(s) before graph rebuild\n";
+                << " plugin instance(s) before graph rebuild\n";
     if (saved)
       engine = createEngine();
     configWatcher->update(engine->configFiles());
@@ -362,7 +362,7 @@ struct Runtime {
   unsigned saveCurrentPluginStates() {
     if (!quiesceAndDrain()) {
       throw std::runtime_error(
-          "timed out waiting for realtime callbacks before CLAP state save");
+          "timed out waiting for realtime callbacks before plugin state save");
     }
     try {
       promoteCompletedTransition();
@@ -377,7 +377,7 @@ struct Runtime {
   }
   void shutdownAudio() noexcept {
     // Explicit shutdown path: disconnect/destroy PipeWire first, then drain
-    // callbacks before making any main-thread CLAP state calls. Never save in
+    // callbacks before making any main-thread plugin state calls. Never save in
     // Runtime/Engine/plugin destructors.
     cleaning = true;
     audioMode.store(AudioMode::Stopping, std::memory_order_seq_cst);
@@ -411,9 +411,9 @@ struct Runtime {
       const auto count = current->savePersistentPluginStates();
       if (count)
         std::cerr << "skyapod: saved state for " << count
-                  << " CLAP plugin instance(s)\n";
+                  << " plugin instance(s)\n";
     } catch (const std::exception &error) {
-      std::cerr << "skyapod: CLAP state save failed during shutdown: "
+      std::cerr << "skyapod: plugin state save failed during shutdown: "
                 << error.what() << '\n';
     }
   }
@@ -452,7 +452,7 @@ struct Runtime {
     const auto saved = saveCurrentPluginStates();
     if (saved)
       std::cerr << "skyapod: saved state for " << saved
-                << " CLAP plugin instance(s) before config reload\n";
+                << " plugin instance(s) before config reload\n";
     if (saved)
       replacement = createEngine();
     configWatcher->update(replacement->configFiles());

@@ -39,10 +39,10 @@ skyapo plugin set /path/to/effect.so Gain 0.75
 
 Live updates are published off-thread through preallocated lock-free
 latest-value mailboxes and applied through `setParameter` at the next
-process-block boundary. Values are temporary and are not persisted.
+process-block boundary. Values are temporary and are not persisted to config.
 
 It does **not** implement VST2 module discovery or `skyapo plugin list/info`
-metadata, plugin state/chunks, UI, automation or MIDI
+metadata or legacy inline `ChunkData` config syntax, UI, automation or MIDI
 events, shell plugins, multiple buses, sample-accurate parameter events,
 comprehensive host callbacks, dynamic latency updates, delay compensation, or
 process isolation. The daemon loads modules in-process: native crashes and
@@ -64,6 +64,21 @@ message but did not report initialization completion or parameter metadata
 within 40 seconds. The bounded probe timed out; it does not establish whether
 the plugin itself crashed or is incompatible. Its temporary Wine prefix and
 processes were removed afterward.
+
+For plugins advertising `effFlagsProgramChunks`, the current-program chunk is
+persisted through a bounded sidecar per config directive under
+`$XDG_STATE_HOME/skyapo/vst2-state` (fallback
+`~/.local/state/skyapo/vst2-state`). The key includes normalized config path,
+source line, normalized module path, `uniqueID`, and plugin version. Sidecars
+are private, checksummed, opened without following symlinks, and atomically
+replaced. Restore follows config parameter defaults, so persisted plugin state
+wins when a graph is recreated. State callbacks execute only on a
+graph-quiesced control/shutdown path, never in the audio callback. Fixture tests
+verify numerical restore, unsupported no-chunk behavior, and corrupt-state
+candidate rejection while retaining the last-good graph. VST2's
+`effSetChunk` return value is not a reliable success indicator; these tests do
+not establish third-party plugin compatibility. Inline `ChunkData` config
+blobs remain unsupported.
 
 ## Build and tests
 

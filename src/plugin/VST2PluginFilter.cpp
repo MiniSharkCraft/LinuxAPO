@@ -4,6 +4,8 @@
 #include "IPluginFailureState.h"
 #include "IPluginParameterControl.h"
 #include "IPluginLatencyState.h"
+#include "IPluginSourceContext.h"
+#include "IPluginStatePersistence.h"
 #include "VST2PluginHost.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
@@ -25,12 +27,15 @@ class VST2PluginFilter final : public IFilter,
                                public AtomicPluginBypass,
                                public IPluginParameterControl,
                                public IPluginFailureState,
-                               public IPluginLatencyState {
+                               public IPluginLatencyState,
+                               public IPluginStatePersistence {
 public:
   VST2PluginFilter(VST2PluginHost &host, std::string modulePath,
-                   std::vector<PluginParameterValue> overrides)
+                   std::vector<PluginParameterValue> overrides,
+                   std::filesystem::path source, unsigned sourceLine)
       : host(host), modulePath(std::move(modulePath)),
-        parameterOverrides(std::move(overrides)) {}
+        parameterOverrides(std::move(overrides)), source(std::move(source)),
+        sourceLine(sourceLine) {}
 
   bool getInPlace() override {
     return false;
@@ -39,8 +44,8 @@ public:
   initialize(float sampleRate, unsigned maxFrames,
              std::vector<std::wstring> channels) override {
     channelCount = static_cast<unsigned>(channels.size());
-    instance = host.create(modulePath, sampleRate, maxFrames, channels,
-                           parameterOverrides);
+    instance = host.createForConfig(modulePath, sampleRate, maxFrames, channels,
+                                    parameterOverrides, source, sourceLine);
     auto outputChannels = instance->initialize(sampleRate, maxFrames, channels);
     prepareBypassDelay(instance->latencySamples(), channelCount);
     return outputChannels;
@@ -68,29 +73,45 @@ public:
       throw std::runtime_error("VST2: live parameter control is unavailable");
     control->setParameterValue(symbol, value);
   }
+  bool savePersistentPluginState() override {
+    auto *state = dynamic_cast<IPluginStatePersistence *>(instance.get());
+    return state && state->savePersistentPluginState();
+  }
 
 private:
   VST2PluginHost &host;
   std::string modulePath;
   std::vector<PluginParameterValue> parameterOverrides;
+  std::filesystem::path source;
+  unsigned sourceLine{};
   std::unique_ptr<IPluginInstance> instance;
   unsigned channelCount{};
 };
 
 IFilter *allocateVST2Filter(VST2PluginHost &host, std::string modulePath,
-                            std::vector<PluginParameterValue> overrides) {
+                            std::vector<PluginParameterValue> overrides,
+                            const std::filesystem::path &source,
+                            unsigned sourceLine) {
   void *memory = MemoryHelper::alloc(sizeof(VST2PluginFilter));
   try {
     return new (memory)
-        VST2PluginFilter(host, std::move(modulePath), std::move(overrides));
+        VST2PluginFilter(host, std::move(modulePath), std::move(overrides),
+                         source, sourceLine);
   } catch (...) {
     MemoryHelper::free(memory);
     throw;
   }
 }
 
-class VST2FilterFactory final : public IFilterFactory {
+class VST2FilterFactory final : public IFilterFactory,
+                                public IPluginSourceContext {
 public:
+  void setPluginSourceLocation(const std::filesystem::path &path,
+                               unsigned line) override {
+    source = path;
+    sourceLine = line;
+  }
+
   std::vector<IFilter *> createFilter(const std::wstring &configPath,
                                       std::wstring &command,
                                       std::wstring &parameters) override {
@@ -146,7 +167,8 @@ public:
         modulePath = (sourcePath.parent_path() / modulePath).lexically_normal();
       }
       return {
-          allocateVST2Filter(host, modulePath.string(), std::move(overrides))};
+          allocateVST2Filter(host, modulePath.string(), std::move(overrides),
+                             source, sourceLine)};
     }
     if (command != L"Plugin")
       return {};
@@ -189,11 +211,13 @@ public:
       overrides.push_back({symbol, value});
     }
     return {allocateVST2Filter(host, StringHelper::toString(widePath, 65001),
-                               std::move(overrides))};
+                               std::move(overrides), source, sourceLine)};
   }
 
 private:
   VST2PluginHost host;
+  std::filesystem::path source;
+  unsigned sourceLine{};
 };
 } // namespace
 

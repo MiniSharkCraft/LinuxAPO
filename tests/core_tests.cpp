@@ -738,6 +738,10 @@ int main() {
       std::cerr << "VST2 mono config processing mismatch at " << i << '\n';
       return 1;
     }
+  if (vst2Mono.savePersistentPluginStates() != 0) {
+    std::cerr << "VST2 host persisted state for a plugin without chunk support\n";
+    return 1;
+  }
   for (const auto *invalid :
        {"Plugin: VST2 /not/a/plugin.so\n",
         "Plugin: VST2 \"" SKYAPO_TEST_VST2_PATH "\" 1=0.25\n",
@@ -756,6 +760,105 @@ int main() {
       return 1;
     }
   }
+
+  char vst2StateHomeTemplate[] = "/tmp/skyapo-vst2-state-XXXXXX";
+  char *vst2StateHomeRaw = mkdtemp(vst2StateHomeTemplate);
+  if (!vst2StateHomeRaw) {
+    std::cerr << "cannot create isolated VST2 state test directory\n";
+    return 1;
+  }
+  const fs::path vst2StateHome(vst2StateHomeRaw);
+  const char *previousVst2StateHomeValue = std::getenv("XDG_STATE_HOME");
+  const std::string previousVst2StateHome =
+      previousVst2StateHomeValue ? previousVst2StateHomeValue : "";
+  const bool hadPreviousVst2StateHome = previousVst2StateHomeValue != nullptr;
+  if (!setTestPluginPath("XDG_STATE_HOME", vst2StateHome.string().c_str()))
+    return 1;
+  const fs::path vst2StateModule =
+      vst2StateHome / ("vst2-state-fixture-" + std::to_string(getpid()) +
+                       ".so");
+  std::error_code vst2StateCopyError;
+  fs::copy_file(SKYAPO_TEST_VST2_PATH, vst2StateModule,
+                fs::copy_options::none, vst2StateCopyError);
+  if (vst2StateCopyError) {
+    std::cerr << "cannot stage isolated VST2 state fixture: "
+              << vst2StateCopyError.message() << '\n';
+    return 1;
+  }
+  const fs::path vst2StateConfig = vst2StateHome / "state-chain.txt";
+  const fs::path vst2StateDirectory =
+      vst2StateHome / "skyapo" / "vst2-state";
+  const std::string vst2StateDirective =
+      "Plugin: VST2 \"" + vst2StateModule.string() + "\" 0=0.25\n";
+  if (!write(vst2StateConfig, vst2StateDirective))
+    return 1;
+  {
+    Engine stateSource(48000, 2, 128, {L"L", L"R"});
+    stateSource.loadConfig(vst2StateConfig.string());
+    stateSource.setPluginParameter(vst2StateModule.string(), "0", 0.75f);
+    float beforeSave[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    stateSource.process(beforeSave, 4);
+    if (std::abs(beforeSave[0] - 0.75f) > 1e-6f ||
+        stateSource.savePersistentPluginStates() != 1) {
+      std::cerr << "VST2 program chunk state save failed\n";
+      return 1;
+    }
+  }
+  std::vector<fs::path> vst2Sidecars;
+  for (const auto &entry : fs::directory_iterator(vst2StateDirectory))
+    if (entry.is_regular_file() && entry.path().extension() == ".vst2state")
+      vst2Sidecars.push_back(entry.path());
+  if (vst2Sidecars.size() != 1) {
+    std::cerr << "expected exactly one VST2 state sidecar\n";
+    return 1;
+  }
+  struct stat vst2StateDirStatus {};
+  struct stat vst2StateFileStatus {};
+  if (stat(vst2StateDirectory.c_str(), &vst2StateDirStatus) < 0 ||
+      (vst2StateDirStatus.st_mode & 0077) != 0 ||
+      stat(vst2Sidecars.front().c_str(), &vst2StateFileStatus) < 0 ||
+      vst2StateFileStatus.st_uid != geteuid() ||
+      (vst2StateFileStatus.st_mode & 0077) != 0) {
+    std::cerr << "VST2 state sidecar/directory permissions are not private\n";
+    return 1;
+  }
+  {
+    Engine restoredState(48000, 2, 128, {L"L", L"R"});
+    restoredState.loadConfig(vst2StateConfig.string());
+    float afterRestore[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    restoredState.process(afterRestore, 4);
+    if (std::abs(afterRestore[0] - 0.75f) > 1e-6f ||
+        std::abs(afterRestore[7] - 0.75f) > 1e-6f) {
+      std::cerr << "VST2 saved state did not restore over config defaults: "
+                << afterRestore[0] << ", " << afterRestore[7] << '\n';
+      return 1;
+    }
+    if (!write(vst2Sidecars.front(), "corrupt"))
+      return 1;
+    bool rejected = false;
+    try {
+      restoredState.loadConfig(vst2StateConfig.string());
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    float lastGood[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    restoredState.process(lastGood, 4);
+    std::ifstream corruptFile(vst2Sidecars.front(), std::ios::binary);
+    const std::string corruptContents(
+        (std::istreambuf_iterator<char>(corruptFile)),
+        std::istreambuf_iterator<char>());
+    if (!rejected || std::abs(lastGood[0] - 0.75f) > 1e-6f ||
+        std::abs(lastGood[7] - 0.75f) > 1e-6f ||
+        corruptContents != "corrupt") {
+      std::cerr << "corrupt VST2 state changed the active graph or sidecar\n";
+      return 1;
+    }
+  }
+  fs::remove_all(vst2StateHome);
+  if (hadPreviousVst2StateHome)
+    setenv("XDG_STATE_HOME", previousVst2StateHome.c_str(), 1);
+  else
+    unsetenv("XDG_STATE_HOME");
 #endif
 
 #ifdef SKYAPO_TEST_VST3

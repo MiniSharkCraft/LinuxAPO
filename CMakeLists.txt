@@ -574,7 +574,7 @@ if(SKYAPO_ENABLE_FST_VST2_HOST)
   target_include_directories(skyapo-test-vst2-mono-plugin SYSTEM PRIVATE
     "${SKYAPO_FST_INCLUDE}")
   target_compile_definitions(skyapo-test-vst2-mono-plugin PRIVATE
-    SKYAPO_VST2_FIXTURE_MONO=1)
+    SKYAPO_VST2_FIXTURE_MONO=1 SKYAPO_VST2_FIXTURE_NO_CHUNKS=1)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST2=1
     SKYAPO_TEST_VST2_PATH="$<TARGET_FILE:skyapo-test-vst2-plugin>"
     SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>")

@@ -2,16 +2,28 @@
 
 #include "fst.h"
 #include "IPluginParameterControl.h"
+#include "IPluginStatePersistence.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <filesystem>
+#include <fcntl.h>
+#include <iomanip>
+#include <limits>
 #include <memory>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -55,6 +67,224 @@ t_fstPtrInt audioMaster(AEffect *effect, int opcode, int, t_fstPtrInt, void *,
 }
 
 using PluginMain = AEffect *(*)(audioMasterCallback);
+namespace fs = std::filesystem;
+constexpr size_t MaxVST2StateBytes = 16 * 1024 * 1024;
+constexpr std::array<uint8_t, 8> VST2StateMagic{'S', 'K', 'Y', 'V', 'S',
+                                                'T', '2', '1'};
+
+uint64_t stateHash(std::string_view text) {
+  uint64_t hash = 14695981039346656037ull;
+  for (const unsigned char byte : text) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+uint64_t stateChecksum(std::string_view identity,
+                       const std::vector<uint8_t> &payload) {
+  uint64_t hash = stateHash(identity);
+  hash ^= 0xff;
+  hash *= 1099511628211ull;
+  for (const auto byte : payload) {
+    hash ^= byte;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+void appendU32(std::vector<uint8_t> &bytes, uint32_t value) {
+  for (unsigned i = 0; i < 4; ++i)
+    bytes.push_back(static_cast<uint8_t>(value >> (i * 8)));
+}
+void appendU64(std::vector<uint8_t> &bytes, uint64_t value) {
+  for (unsigned i = 0; i < 8; ++i)
+    bytes.push_back(static_cast<uint8_t>(value >> (i * 8)));
+}
+bool takeU32(const std::vector<uint8_t> &bytes, size_t &offset,
+             uint32_t &value) {
+  if (offset > bytes.size() || bytes.size() - offset < 4)
+    return false;
+  value = 0;
+  for (unsigned i = 0; i < 4; ++i)
+    value |= uint32_t(bytes[offset++]) << (i * 8);
+  return true;
+}
+bool takeU64(const std::vector<uint8_t> &bytes, size_t &offset,
+             uint64_t &value) {
+  if (offset > bytes.size() || bytes.size() - offset < 8)
+    return false;
+  value = 0;
+  for (unsigned i = 0; i < 8; ++i)
+    value |= uint64_t(bytes[offset++]) << (i * 8);
+  return true;
+}
+
+fs::path statePathFor(std::string_view identity) {
+  if (identity.size() > 4096)
+    throw std::runtime_error("VST2 state identity exceeds 4096 bytes");
+  fs::path base;
+  if (const char *xdg = std::getenv("XDG_STATE_HOME");
+      xdg && *xdg && fs::path(xdg).is_absolute())
+    base = xdg;
+  else if (const char *home = std::getenv("HOME"); home && *home)
+    base = fs::path(home) / ".local" / "state";
+  else
+    throw std::runtime_error("VST2 state needs XDG_STATE_HOME or HOME");
+  std::ostringstream name;
+  name << std::hex << std::setw(16) << std::setfill('0') << stateHash(identity)
+       << ".vst2state";
+  return base / "skyapo" / "vst2-state" / name.str();
+}
+
+std::vector<uint8_t> encodeState(std::string_view identity,
+                                 const std::vector<uint8_t> &payload) {
+  if (identity.size() > 4096 || payload.empty() ||
+      payload.size() > MaxVST2StateBytes)
+    throw std::runtime_error("VST2 plugin state exceeds the 16 MiB limit");
+  std::vector<uint8_t> bytes;
+  bytes.reserve(VST2StateMagic.size() + 4 + 8 * 3 + identity.size() +
+                payload.size());
+  bytes.insert(bytes.end(), VST2StateMagic.begin(), VST2StateMagic.end());
+  appendU32(bytes, 1);
+  appendU64(bytes, identity.size());
+  appendU64(bytes, payload.size());
+  appendU64(bytes, stateChecksum(identity, payload));
+  bytes.insert(bytes.end(), identity.begin(), identity.end());
+  bytes.insert(bytes.end(), payload.begin(), payload.end());
+  return bytes;
+}
+
+std::vector<uint8_t> decodeState(const std::vector<uint8_t> &bytes,
+                                 std::string_view expectedIdentity) {
+  size_t offset = VST2StateMagic.size();
+  uint32_t version{};
+  uint64_t identitySize{}, payloadSize{}, checksum{};
+  if (bytes.size() < VST2StateMagic.size() ||
+      !std::equal(VST2StateMagic.begin(), VST2StateMagic.end(), bytes.begin()) ||
+      !takeU32(bytes, offset, version) || version != 1 ||
+      !takeU64(bytes, offset, identitySize) || identitySize > 4096 ||
+      !takeU64(bytes, offset, payloadSize) || !payloadSize ||
+      payloadSize > MaxVST2StateBytes || !takeU64(bytes, offset, checksum) ||
+      identitySize > bytes.size() - offset ||
+      payloadSize != bytes.size() - offset - identitySize)
+    throw std::runtime_error("corrupt VST2 state sidecar");
+  const std::string identity(
+      reinterpret_cast<const char *>(bytes.data() + offset),
+      static_cast<size_t>(identitySize));
+  offset += static_cast<size_t>(identitySize);
+  if (identity != expectedIdentity)
+    throw std::runtime_error("VST2 state sidecar identity mismatch");
+  std::vector<uint8_t> payload(bytes.begin() + offset, bytes.end());
+  if (checksum != stateChecksum(identity, payload))
+    throw std::runtime_error("VST2 state sidecar checksum mismatch");
+  return payload;
+}
+
+struct ScopedFd {
+  int fd{-1};
+  explicit ScopedFd(int value) : fd(value) {}
+  ~ScopedFd() {
+    if (fd >= 0)
+      close(fd);
+  }
+  ScopedFd(const ScopedFd &) = delete;
+  ScopedFd &operator=(const ScopedFd &) = delete;
+};
+
+std::optional<std::vector<uint8_t>> readStateFile(const fs::path &path,
+                                                  std::string_view identity) {
+  const int rawFd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (rawFd < 0) {
+    if (errno == ENOENT)
+      return std::nullopt;
+    throw std::runtime_error("cannot open VST2 state sidecar: " +
+                             std::string(std::strerror(errno)));
+  }
+  ScopedFd fd(rawFd);
+  struct stat status {};
+  constexpr size_t HeaderSize = 8 + 4 + 8 * 3;
+  if (fstat(rawFd, &status) < 0 || !S_ISREG(status.st_mode) ||
+      status.st_uid != geteuid() || (status.st_mode & 0077) != 0 ||
+      status.st_size < static_cast<off_t>(HeaderSize) ||
+      static_cast<uint64_t>(status.st_size) > MaxVST2StateBytes + 8192)
+    throw std::runtime_error("invalid or oversized VST2 state sidecar");
+  std::vector<uint8_t> bytes(static_cast<size_t>(status.st_size));
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count = read(rawFd, bytes.data() + offset,
+                               bytes.size() - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::runtime_error("short read from VST2 state sidecar");
+    offset += static_cast<size_t>(count);
+  }
+  uint8_t extra{};
+  ssize_t count;
+  do {
+    count = read(rawFd, &extra, 1);
+  } while (count < 0 && errno == EINTR);
+  if (count != 0)
+    throw std::runtime_error("VST2 state sidecar changed while being read");
+  return decodeState(bytes, identity);
+}
+
+void writeAll(int fd, const uint8_t *bytes, size_t size) {
+  size_t offset = 0;
+  while (offset < size) {
+    const ssize_t count = write(fd, bytes + offset, size - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      throw std::runtime_error("cannot write VST2 state sidecar");
+    offset += static_cast<size_t>(count);
+  }
+}
+
+void atomicWriteState(const fs::path &path, std::string_view identity,
+                      const std::vector<uint8_t> &payload) {
+  const auto bytes = encodeState(identity, payload);
+  const auto directory = path.parent_path();
+  std::error_code error;
+  fs::create_directories(directory, error);
+  if (error || fs::is_symlink(fs::symlink_status(directory, error)) || error)
+    throw std::runtime_error("cannot safely create VST2 state directory");
+  if (chmod(directory.c_str(), 0700) < 0)
+    throw std::runtime_error("cannot secure VST2 state directory");
+  std::string pattern = path.string() + ".tmp-XXXXXX";
+  std::vector<char> temporary(pattern.begin(), pattern.end());
+  temporary.push_back('\0');
+  const int rawFd = mkstemp(temporary.data());
+  if (rawFd < 0)
+    throw std::runtime_error("cannot create VST2 state temporary file");
+  ScopedFd fd(rawFd);
+  bool renamed = false;
+  try {
+    if (fchmod(rawFd, 0600) < 0)
+      throw std::runtime_error("cannot secure VST2 state sidecar");
+    writeAll(rawFd, bytes.data(), bytes.size());
+    if (fsync(rawFd) < 0)
+      throw std::runtime_error("cannot sync VST2 state sidecar");
+    if (close(rawFd) < 0)
+      throw std::runtime_error("cannot close VST2 state sidecar");
+    fd.fd = -1;
+    if (rename(temporary.data(), path.c_str()) < 0)
+      throw std::runtime_error("cannot atomically replace VST2 state sidecar");
+    renamed = true;
+    const int directoryFd =
+        open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directoryFd < 0)
+      throw std::runtime_error("cannot open VST2 state directory for sync");
+    ScopedFd directoryOwner(directoryFd);
+    if (fsync(directoryFd) < 0)
+      throw std::runtime_error("cannot sync VST2 state directory");
+  } catch (...) {
+    if (!renamed)
+      unlink(temporary.data());
+    throw;
+  }
+}
 
 class DynamicModule {
 public:
@@ -104,11 +334,13 @@ std::string parameterName(AEffect *effect, int index) {
 }
 
 class VST2Instance final : public IPluginInstance,
-                           public IPluginParameterControl {
+                           public IPluginParameterControl,
+                           public IPluginStatePersistence {
 public:
   VST2Instance(std::string path, float rate, unsigned maxFrames,
                const std::vector<std::wstring> &channels,
-               const std::vector<PluginParameterValue> &overrides)
+               const std::vector<PluginParameterValue> &overrides,
+               const fs::path &source, unsigned sourceLine)
       : modulePath(std::move(path)), context{rate, maxFrames},
         channelCount(channels.size()), maxFrameCount(maxFrames) {
     if (!std::isfinite(rate) || rate < 8000.0f || rate > 384000.0f ||
@@ -206,6 +438,40 @@ public:
                              overrideValue.value);
         parameterInfos[index].value = overrideValue.value;
       }
+      if (!source.empty() && (effect->flags & effFlagsProgramChunks)) {
+        const fs::path absoluteSource =
+            fs::absolute(source).lexically_normal();
+        const fs::path absoluteModule =
+            fs::absolute(fs::path(modulePath)).lexically_normal();
+        persistentIdentity =
+            absoluteSource.generic_string() + "\n" +
+            std::to_string(sourceLine) + "\n" +
+            absoluteModule.generic_string() + "\n" +
+            std::to_string(effect->uniqueID) + "\n" +
+            std::to_string(effect->version);
+        persistentStatePath = statePathFor(persistentIdentity);
+        if (auto state = readStateFile(*persistentStatePath,
+                                       persistentIdentity)) {
+          // Match Equalizer APO's existing VSTPlugin implementation: index 1
+          // represents the current program chunk. Its saved state supersedes
+          // config-time parameter defaults so live edits survive restarts.
+          (void)effect->dispatcher(effect, effSetChunk, 1,
+                                   static_cast<t_fstPtrInt>(state->size()),
+                                   state->data(), 0.0f);
+          for (size_t index = 0; index < parameterInfos.size(); ++index) {
+            const float value = effect->getParameter
+                                    ? effect->getParameter(
+                                          effect, static_cast<int>(index))
+                                    : parameterInfos[index].value;
+            if (!std::isfinite(value) || value < 0.0f || value > 1.0f)
+              throw std::runtime_error(
+                  "VST2 plugin returned an invalid parameter after state "
+                  "restore: " + modulePath);
+            parameterInfos[index].value = value;
+            pendingValues[index].store(value, std::memory_order_relaxed);
+          }
+        }
+      }
       effect->dispatcher(effect, effMainsChanged, 0, 1, nullptr, 0.0f);
       active = true;
     } catch (...) {
@@ -237,6 +503,66 @@ public:
   }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
+  }
+  bool savePersistentPluginState() override {
+    if (persistentIdentity.empty() || !persistentStatePath || !effect ||
+        !(effect->flags & effFlagsProgramChunks))
+      return false;
+    if (failed.load(std::memory_order_acquire))
+      throw std::runtime_error("cannot persist failed VST2 plugin state: " +
+                               modulePath);
+
+    // The Engine calls this only after audio callback quiescence. Flush the
+    // latest block-boundary parameter mailbox before asking the plugin to
+    // serialize its current program chunk.
+    applyPendingParameters();
+    const bool resume = active;
+    if (resume) {
+      effect->dispatcher(effect, effMainsChanged, 0, 0, nullptr, 0.0f);
+      active = false;
+    }
+    bool resumed = false;
+    try {
+      void *pluginChunk = nullptr;
+      const t_fstPtrInt reportedSize =
+          effect->dispatcher(effect, effGetChunk, 1, 0, &pluginChunk, 0.0f);
+      if (reportedSize < 0)
+        throw std::runtime_error(
+            "VST2 plugin returned a negative program chunk size: " +
+            modulePath);
+      if (reportedSize == 0) {
+        if (resume) {
+          effect->dispatcher(effect, effMainsChanged, 0, 1, nullptr, 0.0f);
+          active = true;
+          resumed = true;
+        }
+        return false;
+      }
+      if (static_cast<uint64_t>(reportedSize) > MaxVST2StateBytes ||
+          !pluginChunk)
+        throw std::runtime_error(
+            "VST2 plugin returned an invalid or oversized program chunk: " +
+            modulePath);
+      const auto *begin = static_cast<const uint8_t *>(pluginChunk);
+      std::vector<uint8_t> state(begin, begin + reportedSize);
+      if (resume) {
+        effect->dispatcher(effect, effMainsChanged, 0, 1, nullptr, 0.0f);
+        active = true;
+        resumed = true;
+      }
+      atomicWriteState(*persistentStatePath, persistentIdentity, state);
+      return true;
+    } catch (...) {
+      if (resume && !resumed) {
+        try {
+          effect->dispatcher(effect, effMainsChanged, 0, 1, nullptr, 0.0f);
+          active = true;
+        } catch (...) {
+          failed.store(true, std::memory_order_release);
+        }
+      }
+      throw;
+    }
   }
   void setParameterValue(const std::string &symbol, float value) override {
     if (!effect || !effect->setParameter || !std::isfinite(value))
@@ -351,6 +677,8 @@ private:
   size_t parameterCount{};
   std::unique_ptr<DynamicModule> module;
   AEffect *effect{};
+  std::string persistentIdentity;
+  std::optional<fs::path> persistentStatePath;
   bool opened = false;
   bool active = false;
   std::atomic<bool> failed{false};
@@ -370,5 +698,15 @@ VST2PluginHost::create(const std::string &modulePath, float sampleRate,
                        const std::vector<std::wstring> &channels,
                        const std::vector<PluginParameterValue> &parameters) {
   return std::make_unique<VST2Instance>(modulePath, sampleRate, maxFrames,
-                                        channels, parameters);
+                                        channels, parameters, fs::path{}, 0);
+}
+
+std::unique_ptr<IPluginInstance> VST2PluginHost::createForConfig(
+    const std::string &modulePath, float sampleRate, unsigned maxFrames,
+    const std::vector<std::wstring> &channels,
+    const std::vector<PluginParameterValue> &parameters,
+    const std::filesystem::path &source, unsigned sourceLine) {
+  return std::make_unique<VST2Instance>(modulePath, sampleRate, maxFrames,
+                                        channels, parameters, source,
+                                        sourceLine);
 }
