@@ -11,7 +11,7 @@ Current target: **0.9.0 daily-use preview**. This root repository tracks the Lin
 - [x] Tested config subset: Preamp, parametric/IIR Filter, Delay, Channel, Copy, Include, conditional expressions, GraphicEQ and Convolution; unsupported active commands fail with location diagnostics. This is not complete Windows EAPO parser parity.
 - [x] Supported plugin subset: fixture-backed LV2, CLAP and single-bus mono/stereo VST3 hosts; tested control, state, bypass, failure reporting and supported reported-latency PDC. Experimental FST/VST2 remains off by default and is not product support.
 - [x] Callback allocator audit, latency/PDC caps, CTest, ASan/UBSan and deterministic PipeWire/plugin E2E pass locally. A rare historical desktop overrun remains visible in live status; counters did not increase during this regression run.
-- [x] Arch PKGBUILD, staged package smoke, user service, CLI/renderer entrypoints, license notices and safe user-level lifecycle are in scope; a final package build from the release commit remains a release gate.
+- [x] Arch PKGBUILD, staged package smoke, user service, CLI/renderer entrypoints, license notices and safe user-level lifecycle are in scope. On 2026-10-01, the package rebuilt from source commit `378a49d` with CTest 34/34; staged payload, offscreen UI, and installed offline WAV `-6 dB` checks passed. This is not a full pacman transaction or clean-root install.
 - [ ] Real physical unplug/replug/client auto-selection, fully dependency-populated clean-root installation and ALPM hook execution, hosted CI evidence, unresolved legal/distribution review, and broad third-party plugin/realtime certification are deferred to 1.0.0 (see below). These are not claimed complete.
 
 ### Deferred to 1.0.0

@@ -5,7 +5,7 @@
 - Set the supported release scope to the locally verified PipeWire/DSP/virtual-mic path, transactional config lifecycle, bounded supported plugin/PDC behavior, and Arch staged-install workflow. This is a preview, not 1.0.0 or production-final.
 - Defer real hardware unplug/replug, clean-root/ALPM-hook and hosted-CI evidence, legal/distribution resolution, complete Windows EAPO parity, arbitrary third-party plugin guarantees/isolation, and total end-to-end latency to the explicit 1.0.0 backlog in `ROADMAP.md`.
 - Add a 10,000-sample ceiling for plugin-reported realtime latency and compensation rings; reject oversized initial values and silence an instance that reports an oversized dynamic value, then rebuild its compensation schedule off-thread. Other unexpected PDC refresh failures remain fail-closed rather than resuming with a potentially stale channel alignment.
-- Verify the full local PipeWire-enabled regression (57/57), ASan/UBSan suite (35/35), callback allocation tests, offline render/config/plugin tests and plugin latency/PDC E2E. An isolated Arch package build from the final 0.9.0 commit remains required before tagging.
+- Verify the full local PipeWire-enabled regression (57/57, including recovery and supported plugin-latency/PDC E2E), ASan/UBSan with LeakSanitizer enabled (35/35), and an Arch package rebuilt from source commit `378a49d` (CTest 34/34, staged payload smoke, offscreen UI, and installed offline WAV `-6 dB` check). A full pacman install/remove transaction and clean-root/ALPM hook validation remain deferred to 1.0.0.
 
 ## Unreleased
 
