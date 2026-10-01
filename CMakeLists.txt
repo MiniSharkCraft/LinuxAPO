@@ -571,15 +571,22 @@ if(SKYAPO_ENABLE_FST_VST2_HOST)
     "${SKYAPO_FST_INCLUDE}")
   add_library(skyapo-test-vst2-mono-plugin SHARED
     tests/plugins/vst2_gain_fixture.c)
+  add_library(skyapo-test-vst2-dynamic-latency-plugin SHARED
+    tests/plugins/vst2_gain_fixture.c)
   target_include_directories(skyapo-test-vst2-mono-plugin SYSTEM PRIVATE
     "${SKYAPO_FST_INCLUDE}")
+  target_include_directories(skyapo-test-vst2-dynamic-latency-plugin SYSTEM PRIVATE
+    "${SKYAPO_FST_INCLUDE}")
+  target_compile_definitions(skyapo-test-vst2-dynamic-latency-plugin PRIVATE
+    SKYAPO_VST2_FIXTURE_DYNAMIC_LATENCY=1)
   target_compile_definitions(skyapo-test-vst2-mono-plugin PRIVATE
     SKYAPO_VST2_FIXTURE_MONO=1 SKYAPO_VST2_FIXTURE_NO_CHUNKS=1)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST2=1
     SKYAPO_TEST_VST2_PATH="$<TARGET_FILE:skyapo-test-vst2-plugin>"
-    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>")
+    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>"
+    SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH="$<TARGET_FILE:skyapo-test-vst2-dynamic-latency-plugin>")
   add_dependencies(skyapo-tests skyapo-test-vst2-plugin
-    skyapo-test-vst2-mono-plugin)
+    skyapo-test-vst2-mono-plugin skyapo-test-vst2-dynamic-latency-plugin)
 endif()
 if(SKYAPO_BUILD_VST2_PROTOTYPE_TESTS)
   set(SKYAPO_FST_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/upstream/fst/fst")
@@ -611,9 +618,10 @@ if(SKYAPO_ENABLE_FST_VST2_HOST)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE
     SKYAPO_TEST_VST2=1
     SKYAPO_TEST_VST2_PATH="$<TARGET_FILE:skyapo-test-vst2-plugin>"
-    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>")
+    SKYAPO_TEST_VST2_MONO_PATH="$<TARGET_FILE:skyapo-test-vst2-mono-plugin>"
+    SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH="$<TARGET_FILE:skyapo-test-vst2-dynamic-latency-plugin>")
   add_dependencies(skyapo-realtime-safety-tests skyapo-test-vst2-plugin
-    skyapo-test-vst2-mono-plugin)
+    skyapo-test-vst2-mono-plugin skyapo-test-vst2-dynamic-latency-plugin)
 endif()
 if(FFTW3F_FOUND)
   target_compile_definitions(skyapo-realtime-safety-tests PRIVATE SKYAPO_TEST_CONVOLUTION=1)
@@ -1140,6 +1148,27 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
       ENVIRONMENT
         "SKYAPO_TEST_VST2_PATH=$<TARGET_FILE:skyapo-test-vst2-plugin>")
+    set(SKYAPO_TEST_VST2_DYNAMIC_LATENCY_CONFIG
+      "${CMAKE_CURRENT_BINARY_DIR}/tests/vst2_dynamic_latency_chain.txt")
+    file(GENERATE OUTPUT "${SKYAPO_TEST_VST2_DYNAMIC_LATENCY_CONFIG}"
+      CONTENT "Preamp: -6 dB\nPlugin: VST2 \"$<TARGET_FILE:skyapo-test-vst2-dynamic-latency-plugin>\"\n")
+    add_test(NAME skyapo-pipewire-e2e-vst2-dynamic-latency
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${SKYAPO_TEST_VST2_DYNAMIC_LATENCY_CONFIG}
+        vst2-latency-change)
+    set_tests_properties(skyapo-pipewire-e2e-vst2-dynamic-latency
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
+      ENVIRONMENT
+        "SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH=$<TARGET_FILE:skyapo-test-vst2-dynamic-latency-plugin>")
   endif()
 endif()
 

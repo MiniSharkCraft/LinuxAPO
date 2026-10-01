@@ -345,6 +345,27 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
+    char dynamicConfig[] = "/tmp/skyapo-vst2-dynamic-rt-XXXXXX";
+    int dynamicFd = mkstemp(dynamicConfig);
+    if (dynamicFd < 0)
+      return 1;
+    close(dynamicFd);
+    {
+      std::ofstream f(dynamicConfig);
+      f << "Plugin: VST2 \"" SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH "\"\n";
+    }
+    Engine dynamicPlugin(48000, 2, 128, {L"L", L"R"});
+    dynamicPlugin.loadConfig(dynamicConfig);
+    std::vector<float> dynamicAudio(128 * 2, 0.1f);
+    {
+      realtime::Scope scope;
+      dynamicPlugin.process(dynamicAudio.data(), 64);
+    }
+    if (!dynamicPlugin.pluginLatencyRefreshPending()) {
+      std::cerr << "VST2 latency-change notification was not raised in RT test\n";
+      return 1;
+    }
+    unlink(dynamicConfig);
     char monoConfig[] = "/tmp/skyapo-vst2-mono-XXXXXX";
     int monoFd = mkstemp(monoConfig);
     if (monoFd < 0)

@@ -4,6 +4,7 @@
 #include "IPluginFailureState.h"
 #include "IPluginParameterControl.h"
 #include "IPluginLatencyState.h"
+#include "IPluginLatencyRefresh.h"
 #include "IPluginSourceContext.h"
 #include "IPluginStatePersistence.h"
 #include "VST2PluginHost.h"
@@ -28,6 +29,7 @@ class VST2PluginFilter final : public IFilter,
                                public IPluginParameterControl,
                                public IPluginFailureState,
                                public IPluginLatencyState,
+                               public IPluginLatencyRefresh,
                                public IPluginStatePersistence {
 public:
   VST2PluginFilter(VST2PluginHost &host, std::string modulePath,
@@ -63,6 +65,21 @@ public:
   }
   uint32_t latencySamples() const noexcept override {
     return instance ? instance->latencySamples() : 0;
+  }
+  bool latencyRefreshPending() const noexcept override {
+    const auto *refresh =
+        dynamic_cast<const IPluginLatencyRefresh *>(instance.get());
+    return refresh && refresh->latencyRefreshPending();
+  }
+  bool refreshPluginLatency() override {
+    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(instance.get());
+    if (!refresh || !refresh->refreshPluginLatency())
+      return false;
+    // Runtime invokes refresh only after the audio graph has quiesced. This
+    // may resize the bypass delay line, which is deliberately never done in
+    // process() or the PipeWire callback.
+    prepareBypassDelay(instance->latencySamples(), channelCount);
+    return true;
   }
   const std::string &pluginIdentifier() const noexcept override {
     return modulePath;

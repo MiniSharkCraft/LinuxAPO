@@ -29,8 +29,13 @@ size callbacks, validates the `AEffect`, and opens/configures/activates it. The
 current process path supports 32-bit float mono/stereo effects with
 `processReplacing`. It implements temporary host-level dry bypass, a latched
 fail-closed state for invalid/oversize requests or caught processing errors,
-reports the initial `AEffect::initialDelay` latency snapshot, and accepts live
-parameter updates by decimal index or unique display name:
+reports `AEffect::initialDelay`, and accepts live parameter updates by decimal
+index or unique display name. It also latches `audioMasterIOChanged` with a
+lock-free flag only; after the PipeWire runtime drains callbacks, the control
+thread validates the unchanged mono/stereo I/O layout and refreshed latency,
+resizes the dry-bypass delay buffer off the realtime thread, and rebuilds the
+PDC plan. Dynamic
+latency is capped at 10,000 samples:
 
 ```sh
 skyapo plugin set /path/to/effect.so 0 0.75
@@ -44,8 +49,8 @@ process-block boundary. Values are temporary and are not persisted to config.
 It does **not** implement VST2 module discovery or `skyapo plugin list/info`
 metadata or legacy inline `ChunkData` config syntax, UI, automation or MIDI
 events, shell plugins, multiple buses, sample-accurate parameter events,
-comprehensive host callbacks, dynamic latency updates, delay compensation, or
-process isolation. The daemon loads modules in-process: native crashes and
+comprehensive host callbacks, total/end-to-end latency reporting, or process
+isolation. The daemon loads modules in-process: native crashes and
 hostile code are not isolated by C++ exception handling. The fixture is
 SkyAPO-authored and does not demonstrate compatibility with arbitrary
 third-party plugins. A yabridge-generated Linux VST2 wrapper would still need
@@ -102,13 +107,18 @@ cmake -S . -B build-vst2 \
   -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-vst2 -j
 ctest --test-dir build-vst2 \
-  -R '^skyapo-pipewire-e2e-vst2-live-parameter$' --output-on-failure
+  -R '^skyapo-pipewire-e2e-vst2-(live-parameter|dynamic-latency)$' \
+  --output-on-failure
 ```
 
 The core fixture tests mono/stereo graph construction, config-time and live
-parameter updates, invalid module/parameter rejection, dry bypass/resume, and
-audio output. The realtime safety test processes variable blocks while
-toggling bypass and live parameters and checks SkyAPO's callback allocation
+parameter updates, invalid module/parameter rejection, dry bypass/resume,
+dynamic 32→64-sample latency refresh, Copy-branch impulse alignment before and
+after PDC rebuild, and dry-bypass delay resizing. A private PipeWire E2E uses a
+separate test source and recording consumer to verify the daemon refreshes to
+64 samples and keeps the processed stream consumable. The realtime safety test
+processes variable blocks while toggling bypass and live parameters and checks
+SkyAPO's callback allocation
 audit. These tests do not load third-party plugins or detect allocations
 internal to arbitrary plugin code. A private PipeWire E2E mode starts a test
 source, SkyAPO and an independent consumer; it changes the fixture gain to

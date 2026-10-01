@@ -168,7 +168,7 @@ def main():
         "latency", "include-reload", "source-replug",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
-        "vst3-latency-change", "clap-latency-change",
+        "vst3-latency-change", "vst2-latency-change", "clap-latency-change",
         "lv2-latency-change", "lv2-pdc-final", "renegotiate",
         "transition-format", "device-filter",
         "device-switch", "delay-pdc"
@@ -180,6 +180,7 @@ def main():
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
             "vst2-live-param|plugin-bypass|vst3-latency-change|"
+            "vst2-latency-change|"
             "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
             "renegotiate|transition-format|"
             "device-filter|device-switch|delay-pdc")
@@ -195,6 +196,7 @@ def main():
     source_replug = mode == "source-replug"
     server_restart = mode == "server-restart"
     vst2_live = mode == "vst2-live-param"
+    vst2_latency_change = mode == "vst2-latency-change"
     vst3_latency_change = mode == "vst3-latency-change"
     clap_latency_change = mode == "clap-latency-change"
     lv2_latency_change = mode == "lv2-latency-change"
@@ -208,7 +210,8 @@ def main():
     device_filter = mode == "device-filter"
     device_switch = mode == "device-switch"
     plugin_chain = (plugin_live or plugin_bypass or latency_plugin or
-                    vst3_latency_change or clap_latency_change)
+                    vst3_latency_change or vst2_latency_change or
+                    clap_latency_change)
     plugin_chain = plugin_chain or lv2_latency_change
     plugin_chain = plugin_chain or lv2_pdc_final
     if mode == "lv2-live-param":
@@ -347,13 +350,17 @@ def main():
             # steady-state PDC assertion is made by the independent consumer
             # below over a multi-second recording.
 
-            if vst3_latency_change or clap_latency_change or lv2_latency_change:
+            if (vst3_latency_change or vst2_latency_change or
+                    clap_latency_change or lv2_latency_change):
                 plugin_format = ("VST3" if vst3_latency_change else
-                                 ("CLAP" if clap_latency_change else "LV2"))
+                                 ("VST2" if vst2_latency_change else
+                                  ("CLAP" if clap_latency_change else "LV2")))
                 notification_name = ("kLatencyChanged" if vst3_latency_change
-                                     else ("host.latency.changed" if
-                                           clap_latency_change else
-                                           "LV2 latency output"))
+                                     else ("audioMasterIOChanged" if
+                                           vst2_latency_change else
+                                           ("host.latency.changed" if
+                                            clap_latency_change else
+                                            "LV2 latency output")))
                 deadline = time.monotonic() + 8
                 latency_status = status
                 while time.monotonic() < deadline:
@@ -655,7 +662,8 @@ def main():
 
             expected_db = (0.0 if (lv2_pdc_final or delay_pdc) else
                            (-12.020599913 if
-                            (latency_plugin or clap_latency_change) else
+                            (latency_plugin or clap_latency_change or
+                             vst2_latency_change) else
                             (-3.0 if transition_format else -6.0)))
             if plugin_live:
                 live_value = "0.75" if (vst2_live or mode == "plugin-live-param") else "0.25"

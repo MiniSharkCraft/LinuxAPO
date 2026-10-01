@@ -761,6 +761,83 @@ int main() {
     }
   }
 
+  if (!write(path, std::string("Plugin: VST2 \"") +
+                       SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH + "\"\n"))
+    return 1;
+  Engine vst2DynamicLatency(48000, 2, 128, {L"L", L"R"});
+  vst2DynamicLatency.loadConfig(path);
+  if (vst2DynamicLatency.pluginLatencySamples() != 32 ||
+      vst2DynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr << "VST2 fixture initial latency was not published as 32 samples\n";
+    return 1;
+  }
+  float vst2LatencyNotifyBlock[128]{};
+  vst2DynamicLatency.process(vst2LatencyNotifyBlock, 64);
+  if (!vst2DynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr << "VST2 audioMasterIOChanged notification was not latched\n";
+    return 1;
+  }
+  if (vst2DynamicLatency.refreshPluginLatencies() != 1 ||
+      vst2DynamicLatency.pluginLatencySamples() != 64 ||
+      vst2DynamicLatency.pluginLatencyRefreshPending()) {
+    std::cerr << "VST2 control-thread latency refresh did not publish 64 samples\n";
+    return 1;
+  }
+  vst2DynamicLatency.setPluginBypass(SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH,
+                                     true);
+  float vst2DynamicBypass[256]{};
+  vst2DynamicBypass[0] = vst2DynamicBypass[1] = 1.0f;
+  vst2DynamicLatency.process(vst2DynamicBypass, 128);
+  for (unsigned frame = 0; frame < 64; ++frame)
+    if (std::abs(vst2DynamicBypass[frame * 2]) > 1e-6f ||
+        std::abs(vst2DynamicBypass[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "VST2 refreshed bypass emitted before 64 samples\n";
+      return 1;
+    }
+  if (std::abs(vst2DynamicBypass[64 * 2] - 1.0f) > 1e-6f ||
+      std::abs(vst2DynamicBypass[64 * 2 + 1] - 1.0f) > 1e-6f) {
+    std::cerr << "VST2 bypass delay did not resize to 64 samples\n";
+    return 1;
+  }
+
+  if (!write(path, std::string("Copy: L2=L R2=R\nPlugin: VST2 \"") +
+                       SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH +
+                       "\" 0=1.0\nCopy: L=0.5*L+0.5*L2 R=0.5*R+0.5*R2\n"))
+    return 1;
+  Engine vst2DynamicPdc(48000, 2, 128, {L"L", L"R"});
+  vst2DynamicPdc.loadConfig(path);
+  float vst2InitialPdcImpulse[192]{};
+  vst2InitialPdcImpulse[0] = vst2InitialPdcImpulse[1] = 1.0f;
+  vst2DynamicPdc.process(vst2InitialPdcImpulse, 96);
+  for (unsigned frame = 0; frame < 32; ++frame)
+    if (std::abs(vst2InitialPdcImpulse[frame * 2]) > 1e-6f ||
+        std::abs(vst2InitialPdcImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "VST2 initial PDC emitted before its 32-sample latency\n";
+      return 1;
+    }
+  if (std::abs(vst2InitialPdcImpulse[32 * 2] - 1.0f) > 1e-6f ||
+      std::abs(vst2InitialPdcImpulse[32 * 2 + 1] - 1.0f) > 1e-6f ||
+      !vst2DynamicPdc.pluginLatencyRefreshPending() ||
+      vst2DynamicPdc.refreshPluginLatencies() != 1 ||
+      vst2DynamicPdc.pluginLatencySamples() != 64) {
+    std::cerr << "VST2 initial PDC/latency-change boundary was incorrect\n";
+    return 1;
+  }
+  float vst2RefreshedPdcImpulse[192]{};
+  vst2RefreshedPdcImpulse[0] = vst2RefreshedPdcImpulse[1] = 1.0f;
+  vst2DynamicPdc.process(vst2RefreshedPdcImpulse, 96);
+  for (unsigned frame = 0; frame < 64; ++frame)
+    if (std::abs(vst2RefreshedPdcImpulse[frame * 2]) > 1e-6f ||
+        std::abs(vst2RefreshedPdcImpulse[frame * 2 + 1]) > 1e-6f) {
+      std::cerr << "VST2 rebuilt PDC emitted before its 64-sample latency\n";
+      return 1;
+    }
+  if (std::abs(vst2RefreshedPdcImpulse[64 * 2] - 1.0f) > 1e-6f ||
+      std::abs(vst2RefreshedPdcImpulse[64 * 2 + 1] - 1.0f) > 1e-6f) {
+    std::cerr << "VST2 rebuilt PDC did not align the Copy fan-in at sample 64\n";
+    return 1;
+  }
+
   char vst2StateHomeTemplate[] = "/tmp/skyapo-vst2-state-XXXXXX";
   char *vst2StateHomeRaw = mkdtemp(vst2StateHomeTemplate);
   if (!vst2StateHomeRaw) {

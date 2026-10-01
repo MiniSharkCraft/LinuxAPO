@@ -2,6 +2,8 @@
 
 #include "fst.h"
 #include "IPluginParameterControl.h"
+#include "IPluginLatencyRefresh.h"
+#include "PluginLatencyLimits.h"
 #include "IPluginStatePersistence.h"
 
 #include <algorithm>
@@ -27,6 +29,17 @@
 #include <vector>
 
 namespace {
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+// FST exposes this VST2 ABI opcode but marks its enum entry as unknown. The
+// host handles it for plugins that use the standard VST2 I/O-change signal.
+constexpr int Vst2AudioMasterIOChangedOpcode = audioMasterIOChanged;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
 static_assert(
     std::atomic<bool>::is_always_lock_free,
     "VST2 prototype failure latch must be lock-free on the audio thread");
@@ -39,6 +52,7 @@ static_assert(std::atomic<uint64_t>::is_always_lock_free &&
 struct HostContext {
   float sampleRate{};
   unsigned blockSize{};
+  std::atomic<bool> *latencyChanged{};
 };
 
 thread_local HostContext *constructingContext = nullptr;
@@ -61,6 +75,13 @@ t_fstPtrInt audioMaster(AEffect *effect, int opcode, int, t_fstPtrInt, void *,
     return context ? static_cast<t_fstPtrInt>(context->sampleRate) : 0;
   case audioMasterGetBlockSize:
     return context ? static_cast<t_fstPtrInt>(context->blockSize) : 0;
+  case Vst2AudioMasterIOChangedOpcode:
+    // VST2 sends this from the audio thread when its I/O/latency properties
+    // change. Only latch a lock-free notification here; inspection and PDC
+    // rebuilding happen after the host has quiesced audio processing.
+    if (context && context->latencyChanged)
+      context->latencyChanged->store(true, std::memory_order_release);
+    return 1;
   default:
     return 0;
   }
@@ -335,7 +356,8 @@ std::string parameterName(AEffect *effect, int index) {
 
 class VST2Instance final : public IPluginInstance,
                            public IPluginParameterControl,
-                           public IPluginStatePersistence {
+                           public IPluginStatePersistence,
+                           public IPluginLatencyRefresh {
 public:
   VST2Instance(std::string path, float rate, unsigned maxFrames,
                const std::vector<std::wstring> &channels,
@@ -343,6 +365,7 @@ public:
                const fs::path &source, unsigned sourceLine)
       : modulePath(std::move(path)), context{rate, maxFrames},
         channelCount(channels.size()), maxFrameCount(maxFrames) {
+    context.latencyChanged = &latencyChanged;
     if (!std::isfinite(rate) || rate < 8000.0f || rate > 384000.0f ||
         maxFrames == 0 || (channelCount != 1 && channelCount != 2))
       throw std::runtime_error("VST2 prototype supports mono/stereo and valid "
@@ -474,6 +497,7 @@ public:
       }
       effect->dispatcher(effect, effMainsChanged, 0, 1, nullptr, 0.0f);
       active = true;
+      publishInitialLatency();
     } catch (...) {
       shutdownEffect();
       throw;
@@ -598,9 +622,28 @@ public:
         uint64_t{1} << (parameterIndex % 64), std::memory_order_release);
   }
   uint32_t latencySamples() const noexcept override {
-    return effect && effect->initialDelay > 0
-               ? static_cast<uint32_t>(effect->initialDelay)
-               : 0;
+    return publishedLatency.load(std::memory_order_acquire);
+  }
+  bool latencyRefreshPending() const noexcept override {
+    return latencyChanged.load(std::memory_order_acquire);
+  }
+  bool refreshPluginLatency() override {
+    if (!latencyChanged.exchange(false, std::memory_order_acq_rel))
+      return false;
+    const int32_t inputs = effect ? effect->numInputs : -1;
+    const int32_t outputs = effect ? effect->numOutputs : -1;
+    const int32_t delay = effect ? effect->initialDelay : -1;
+    if (inputs != static_cast<int32_t>(channelCount) ||
+        outputs != static_cast<int32_t>(channelCount) || delay < 0 ||
+        static_cast<uint32_t>(delay) >
+            skyapo::plugin::MaxRealtimeLatencySamples) {
+      failed.store(true, std::memory_order_release);
+      publishedLatency.store(0, std::memory_order_release);
+      return true;
+    }
+    publishedLatency.store(static_cast<uint32_t>(delay),
+                           std::memory_order_release);
+    return true;
   }
   std::vector<std::wstring>
   initialize(float rate, unsigned maxFrames,
@@ -643,6 +686,16 @@ public:
   }
 
 private:
+  void publishInitialLatency() {
+    const int32_t delay = effect ? effect->initialDelay : -1;
+    if (delay < 0 || static_cast<uint32_t>(delay) >
+                         skyapo::plugin::MaxRealtimeLatencySamples)
+      throw std::runtime_error("VST2: invalid or excessive plugin latency: " +
+                               modulePath);
+    publishedLatency.store(static_cast<uint32_t>(delay),
+                           std::memory_order_release);
+  }
+
   void applyPendingParameters() {
     const size_t maskWords = (parameterCount + 63) / 64;
     for (size_t word = 0; word < maskWords; ++word) {
@@ -682,6 +735,8 @@ private:
   bool opened = false;
   bool active = false;
   std::atomic<bool> failed{false};
+  std::atomic<bool> latencyChanged{false};
+  std::atomic<uint32_t> publishedLatency{0};
   std::vector<PluginParameterInfo> parameterInfos;
   // Values are allocated at construction. The serialized control thread
   // publishes latest-value mailboxes; the audio thread applies changes at a

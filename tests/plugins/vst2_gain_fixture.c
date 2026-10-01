@@ -5,9 +5,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef SKYAPO_VST2_FIXTURE_DYNAMIC_LATENCY
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+static const int fixture_io_changed_opcode = audioMasterIOChanged;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#endif
+
 typedef struct {
   float gain;
   float chunk_gain;
+  audioMasterCallback host;
+  int latency_notified;
+  unsigned delay_cursor;
+  float delay_line[2][128];
 } FixtureState;
 
 static int reported_sample_rate;
@@ -80,9 +95,29 @@ static void process_replacing(AEffect *effect, float **input, float **output,
   int channel;
   int frame;
   FixtureState *state = (FixtureState *)effect->resvd1;
+#ifdef SKYAPO_VST2_FIXTURE_DYNAMIC_LATENCY
+  for (frame = 0; frame < frames; ++frame) {
+    const unsigned delay = (unsigned)effect->initialDelay;
+    const unsigned read_cursor =
+        (state->delay_cursor + 128u - delay) % 128u;
+    for (channel = 0; channel < effect->numOutputs; ++channel) {
+      const float delayed = state->delay_line[channel][read_cursor];
+      state->delay_line[channel][state->delay_cursor] = input[channel][frame];
+      output[channel][frame] = delayed * state->gain;
+    }
+    state->delay_cursor = (state->delay_cursor + 1u) % 128u;
+  }
+  if (!state->latency_notified) {
+    state->latency_notified = 1;
+    effect->initialDelay = 64;
+    if (state->host)
+      (void)state->host(effect, fixture_io_changed_opcode, 0, 0, 0, 0.0f);
+  }
+#else
   for (channel = 0; channel < effect->numOutputs; ++channel)
     for (frame = 0; frame < frames; ++frame)
       output[channel][frame] = input[channel][frame] * state->gain;
+#endif
 }
 
 AEffect *VSTPluginMain(audioMasterCallback callback) {
@@ -94,6 +129,7 @@ AEffect *VSTPluginMain(audioMasterCallback callback) {
     return NULL;
   }
   state->gain = 0.5f;
+  state->host = callback;
   fixture->resvd1 = (t_fstPtrInt)state;
   fixture->magic = kEffectMagic;
   fixture->dispatcher = dispatch;
@@ -107,6 +143,9 @@ AEffect *VSTPluginMain(audioMasterCallback callback) {
   fixture->flags |= effFlagsProgramChunks;
 #endif
   fixture->uniqueID = 0x534b4150;
+#ifdef SKYAPO_VST2_FIXTURE_DYNAMIC_LATENCY
+  fixture->initialDelay = 32;
+#endif
   fixture->version = 1;
   fixture->processReplacing = process_replacing;
   if (callback) {
