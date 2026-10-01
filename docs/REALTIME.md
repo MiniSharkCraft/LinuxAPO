@@ -1,5 +1,18 @@
 # Realtime milestone verification
 
+Fresh real-hardware retest after the unexpected reboot (2026-10-01, PipeWire
+1.6.9): selected `alsa_input.pci-0000_00_1f.3.analog-stereo`, capture node 54;
+the daemon exposed `SkyAPO Virtual Mic` (`skyapo.virtual_mic`, node 93) at F32
+planar, 48000 Hz, stereo FL/FR, quantum 1024. A second PipeWire client recorded
+the physical source and virtual source concurrently for 192000 frames each.
+Measured correlation was 1.0, alignment lag 0 frames, RMS ratio 0.501187 and
+gain −6.000 dB for `Preamp: -6 dB`. Live status reported 0 callback
+allocations/deallocations and 0 overruns (average/max processing time 68.34 /
+162.82 μs). The recorder's raw and processed WAVs remain in the ignored build
+directory as `proof-final-20261001-1630-raw.wav` and
+`proof-final-20261001-1630-processed.wav`; they contain microphone audio. The
+daemon received SIGTERM and removed its virtual source afterward.
+
 Current workstation revalidation on 2026-10-01: the selected physical source
 was `alsa_input.pci-0000_00_1f.3.analog-stereo` (Built-in Audio Analog
 Stereo, PipeWire node 88). SkyAPO created `SkyAPO Virtual Mic`
