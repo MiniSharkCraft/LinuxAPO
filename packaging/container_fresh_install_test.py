@@ -8,6 +8,7 @@ system-wide systemd checks.
 """
 
 import argparse
+import fnmatch
 import os
 import pathlib
 import shutil
@@ -54,6 +55,37 @@ def package_man_page_paths(root, page, package_paths):
         for path in package_paths
         if path.name == page or path.name.startswith(f"{page}.")
     ]
+
+
+def pacman_noextracts_man_page(page, rules):
+    """Honor an explicit Pacman NoExtract policy for package documentation."""
+    target = f"usr/share/man/man1/{page}"
+    excluded = False
+    for raw_rule in rules:
+        rule = raw_rule.strip().strip('"').lstrip("/")
+        if not rule:
+            continue
+        negated = rule.startswith("!")
+        if negated:
+            rule = rule[1:]
+        # Pacman permits brace alternatives such as {doc,info,man}.
+        alternatives = [rule]
+        while any("{" in item and "}" in item for item in alternatives):
+            expanded = []
+            for item in alternatives:
+                start = item.find("{")
+                end = item.find("}", start + 1)
+                if start < 0 or end < 0:
+                    expanded.append(item)
+                    continue
+                expanded.extend(
+                    item[:start] + choice + item[end + 1 :]
+                    for choice in item[start + 1 : end].split(",")
+                )
+            alternatives = expanded
+        if any(fnmatch.fnmatchcase(target, item) for item in alternatives):
+            excluded = not negated
+    return excluded
 
 
 def run(command, env=None, expected=0):
@@ -119,6 +151,16 @@ def validate_payload(
         else:
             candidates = package_man_page_paths(root, page, package_paths)
         if not any(path.is_file() for path in candidates):
+            if package_paths is not None:
+                pacman_conf = shutil.which("pacman-conf")
+                if pacman_conf:
+                    noextract = run([pacman_conf, "NoExtract"], env).stdout.splitlines()
+                    if pacman_noextracts_man_page(page, noextract):
+                        print(
+                            "Pacman NoExtract excludes installed man page "
+                            f"{page}; package archive smoke checked its payload."
+                        )
+                        continue
             found = ", ".join(
                 f"{path} (exists={path.exists()})" for path in candidates
             ) or "none in package file list"
