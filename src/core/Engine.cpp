@@ -24,6 +24,7 @@
 #ifdef SKYAPO_HAVE_CONVOLUTION
 #include "ConvolutionFilter.h"
 #include "ConvolutionFilterFactory.h"
+#include "ConvolutionMemoryEstimator.h"
 #include "GraphicEQFilter.h"
 #include "GraphicEQFilterFactory.h"
 #endif
@@ -75,6 +76,33 @@ namespace {
 // otherwise create thousands of rings and exhaust memory while loading or
 // refreshing a graph.
 constexpr uint64_t MaxPdcRingSamples = 4ULL * 1024ULL * 1024ULL;
+// Two FilterConfiguration work planes dominate known per-lane audio memory.
+// Keep a separate cap because these are block scratch buffers, not delay rings.
+constexpr uint64_t MaxFilterConfigurationScratchBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr uint64_t MaxConvolutionMemoryBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr unsigned MaxEngineChannelLanes = 256;
+constexpr unsigned MaxEngineFrameCount = 65536;
+
+uint64_t filterConfigurationScratchBytes(unsigned channelLanes,
+                                         unsigned frameCount) {
+  constexpr uint64_t bytesPerLaneFrame = 2ULL * sizeof(float);
+  if (channelLanes > MaxEngineChannelLanes ||
+      frameCount > MaxEngineFrameCount ||
+      (frameCount && channelLanes >
+                         std::numeric_limits<uint64_t>::max() /
+                             (static_cast<uint64_t>(frameCount) *
+                              bytesPerLaneFrame)))
+    throw std::runtime_error(
+        "FilterConfiguration scratch dimensions exceed SkyAPO's supported "
+        "audio-buffer limits");
+  const uint64_t bytes = static_cast<uint64_t>(channelLanes) * frameCount *
+                         bytesPerLaneFrame;
+  if (bytes > MaxFilterConfigurationScratchBytes)
+    throw std::runtime_error(
+        "FilterConfiguration scratch exceeds SkyAPO's 64 MiB per-graph "
+        "scratch-buffer budget");
+  return bytes;
+}
 
 void accountDelayLine(uint64_t &usedSamples, uint64_t delaySamples,
                       size_t channelCount) {
@@ -91,7 +119,7 @@ void accountPdcRing(uint64_t &usedSamples, uint64_t ringSamples) {
   if (usedSamples > MaxPdcRingSamples ||
       ringSamples > MaxPdcRingSamples - usedSamples)
     throw std::runtime_error(
-        "PDC compensation and EAPO Delay exceed SkyAPO's shared 16 MiB "
+        "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
         "per-graph realtime ring-buffer budget");
   usedSamples += ringSamples;
 }
@@ -132,8 +160,7 @@ public:
     return names;
   }
   void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated,
-                 uint64_t &pdcRingSamples) {
+                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     uint64_t latest = 0;
     for (const unsigned channel : channels_)
       if (channel < arrival.size())
@@ -152,6 +179,12 @@ public:
       updated[channel] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+  }
+  uint64_t ringCapacitySamples() const noexcept {
+    uint64_t samples = 0;
+    for (const auto &ring : rings_)
+      samples += ring.capacity();
+    return samples;
   }
   void process(float **output, float **input, unsigned frames) override {
     for (unsigned channel = 0; channel < delays_.size(); ++channel) {
@@ -176,8 +209,12 @@ private:
   void setDelay(unsigned channel, uint32_t delay) {
     if (delays_[channel] == delay)
       return;
+    // Latency refresh runs on the control thread while callbacks are quiesced.
+    // Replace rather than assign so shrinking compensation releases the old
+    // allocation instead of retaining an unbudgeted historical capacity.
+    std::vector<float> replacement(delay, 0.0f);
+    rings_[channel].swap(replacement);
     delays_[channel] = delay;
-    rings_[channel].assign(delay, 0.0f);
     cursors_[channel] = 0;
   }
 
@@ -224,8 +261,7 @@ public:
   }
 
   void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated,
-                 uint64_t &pdcRingSamples) {
+                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     // Validate all fan-in delay lengths before changing any ring in this
     // filter. A rejected graph/latency update must not leave half the fan-in
     // scheduled with its previous compensation.
@@ -260,14 +296,25 @@ public:
           delay = static_cast<uint32_t>(difference);
         }
         if (term.delay != delay) {
+          // This is control-thread graph maintenance, not the audio callback.
+          // Swap drops stale capacity when dynamic latency decreases.
+          std::vector<float> replacement(delay, 0.0f);
+          term.ring.swap(replacement);
           term.delay = delay;
-          term.ring.assign(delay, 0.0f);
           term.cursor = 0;
         }
       }
       updated[target.output] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+  }
+
+  uint64_t ringCapacitySamples() const noexcept {
+    uint64_t samples = 0;
+    for (const auto &target : targets_)
+      for (const auto &term : target.terms)
+        samples += term.ring.capacity();
+    return samples;
   }
 
   void process(float **output, float **input, unsigned frames) override {
@@ -443,6 +490,7 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
+  (void)filterConfigurationScratchBytes(channels, maxFrames);
   if (!names.empty() && names.size() != channels)
     throw std::runtime_error("channel names/count mismatch");
   channelNames = std::move(names);
@@ -486,12 +534,40 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
 #endif
 }
 
+Engine::KnownAudioBufferPayload Engine::knownAudioBufferPayload() const
+    noexcept {
+  KnownAudioBufferPayload payload;
+  payload.filterConfigurationScratchBytes =
+      static_cast<uint64_t>(allChannelCount) * maxFrameCount * 2U * sizeof(float);
+  uint64_t delaySamples = 0;
+  uint64_t pdcCapacitySamples = 0;
+  uint64_t pluginBypassCapacitySamples = 0;
+  for (const auto &node : graph) {
+    delaySamples += node.fixedBufferSamples;
+    if (const auto *bypass =
+            dynamic_cast<const IPluginBypassControl *>(node.filter))
+      pluginBypassCapacitySamples += bypass->bypassRingCapacitySamples();
+    if (const auto *alignment =
+            dynamic_cast<const PdcAlignmentFilter *>(node.filter))
+      pdcCapacitySamples += alignment->ringCapacitySamples();
+    else if (const auto *copy =
+                 dynamic_cast<const PdcCopyFilter *>(node.filter))
+      pdcCapacitySamples += copy->ringCapacitySamples();
+  }
+  payload.eapoDelayRingBytes = delaySamples * sizeof(float);
+  payload.pdcRingCapacityBytes = pdcCapacitySamples * sizeof(float);
+  payload.pluginBypassRingCapacityBytes =
+      pluginBypassCapacitySamples * sizeof(float);
+  return payload;
+}
+
 void Engine::loadConfig(const std::string &path) {
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
   std::vector<std::filesystem::path> configFiles;
   std::vector<std::filesystem::path> attemptedFiles;
   std::vector<IncludeSite> includeChain;
+  std::vector<ConfigNotice> notices;
   bool stageActive = true;
 #ifdef SKYAPO_HAVE_MUPARSERX
   mup::ParserX expressionParser(mup::pckALL_NON_COMPLEX);
@@ -547,7 +623,7 @@ void Engine::loadConfig(const std::string &path) {
   try {
     parseConfigFile(std::filesystem::path(path), candidate, includeStack,
                     configFiles, attemptedFiles, includeChain, stageActive,
-                    expressionParserPtr);
+                    expressionParserPtr, notices);
   } catch (const ConfigError &) {
     throw;
   } catch (const std::exception &error) {
@@ -585,13 +661,14 @@ void Engine::loadConfig(const std::string &path) {
 
   std::vector<FilterInfo *> infos;
   infos.reserve(newGraph.size());
-  unsigned allChannelCount = static_cast<unsigned>(channelNames.size());
+    unsigned allChannelCount = static_cast<unsigned>(channelNames.size());
   for (const auto &node : newGraph) {
     for (const unsigned channel : node.inputs)
       allChannelCount = std::max(allChannelCount, channel + 1);
     for (const unsigned channel : node.outputs)
       allChannelCount = std::max(allChannelCount, channel + 1);
   }
+  (void)filterConfigurationScratchBytes(allChannelCount, maxFrameCount);
   rebuildPdcPlan(newGraph, allChannelCount);
   auto freeInfos = [&infos] {
     for (auto *info : infos) {
@@ -657,6 +734,7 @@ void Engine::loadConfig(const std::string &path) {
   configuration.swap(newConfiguration);
   descriptions.swap(newDescriptions);
   loadedConfigFiles.swap(configFiles);
+  loadedConfigNotices.swap(notices);
   fixedBlock = newFixedBlock;
 }
 
@@ -668,6 +746,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
   std::vector<FilterNode> result;
   result.reserve(candidate.size());
   uint64_t delayBufferSamples = 0;
+  uint64_t baseRingSamples = 0;
+  uint64_t convolutionMemoryBytes = 0;
 
   for (auto &parsed : candidate) {
     IFilter *filter = parsed.filter.get();
@@ -736,6 +816,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
           static_cast<uint64_t>(std::floor(exactSamples + 0.5));
       try {
         accountDelayLine(delayBufferSamples, roundedSamples, inputNames.size());
+        accountPdcRing(baseRingSamples,
+                       roundedSamples * inputNames.size());
       } catch (const std::exception &error) {
         throw std::runtime_error(location + error.what());
       }
@@ -769,6 +851,22 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
                                std::to_string(parsed.line) +
                                ": upstream libHybridConv requires a block "
                                "size divisible by four samples");
+    if (const auto *estimator =
+            dynamic_cast<const ConvolutionMemoryEstimator *>(filter)) {
+      try {
+        const uint64_t required = estimator->estimatedMemoryBytes(
+            static_cast<float>(rate), maxFrameCount,
+            static_cast<unsigned>(inputNames.size()));
+        if (convolutionMemoryBytes > MaxConvolutionMemoryBytes ||
+            required > MaxConvolutionMemoryBytes - convolutionMemoryBytes)
+          throw std::runtime_error(
+              "convolution IR and upstream FFT state exceed SkyAPO's 64 MiB "
+              "per-graph convolution-memory budget");
+        convolutionMemoryBytes += required;
+      } catch (const std::exception &error) {
+        throw std::runtime_error(location + error.what());
+      }
+    }
     if (auto *graphic = dynamic_cast<GraphicEQFilter *>(filter)) {
       if (graphic->getNodes().empty())
         throw std::runtime_error(parsed.source.string() + ":" +
@@ -790,6 +888,16 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     } catch (const std::exception &e) {
       throw std::runtime_error(parsed.source.string() + ":" +
                                std::to_string(parsed.line) + ": " + e.what());
+    }
+    uint64_t pluginBypassBufferSamples = 0;
+    if (const auto *bypass =
+            dynamic_cast<const IPluginBypassControl *>(filter)) {
+      pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+      try {
+        accountPdcRing(baseRingSamples, pluginBypassBufferSamples);
+      } catch (const std::exception &error) {
+        throw std::runtime_error(location + error.what());
+      }
     }
     if (outputNames.empty())
       throw std::runtime_error(parsed.source.string() + ":" +
@@ -840,6 +948,10 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     for (const auto &name : outputNames) {
       auto it = std::find(allNames.begin(), allNames.end(), name);
       if (it == allNames.end()) {
+        if (allNames.size() >= MaxEngineChannelLanes)
+          throw std::runtime_error(
+              location + "Copy/channel processing exceeds SkyAPO's 256-lane "
+                         "limit");
         node.outputs.push_back(static_cast<unsigned>(allNames.size()));
         allNames.push_back(name);
       } else {
@@ -849,6 +961,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     node.filter = filter;
     node.fixedLatencySamples = fixedLatencySamples;
     node.fixedBufferSamples = fixedBufferSamples;
+    node.pluginBypassBufferSamples = pluginBypassBufferSamples;
     node.description = parsed.directive + " — " + parsed.source.string() + ":" +
                        std::to_string(parsed.line);
     result.push_back(std::move(node));
@@ -894,6 +1007,12 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
           "EAPO Delay buffers exceed SkyAPO's shared 16 MiB per-graph "
           "realtime ring-buffer budget");
     pdcRingSamples += node.fixedBufferSamples;
+    if (node.pluginBypassBufferSamples >
+        MaxPdcRingSamples - pdcRingSamples)
+      throw std::runtime_error(
+          "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
+          "per-graph realtime ring-buffer budget");
+    pdcRingSamples += node.pluginBypassBufferSamples;
   }
   for (auto &node : nodes) {
     if (node.pdcAlignment) {
@@ -950,8 +1069,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              std::vector<std::filesystem::path> &configFiles,
                              std::vector<std::filesystem::path> &attemptedFiles,
                              std::vector<IncludeSite> &includeChain,
-                             bool &stageActive,
-                             mup::ParserX *expressionParser) {
+                             bool &stageActive, mup::ParserX *expressionParser,
+                             std::vector<ConfigNotice> &notices) {
   const auto normalizedPath =
       skyapo::platform::ConfigSource::canonicalize(configPath);
   if (std::find(attemptedFiles.begin(), attemptedFiles.end(), normalizedPath) ==
@@ -1164,11 +1283,14 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       std::wstring stage;
       bool foundCapture = false;
       bool foundAny = false;
+      bool foundUnsupportedLinuxStage = false;
       while (stages >> stage) {
         foundAny = true;
         if (stage == L"capture")
           foundCapture = true;
-        else if (stage != L"pre-mix" && stage != L"post-mix")
+        else if (stage == L"pre-mix" || stage == L"post-mix")
+          foundUnsupportedLinuxStage = true;
+        else
           throw std::runtime_error(normalizedPath.string() + ":" +
                                    std::to_string(lineNo) +
                                    ": unsupported Stage value '" +
@@ -1178,6 +1300,11 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
         throw std::runtime_error(
             normalizedPath.string() + ":" + std::to_string(lineNo) +
             ": Stage requires capture, pre-mix, or post-mix");
+      if (foundUnsupportedLinuxStage)
+        notices.push_back(
+            {normalizedPath, lineNo,
+             "pre-mix/post-mix processing is unavailable in the PipeWire "
+             "capture graph; filters in those stages are ignored"});
       stageActive = foundCapture;
       continue;
     }
@@ -1219,7 +1346,7 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       // parser-owned source ancestry. Successful recursion unwinds this site.
       parseConfigFile(included, candidate, includeStack, configFiles,
                       attemptedFiles, includeChain, includedStage,
-                      expressionParser);
+                      expressionParser, notices);
       includeChain.pop_back();
       continue;
     }
@@ -1376,10 +1503,33 @@ bool Engine::pluginLatencyRefreshPending() const noexcept {
 
 unsigned Engine::refreshPluginLatencies() {
   unsigned refreshed = 0;
-  for (const auto &node : graph) {
+  uint64_t updatedBypassSamples = 0;
+  uint64_t fixedDelaySamples = 0;
+  for (auto &node : graph) {
+    fixedDelaySamples += node.fixedBufferSamples;
     auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
-    if (refresh && refresh->refreshPluginLatency())
+    if (refresh && refresh->refreshPluginLatency()) {
       ++refreshed;
+      auto *bypass = dynamic_cast<IPluginBypassControl *>(node.filter);
+      if (!bypass)
+        throw std::runtime_error(
+            "latency-changing plugin has no host bypass-ring accounting");
+      node.pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+      if (fixedDelaySamples > MaxPdcRingSamples ||
+          updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
+          node.pluginBypassBufferSamples >
+              MaxPdcRingSamples - fixedDelaySamples -
+                  updatedBypassSamples)
+        throw std::runtime_error(
+            "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
+            "per-graph realtime ring-buffer budget after latency refresh");
+    }
+    updatedBypassSamples += node.pluginBypassBufferSamples;
+    if (fixedDelaySamples > MaxPdcRingSamples ||
+        updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples)
+      throw std::runtime_error(
+          "plugin bypass and EAPO Delay exceed SkyAPO's shared 16 MiB "
+          "per-graph realtime ring-buffer budget after latency refresh");
   }
   if (refreshed)
     rebuildPdcPlan(graph, allChannelCount);

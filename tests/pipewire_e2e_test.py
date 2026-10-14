@@ -262,12 +262,22 @@ def make_rate_config(base_config, destination, sample_rate):
     return destination
 
 
-def start_test_source(source, mono, env, source_log, name=None, serial=None):
-    args = [str(source)] + (["--mono"] if mono else [])
+def start_test_source(source, mono, env, source_log, name=None, serial=None,
+                      surround51=False, surround71=False,
+                      latency_probe=False):
+    args = [str(source)]
+    if mono:
+        args.append("--mono")
+    elif surround51:
+        args.append("--surround51")
+    elif surround71:
+        args.append("--surround71")
     if name is not None:
         args += ["--name", name]
     if serial is not None:
         args += ["--serial", serial]
+    if latency_probe:
+        args.append("--latency-probe")
     return subprocess.Popen(
         args, env=env,
         stdout=source_log, stderr=subprocess.STDOUT)
@@ -275,7 +285,7 @@ def start_test_source(source, mono, env, source_log, name=None, serial=None):
 
 def main():
     if len(sys.argv) != 11 or sys.argv[10] not in (
-        "mono", "stereo", "mono-44100", "stereo-44100",
+        "mono", "stereo", "surround51", "surround71", "mono-44100", "stereo-44100",
         "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
         "latency", "include-reload", "source-replug",
         "source-replug-stable-id",
@@ -284,13 +294,13 @@ def main():
         "vst3-bypass", "lv2-bypass",
         "vst3-latency-change", "vst2-latency-change", "clap-latency-change",
         "lv2-latency-change", "lv2-pdc-final", "renegotiate",
-        "transition-format", "device-filter", "systemd-crash-restart",
-        "device-switch", "delay-pdc"
+        "transition-format", "device-filter", "stage-warning", "systemd-crash-restart",
+        "device-switch", "delay-pdc", "source-consumer-latency"
     ):
         raise RuntimeError(
             "usage: pipewire_e2e_test.py PIPEWIRE PW_CLI PW_DUMP DAEMON CLI "
             "SOURCE CONSUMER PIPEWIRE_CONFIG DSP_CONFIG "
-            "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
+            "mono|stereo|surround51|surround71|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
             "source-replug-stable-id|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
@@ -298,10 +308,13 @@ def main():
             "vst2-latency-change|"
             "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
             "renegotiate|transition-format|systemd-crash-restart|"
-            "device-filter|device-switch|delay-pdc")
+            "device-filter|stage-warning|device-switch|delay-pdc|"
+            "source-consumer-latency")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
     mode = sys.argv[10]
+    surround51 = mode == "surround51"
+    surround71 = mode == "surround71"
     rate_case = re.fullmatch(r"(mono|stereo)-(44100|48000|96000)", mode)
     mono = mode == "mono" or (rate_case is not None and
                                rate_case.group(1) == "mono")
@@ -324,8 +337,10 @@ def main():
     renegotiate = mode == "renegotiate"
     transition_format = mode == "transition-format"
     device_filter = mode == "device-filter"
+    stage_warning = mode == "stage-warning"
     device_switch = mode == "device-switch"
     systemd_crash_restart = mode == "systemd-crash-restart"
+    latency_probe = mode == "source-consumer-latency"
     plugin_chain = (plugin_live or plugin_bypass or latency_plugin or
                     vst3_latency_change or vst2_latency_change or
                     clap_latency_change)
@@ -348,8 +363,15 @@ def main():
         live_parameter = "Gain"
     else:
         live_plugin_id, live_parameter = "org.skyapo.test.gain", "Gain"
-    device_name = "skyapo.test.mono" if mono else "skyapo.test.input"
-    channel_count = 1 if mono else 2
+    device_name = (
+        "skyapo.test.mono" if mono else
+        "skyapo.test.surround51" if surround51 else
+        "skyapo.test.surround71" if surround71 else "skyapo.test.input")
+    channel_count = 1 if mono else 6 if surround51 else 8 if surround71 else 2
+    channel_positions = (
+        "MONO" if mono else
+        "FL FR FC LFE RL RR" if surround51 else
+        "FL FR FC LFE RL RR SL SR" if surround71 else "FL FR")
     with tempfile.TemporaryDirectory(prefix="skyapo-pipewire-e2e-") as temp:
         root = pathlib.Path(temp)
         runtime = root / "runtime"
@@ -391,6 +413,12 @@ def main():
                 "Preamp: -6 dB\n"
                 "EndIf:\nEndIf:\nEndIf:\n")
             dsp_config = device_config
+        if stage_warning:
+            staged_config = root / "stage-warning.txt"
+            staged_config.write_text(
+                "Stage: post-mix\nPreamp: 48 dB\n"
+                "Stage: capture\nPreamp: -6 dB\n")
+            dsp_config = staged_config
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
@@ -410,7 +438,9 @@ def main():
 
             source_process = start_test_source(
                 source, mono, env, source_log,
-                serial="SKYAPO-TEST-SERIAL-42" if stable_id_replug else None)
+                serial="SKYAPO-TEST-SERIAL-42" if stable_id_replug else None,
+                surround51=surround51, surround71=surround71,
+                latency_probe=latency_probe)
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 if source_process.poll() is not None:
@@ -468,7 +498,9 @@ def main():
                 status = result.stdout
                 if (result.returncode == 0 and "Daemon: streaming" in status and
                         "SkyAPO Virtual Mic" in status and
-                        f"Sample rate: {sample_rate} Hz" in status):
+                        f"Sample rate: {sample_rate} Hz" in status and
+                        (plugin_chain or delay_pdc or
+                         "DSP amplitude ratio: 0.501187" in status)):
                     break
                 time.sleep(0.1)
             else:
@@ -477,7 +509,6 @@ def main():
                                 (1 if vst2_live else
                                 (3 if lv2_pdc_final else
                                  (2 if plugin_chain else 1))))
-            channel_positions = "MONO" if mono else "FL FR"
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
                 f"Channel positions: {channel_positions}",
@@ -486,6 +517,10 @@ def main():
                 "Quantum: 1024",
                 "Callback allocations: 0", "Callback deallocations: 0",
                 "Default render endpoint: unavailable"]
+            if stage_warning:
+                expected_status.append(
+                    "Config warnings:\n  " + str(dsp_config) + ":1: "
+                    "pre-mix/post-mix processing is unavailable")
             if latency_plugin:
                 expected_status.append(
                     "Plugin-reported latency sum: 64 samples "
@@ -1051,8 +1086,16 @@ def main():
                       "created missing Include recovery also passed.")
                 expected_db = -4.0
 
-            consumer_args = [str(consumer)] + (["--mono"] if mono else [])
+            consumer_args = [str(consumer)]
+            if mono:
+                consumer_args.append("--mono")
+            elif surround51:
+                consumer_args.append("--surround51")
+            elif surround71:
+                consumer_args.append("--surround71")
             consumer_args += ["--expected-rate", str(sample_rate)]
+            if latency_probe:
+                consumer_args += ["--accept-any-audio", "--measure-source-lag"]
             if lv2_pdc_final or delay_pdc:
                 consumer_args += ["--expect-identical-channels"]
             if plugin_chain:
@@ -1119,11 +1162,28 @@ def main():
                     f"{captured.stdout}")
             match = re.search(r"RMS ratio to expected: ([0-9.]+)",
                               captured.stdout)
-            if not match or abs(float(match.group(1)) - 1.0) >= 0.03:
+            if (not latency_probe and
+                    (not match or abs(float(match.group(1)) - 1.0) >= 0.03)):
                 raise RuntimeError(
                     f"capture output did not report expected "
                     f"{expected_db:g} dB:\n"
                     f"{captured.stdout}")
+            if latency_probe:
+                latency_match = re.search(
+                    r"Source callback to virtual-consumer callback latency: "
+                    r"median (\d+) us, p95 (\d+) us, n=(\d+) at (\d+) Hz",
+                    captured.stdout)
+                if (not latency_match or int(latency_match.group(3)) < 4 or
+                        int(latency_match.group(4)) != sample_rate):
+                    raise RuntimeError(
+                        "source/consumer timestamp latency measurement "
+                        f"failed:\n{captured.stdout}")
+                print("Private PipeWire source callback → virtual-consumer "
+                      "callback processing delay: median "
+                      f"{latency_match.group(1)} µs, p95 "
+                      f"{latency_match.group(2)} µs over "
+                      f"{latency_match.group(3)} impulses. This excludes "
+                      "physical ADC/device and application latency.")
             if lv2_pdc_final:
                 channel_match = re.search(
                     r"Inter-channel difference ratio: ([0-9.]+)",

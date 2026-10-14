@@ -1,16 +1,21 @@
 #include "DeviceManager.h"
+#include "DefaultSinkVolumeMonitor.h"
 #include "NodeIdParser.h"
 #include "helpers/StringHelper.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <pipewire/extensions/metadata.h>
 #include <pipewire/keys.h>
 #include <pipewire/node.h>
 #include <pipewire/pipewire.h>
 #include <stdexcept>
 #include <utility>
 namespace {
+constexpr const char *DefaultMetadataName = "default";
+constexpr const char *DefaultSourceKey = "default.audio.source";
+
 std::string prop(const spa_dict *p, const char *k) {
   auto *v = spa_dict_lookup(p, k);
   return v ? v : "";
@@ -24,10 +29,33 @@ struct State {
     State *state{};
   };
   pw_registry *registry{};
+  pw_metadata *metadata{};
+  uint32_t metadataId{SPA_ID_INVALID};
+  std::string defaultSourceName;
+  bool defaultSourceMetadataSeen = false;
   std::vector<std::unique_ptr<NodeBinding>> nodeBindings;
+  spa_hook metadataHook{};
   int done = -1;
   bool error = false;
 };
+int defaultSourceMetadataProperty(void *metadataData, uint32_t subject,
+                                  const char *key, const char *,
+                                  const char *value) {
+  auto &state = *static_cast<State *>(metadataData);
+  if (subject != 0 || !key || std::strcmp(key, DefaultSourceKey) != 0)
+    return 0;
+  state.defaultSourceMetadataSeen = true;
+  std::string name;
+  if (skyapo::pipewire::DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
+          value, name))
+    state.defaultSourceName = std::move(name);
+  else
+    state.defaultSourceName.clear();
+  return 0;
+}
+const pw_metadata_events metadataEvents = {PW_VERSION_METADATA_EVENTS,
+                                           &defaultSourceMetadataProperty};
+
 void nodeInfo(void *data, const pw_node_info *info) {
   if (!info || !info->props)
     return;
@@ -59,6 +87,17 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
   if (!props)
     return;
   auto &s = *static_cast<State *>(data);
+  if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0 &&
+      prop(props, PW_KEY_METADATA_NAME) == DefaultMetadataName && !s.metadata) {
+    s.metadata = static_cast<pw_metadata *>(pw_registry_bind(
+        s.registry, id, PW_TYPE_INTERFACE_Metadata, PW_VERSION_METADATA, 0));
+    if (s.metadata) {
+      s.metadataId = id;
+      pw_metadata_add_listener(s.metadata, &s.metadataHook, &metadataEvents,
+                               &s);
+    }
+    return;
+  }
   if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
       prop(props, PW_KEY_MEDIA_CLASS) == "Audio/Source") {
     AudioDevice device{id, prop(props, PW_KEY_NODE_NAME),
@@ -104,6 +143,19 @@ void done(void *d, uint32_t id, int seq) {
   if (id == PW_ID_CORE)
     static_cast<State *>(d)->done = seq;
 }
+void removed(void *data, uint32_t id) {
+  auto &state = *static_cast<State *>(data);
+  if (id == state.metadataId) {
+    if (state.metadata) {
+      spa_hook_remove(&state.metadataHook);
+      pw_proxy_destroy(reinterpret_cast<pw_proxy *>(state.metadata));
+      state.metadata = nullptr;
+    }
+    state.metadataId = SPA_ID_INVALID;
+    state.defaultSourceName.clear();
+    state.defaultSourceMetadataSeen = false;
+  }
+}
 void error(void *d, uint32_t, int, int, const char *) {
   static_cast<State *>(d)->error = true;
 }
@@ -127,6 +179,7 @@ Devices enumerateDevices() {
   pw_registry_events re{};
   re.version = PW_VERSION_REGISTRY_EVENTS;
   re.global = global;
+  re.global_remove = removed;
   spa_hook ch{}, rh{};
   pw_core_add_listener(core, &ch, &ce, &s);
   auto *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
@@ -153,6 +206,10 @@ Devices enumerateDevices() {
     spa_hook_remove(&binding->hook);
     pw_proxy_destroy(reinterpret_cast<pw_proxy *>(binding->node));
   }
+  if (s.metadata) {
+    spa_hook_remove(&s.metadataHook);
+    pw_proxy_destroy(reinterpret_cast<pw_proxy *>(s.metadata));
+  }
   spa_hook_remove(&rh);
   spa_hook_remove(&ch);
   pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
@@ -169,6 +226,10 @@ Devices enumerateDevices() {
           [&](const AudioPort &port) {
             return port.node == device.id && port.direction == "out";
           });
+  markDefaultCaptureSource(
+      s.devices, s.defaultSourceMetadataSeen && !s.defaultSourceName.empty()
+                     ? std::optional<std::string>(s.defaultSourceName)
+                     : std::nullopt);
   return s.devices;
 }
 

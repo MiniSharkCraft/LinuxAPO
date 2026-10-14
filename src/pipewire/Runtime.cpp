@@ -48,12 +48,13 @@ uint64_t now() {
 std::string readControlRequest(int fd) {
   std::string frame;
   std::array<char, settings::ipc::MaxRequestBytes + 1> buffer{};
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(1000);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
   for (;;) {
     pollfd ready{fd, POLLIN, 0};
-    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now());
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
     const int result = poll(&ready, 1, std::max<int64_t>(0, remaining.count()));
     if (result <= 0)
       throw std::runtime_error("malformed request frame (incomplete/timeout)");
@@ -75,11 +76,11 @@ std::string readControlRequest(int fd) {
 void sendControlResponse(int fd, bool ok, const std::string &payload) {
   const auto frame = settings::ipc::responseFrame(ok, payload);
   size_t sent = 0;
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(1000);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
   while (sent < frame.size()) {
-    const auto count = send(fd, frame.data() + sent, frame.size() - sent,
-                            MSG_NOSIGNAL);
+    const auto count =
+        send(fd, frame.data() + sent, frame.size() - sent, MSG_NOSIGNAL);
     if (count > 0) {
       sent += static_cast<size_t>(count);
       continue;
@@ -171,8 +172,7 @@ struct Runtime {
       char *end = nullptr;
       errno = 0;
       const unsigned long parsed = std::strtoul(value, &end, 10);
-      if (errno || end == value || *end != '\0' || parsed < 10 ||
-          parsed > 5000)
+      if (errno || end == value || *end != '\0' || parsed < 10 || parsed > 5000)
         throw std::runtime_error(
             "SKYAPO_TEST_TRANSITION_MS must be an integer from 10 to 5000");
       transitionDurationMs = static_cast<unsigned>(parsed);
@@ -238,8 +238,8 @@ struct Runtime {
       retiredEngines.clear();
   }
   void waitForTransition() {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(500);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while (pending.load(std::memory_order_seq_cst)) {
       reclaimRetired();
       if (!pending.load(std::memory_order_seq_cst))
@@ -324,6 +324,9 @@ struct Runtime {
     promoteCompletedTransition();
     if (pendingEngine || pending.load(std::memory_order_seq_cst))
       throw std::runtime_error("another DSP graph transition is still active");
+    for (const auto &notice : replacement->configNotices())
+      std::cerr << "skyapod: config warning " << notice.file.string() << ':'
+                << notice.line << ": " << notice.message << '\n';
     // Every accepted replacement invalidates queued completion telemetry,
     // including hard swaps after a PipeWire format change.
     const auto generation = transitionMetrics.graphReplaced();
@@ -353,8 +356,8 @@ struct Runtime {
     reclaimRetired();
   }
   bool waitForCallbacksToDrain() {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(500);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while (callbacksInFlight.load(std::memory_order_seq_cst) != 0) {
       if (std::chrono::steady_clock::now() >= deadline)
         return false;
@@ -427,8 +430,8 @@ struct Runtime {
     waitForTransition();
     auto *current = active.load(std::memory_order_acquire);
     const unsigned hz = current ? current->sampleRate() : requestedRate.load();
-    const unsigned blockFrames = current ? current->maxFrames()
-                                         : requestedQuantum.load();
+    const unsigned blockFrames =
+        current ? current->maxFrames() : requestedQuantum.load();
     std::vector<std::wstring> names;
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
@@ -513,7 +516,9 @@ struct Runtime {
       explicit FlightGuard(std::atomic<unsigned> &value) : count(value) {
         count.fetch_add(1, std::memory_order_seq_cst);
       }
-      ~FlightGuard() { count.fetch_sub(1, std::memory_order_seq_cst); }
+      ~FlightGuard() {
+        count.fetch_sub(1, std::memory_order_seq_cst);
+      }
     } flight(r.callbacksInFlight);
     const uint64_t begin = now();
     const auto frames = position->clock.duration;
@@ -766,9 +771,9 @@ struct Runtime {
                        pw_filter_get_node_id(filter));
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
                        ownInputs[channel]);
-    links[channel] = reinterpret_cast<pw_proxy *>(pw_core_create_object(
-        core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
-        &properties->dict, 0));
+    links[channel] = reinterpret_cast<pw_proxy *>(
+        pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
+                              PW_VERSION_LINK, &properties->dict, 0));
     pw_properties_free(properties);
     if (!links[channel]) {
       fail("cannot create capture link for " + ports[channel].channel);
@@ -789,8 +794,8 @@ struct Runtime {
       return;
     }
     std::cerr << "skyapod: linking physical port " << ports[channel].id
-              << " -> " << ownInputs[channel] << " ("
-              << ports[channel].channel << ")\n";
+              << " -> " << ownInputs[channel] << " (" << ports[channel].channel
+              << ")\n";
   }
   void scheduleLinkRetry() {
     if (cleaning || stopping || !linkRetryTimer)
@@ -831,8 +836,8 @@ struct Runtime {
       r.links[c] = nullptr;
       r.linkGlobalIds[c] = SPA_ID_INVALID;
       r.linked[c] = false;
-      std::cerr << "skyapod: capture link removed for "
-                << r.ports[c].channel << "; scheduling recovery\n";
+      std::cerr << "skyapod: capture link removed for " << r.ports[c].channel
+                << "; scheduling recovery\n";
       r.scheduleLinkRetry();
     }
     if (id == r.device.id)
@@ -847,8 +852,7 @@ struct Runtime {
     pw_main_loop_quit(r.main);
   }
   static void renderVolumeChanged(
-      void *data,
-      const skyapo::pipewire::DefaultSinkVolumeSnapshot &snapshot) {
+      void *data, const skyapo::pipewire::DefaultSinkVolumeSnapshot &snapshot) {
     auto &r = *static_cast<Runtime *>(data);
     r.renderVolume = snapshot;
     skyapo::platform::LoudnessVolumeProvider::publish(
@@ -904,6 +908,12 @@ struct Runtime {
     else
       for (const auto &filter : e->filterDescriptions())
         s << "\n  " << filter;
+    if (e && !e->configNotices().empty()) {
+      s << "\nConfig warnings:";
+      for (const auto &notice : e->configNotices())
+        s << "\n  " << notice.file.string() << ':' << notice.line << ": "
+          << notice.message;
+    }
     s << "\nPlugin-reported latency sum: ";
     const auto pluginLatency =
         e ? e->pluginLatencySamples() : std::optional<uint64_t>{};
@@ -980,8 +990,9 @@ struct Runtime {
           text = "Config reload succeeded\n";
         } catch (const std::exception &e) {
           r.configError = e.what();
-          text = std::string("Config reload failed; keeping last valid graph: ") +
-                 e.what() + "\n";
+          text =
+              std::string("Config reload failed; keeping last valid graph: ") +
+              e.what() + "\n";
         }
       } else if (request.command ==
                  settings::ipc::Command::SetPluginParameter) {
@@ -1003,8 +1014,7 @@ struct Runtime {
           close(client);
           continue;
         }
-      } else if (request.command ==
-                 settings::ipc::Command::SetPluginBypass) {
+      } else if (request.command == settings::ipc::Command::SetPluginBypass) {
         try {
           if (r.pending.load(std::memory_order_seq_cst))
             throw std::runtime_error(
@@ -1187,28 +1197,26 @@ struct Runtime {
     spa_pod_frame formatFrame;
     spa_pod_builder_push_object(&b, &formatFrame, SPA_TYPE_OBJECT_Format,
                                 SPA_PARAM_EnumFormat);
-    spa_pod_builder_add(&b, SPA_FORMAT_mediaType,
-                        SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-                        SPA_FORMAT_mediaSubtype,
-                        SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-                        SPA_FORMAT_AUDIO_format, SPA_POD_Id(info.format),
-                        SPA_FORMAT_AUDIO_rate,
-                        SPA_POD_CHOICE_ENUM_Int(3, 48000, 44100, 96000),
-                        SPA_FORMAT_AUDIO_channels, SPA_POD_Int(channels), 0);
+    spa_pod_builder_add(
+        &b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_AUDIO_format, SPA_POD_Id(info.format), SPA_FORMAT_AUDIO_rate,
+        SPA_POD_CHOICE_ENUM_Int(3, 48000, 44100, 96000),
+        SPA_FORMAT_AUDIO_channels, SPA_POD_Int(channels), 0);
     if (!SPA_FLAG_IS_SET(info.flags, SPA_AUDIO_FLAG_UNPOSITIONED))
-      spa_pod_builder_add(&b, SPA_FORMAT_AUDIO_position,
-                          SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Id,
-                                        channels, info.position), 0);
+      spa_pod_builder_add(
+          &b, SPA_FORMAT_AUDIO_position,
+          SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Id, channels, info.position),
+          0);
     const spa_pod *enumFormat =
         static_cast<spa_pod *>(spa_pod_builder_pop(&b, &formatFrame));
     const spa_pod *params[] = {
-        enumFormat,
-        static_cast<spa_pod *>(spa_pod_builder_add_object(
-            &b, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
-            SPA_POD_Float(1.0f), SPA_PROP_mute, SPA_POD_Bool(false),
-            SPA_PROP_channelVolumes,
-            SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
-                          unityVolumes.data())))};
+        enumFormat, static_cast<spa_pod *>(spa_pod_builder_add_object(
+                        &b, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+                        SPA_PROP_volume, SPA_POD_Float(1.0f), SPA_PROP_mute,
+                        SPA_POD_Bool(false), SPA_PROP_channelVolumes,
+                        SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
+                                      unityVolumes.data())))};
     if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 2) < 0)
       throw std::runtime_error("filter connection failed");
     path = settings::socketPath();

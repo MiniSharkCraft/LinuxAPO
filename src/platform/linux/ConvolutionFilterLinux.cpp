@@ -1,5 +1,6 @@
 #include "ConvolutionFilterFactory.h"
 #include "ConvolutionFilter.h"
+#include "ConvolutionMemoryEstimator.h"
 #include "helpers/MemoryHelper.h"
 #include "helpers/StringHelper.h"
 
@@ -14,10 +15,96 @@
 #include <vector>
 
 namespace {
-class LinuxConvolutionFilter final : public ConvolutionFilter {
+uint64_t checkedAdd(uint64_t lhs, uint64_t rhs) {
+  if (rhs > std::numeric_limits<uint64_t>::max() - lhs)
+    throw std::runtime_error("convolution memory estimate overflow");
+  return lhs + rhs;
+}
+
+uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs) {
+  if (rhs && lhs > std::numeric_limits<uint64_t>::max() / rhs)
+    throw std::runtime_error("convolution memory estimate overflow");
+  return lhs * rhs;
+}
+
+class LinuxConvolutionFilter final : public ConvolutionFilter,
+                                     public ConvolutionMemoryEstimator {
 public:
   explicit LinuxConvolutionFilter(std::wstring path)
       : ConvolutionFilter(path), filename_(std::move(path)) {}
+
+  uint64_t estimatedMemoryBytes(float activeSampleRate, unsigned frameCount,
+                                unsigned outputChannels) const override {
+    const auto path = StringHelper::toString(filename_, 65001);
+    SF_INFO info{};
+    SNDFILE *file = sf_open(path.c_str(), SFM_READ, &info);
+    if (!file)
+      throw std::runtime_error("cannot open convolution impulse response '" +
+                               path + "': " + sf_strerror(nullptr));
+    struct FileGuard {
+      SNDFILE *file;
+      ~FileGuard() {
+        if (file)
+          sf_close(file);
+      }
+    } guard{file};
+    if (info.samplerate <= 0 || info.channels <= 0 || info.frames <= 0)
+      throw std::runtime_error("convolution impulse response is empty or "
+                               "invalid: " + path);
+    if (std::abs(activeSampleRate - info.samplerate) > 1.0f)
+      throw std::runtime_error("convolution impulse response sample rate does "
+                               "not match the active audio rate: " + path);
+    if (!frameCount || !outputChannels ||
+        info.frames > std::numeric_limits<int>::max() ||
+        info.channels > std::numeric_limits<int>::max() ||
+        frameCount > static_cast<unsigned>(std::numeric_limits<int>::max()))
+      throw std::runtime_error("convolution impulse response/block is too "
+                               "large: " + path);
+
+    const uint64_t irFrames = static_cast<uint64_t>(info.frames);
+    const uint64_t irChannels = static_cast<uint64_t>(info.channels);
+    const uint64_t block = frameCount;
+    const uint64_t segments = 1 + (irFrames - 1) / block;
+    const uint64_t frequencyBins = checkedAdd(block, 1);
+    const uint64_t filterAndMixBuffers =
+        checkedAdd(checkedMultiply(2, segments),
+                   checkedMultiply(2, checkedAdd(segments, 1)));
+
+    // Account for the concrete arrays allocated by hcInitSingle() in the
+    // pinned upstream libHybridConv implementation, plus its two FFT plans.
+    uint64_t perOutputChannel = sizeof(HConvSingle);
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(checkedMultiply(2, block), sizeof(float))); // dft_time
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(frequencyBins, sizeof(fftwf_complex))); // dft_freq
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(checkedMultiply(2, frequencyBins), sizeof(float)));
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(checkedMultiply(filterAndMixBuffers, frequencyBins),
+                        sizeof(float)));
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(filterAndMixBuffers, sizeof(float *)));
+    perOutputChannel = checkedAdd(
+        perOutputChannel,
+        checkedMultiply(block, sizeof(float))); // history_time
+    perOutputChannel = checkedAdd(perOutputChannel, 2 * sizeof(int));
+    perOutputChannel = checkedAdd(perOutputChannel, 32 * 1024); // FFT plans
+
+    uint64_t estimate = checkedMultiply(perOutputChannel, outputChannels);
+    estimate = checkedAdd(
+        estimate, checkedMultiply(checkedMultiply(irFrames, irChannels),
+                                  sizeof(float))); // decoded interleaved IR
+    estimate = checkedAdd(estimate,
+                          checkedMultiply(irFrames, sizeof(float))); // work IR
+    // Include 25% headroom for FFTW planner and allocator-private workspace.
+    estimate = checkedAdd(estimate, estimate / 4);
+    return checkedAdd(estimate, 256 * 1024);
+  }
 
 protected:
   void initializeFilters(unsigned frameCount) override {

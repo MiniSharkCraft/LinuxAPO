@@ -56,6 +56,7 @@
 #include <QSignalBlocker>
 #include <QTemporaryFile>
 #include <QStandardPaths>
+#include <QSpinBox>
 #include <QSettings>
 #include <QTimer>
 #include <QThread>
@@ -102,6 +103,42 @@ bool parseMetadataNumber(const QString &text, double &value,
   value = QLocale::c().toDouble(text.trimmed(), &ok);
   return ok && std::isfinite(value);
 }
+
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+bool parseStreamingFormat(const QByteArray &status, unsigned &sampleRate,
+                          unsigned &channels) {
+  bool streaming = false;
+  bool hasRate = false;
+  bool hasChannels = false;
+  static const QRegularExpression ratePattern(
+      QStringLiteral(R"(^Sample rate: ([0-9]+) Hz$)"));
+  static const QRegularExpression channelPattern(
+      QStringLiteral(R"(^Channels: ([0-9]+)$)"));
+  for (const auto &line : QString::fromUtf8(status).split(QLatin1Char('\n'))) {
+    if (line == QStringLiteral("Daemon: streaming"))
+      streaming = true;
+    const auto rateMatch = ratePattern.match(line);
+    if (rateMatch.hasMatch()) {
+      bool ok = false;
+      const auto value = rateMatch.captured(1).toUInt(&ok);
+      if (ok && value >= 8000 && value <= 384000) {
+        sampleRate = value;
+        hasRate = true;
+      }
+    }
+    const auto channelMatch = channelPattern.match(line);
+    if (channelMatch.hasMatch()) {
+      bool ok = false;
+      const auto value = channelMatch.captured(1).toUInt(&ok);
+      if (ok && value > 0 && value <= 8) {
+        channels = value;
+        hasChannels = true;
+      }
+    }
+  }
+  return streaming && hasRate && hasChannels;
+}
+#endif
 
 bool parsePluginMetadata(const QByteArray &output,
                          const QString &expectedFormat,
@@ -663,13 +700,14 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
          "or the configuration currently open in the editor."));
   responseResolutionCombo = new QComboBox(root);
   responseResolutionCombo->setObjectName(QStringLiteral("analysisResolution"));
-  for (const unsigned frames :
-       {1024U, 2048U, 4096U, 8192U, 16384U, 32768U, 65536U, 131072U})
+  for (unsigned frames = 128; frames <= (1U << 20); frames *= 2)
     responseResolutionCombo->addItem(tr("%1 samples").arg(frames),
                                      QVariant::fromValue(frames));
   responseResolutionCombo->setToolTip(
       tr("FFT resolution for theoretical response analysis. Larger values "
-         "increase frequency detail and analysis time."));
+         "increase frequency detail and analysis time. Estimated sample, FFT "
+         "and curve buffers are capped at 64 MiB; Engine and FFT library "
+         "overhead is additional."));
   {
     QSettings settings;
     const int savedIndex = responseResolutionCombo->findData(
@@ -700,6 +738,56 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   toolbar->addWidget(responseResolutionCombo);
   toolbar->addWidget(responseButton);
   outer->addLayout(toolbar);
+
+  auto *analysisFormatRow = new QHBoxLayout;
+  analysisUseRuntimeFormat =
+      new QCheckBox(tr("Use live PipeWire format"), root);
+  analysisUseRuntimeFormat->setObjectName(
+      QStringLiteral("analysisUseLiveFormat"));
+  analysisUseRuntimeFormat->setChecked(true);
+  analysisUseRuntimeFormat->setToolTip(
+      tr("Use the currently streaming daemon's negotiated sample rate and "
+         "channel count. Uncheck to choose a theoretical analysis format "
+         "manually when the daemon is not running."));
+  analysisSampleRate = new QSpinBox(root);
+  analysisSampleRate->setObjectName(QStringLiteral("analysisSampleRate"));
+  analysisSampleRate->setRange(8000, 384000);
+  analysisSampleRate->setSingleStep(1000);
+  analysisSampleRate->setSuffix(tr(" Hz"));
+  analysisChannels = new QSpinBox(root);
+  analysisChannels->setObjectName(QStringLiteral("analysisChannels"));
+  analysisChannels->setRange(1, 8);
+  analysisChannels->setSuffix(tr(" channels"));
+  {
+    QSettings settings;
+    analysisSampleRate->setValue(
+        settings.value(QStringLiteral("analysis/sample-rate"), 48000).toInt());
+    analysisChannels->setValue(
+        settings.value(QStringLiteral("analysis/channels"), 2).toInt());
+  }
+  const auto updateManualFormatEnabled = [this] {
+    const bool manual = !analysisUseRuntimeFormat->isChecked();
+    analysisSampleRate->setEnabled(manual);
+    analysisChannels->setEnabled(manual);
+  };
+  connect(analysisUseRuntimeFormat, &QCheckBox::toggled, this,
+          [updateManualFormatEnabled](bool) { updateManualFormatEnabled(); });
+  connect(analysisSampleRate, qOverload<int>(&QSpinBox::valueChanged), this,
+          [](int value) {
+            QSettings().setValue(QStringLiteral("analysis/sample-rate"), value);
+          });
+  connect(analysisChannels, qOverload<int>(&QSpinBox::valueChanged), this,
+          [](int value) {
+            QSettings().setValue(QStringLiteral("analysis/channels"), value);
+          });
+  updateManualFormatEnabled();
+  analysisFormatRow->addWidget(analysisUseRuntimeFormat);
+  analysisFormatRow->addWidget(new QLabel(tr("Manual rate:"), root));
+  analysisFormatRow->addWidget(analysisSampleRate);
+  analysisFormatRow->addWidget(new QLabel(tr("Channels:"), root));
+  analysisFormatRow->addWidget(analysisChannels);
+  analysisFormatRow->addStretch(1);
+  outer->addLayout(analysisFormatRow);
 
   auto *deviceRow = new QHBoxLayout;
   deviceCombo = new QComboBox(root);
@@ -997,54 +1085,101 @@ void MainWindow::analyzeResponse() {
   const QString snapshotPath =
       QFileInfo(snapshot->fileName()).absoluteFilePath();
   const unsigned fftFrames = responseResolutionCombo->currentData().toUInt();
+  const bool useRuntimeFormat = analysisUseRuntimeFormat->isChecked();
+  const unsigned selectedRate =
+      static_cast<unsigned>(analysisSampleRate->value());
+  const unsigned selectedChannels =
+      static_cast<unsigned>(analysisChannels->value());
   snapshot->close();
   responseButton->setEnabled(false);
-  responseButton->setText(tr("Analyzing…"));
+  responseButton->setText(useRuntimeFormat ? tr("Reading format…")
+                                           : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
-  auto *worker = QThread::create([self, snapshot, snapshotPath, fftFrames] {
-    auto result = analyzeConfigResponse(snapshotPath, 48000, 2, fftFrames);
+  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames](
+                                 unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
-    QMetaObject::invokeMethod(
-        self,
-        [self, snapshot, fftFrames, result = std::move(result)]() mutable {
-          Q_UNUSED(snapshot);
-          if (!self)
-            return;
-          self->responseButton->setEnabled(true);
-          self->responseButton->setText(self->tr("Analyze response"));
-          if (!result.error.isEmpty()) {
-            QMessageBox::warning(self, self->tr("Response analysis"),
-                                 result.error);
-            return;
-          }
-          QDialog dialog(self);
-          dialog.setWindowTitle(self->tr("Calculated filter response"));
-          auto *layout = new QVBoxLayout(&dialog);
-          layout->addWidget(new QLabel(
-              self->tr("EAPO Engine impulse response · 48 kHz stereo · "
-                       "%1 FFT samples · all input/output channel paths")
-                  .arg(fftFrames),
-              &dialog));
-          layout->addWidget(
-              new ResponsePlot(std::move(result.curves), &dialog));
-          auto *close = new QPushButton(self->tr("Close"), &dialog);
-          QObject::connect(close, &QPushButton::clicked, &dialog,
-                           &QDialog::accept);
-          layout->addWidget(close, 0, Qt::AlignRight);
-          dialog.resize(820, 500);
-          dialog.exec();
-        },
-        Qt::QueuedConnection);
+    self->responseButton->setText(self->tr("Analyzing…"));
+    auto *worker = QThread::create([self, snapshot, snapshotPath, fftFrames,
+                                    sampleRate, channels] {
+      auto result =
+          analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
+      if (!self)
+        return;
+      QMetaObject::invokeMethod(
+          self,
+          [self, snapshot, fftFrames, sampleRate, channels,
+           result = std::move(result)]() mutable {
+            Q_UNUSED(snapshot);
+            if (!self)
+              return;
+            self->responseButton->setEnabled(true);
+            self->responseButton->setText(self->tr("Analyze response"));
+            if (!result.error.isEmpty()) {
+              QMessageBox::warning(self, self->tr("Response analysis"),
+                                   result.error);
+              return;
+            }
+            QDialog dialog(self);
+            dialog.setWindowTitle(self->tr("Calculated filter response"));
+            auto *layout = new QVBoxLayout(&dialog);
+            layout->addWidget(new QLabel(
+                self->tr("EAPO Engine impulse response · %1 Hz · %2 %3 · "
+                         "%4 FFT samples · all input/output channel paths")
+                    .arg(sampleRate)
+                    .arg(channels)
+                    .arg(channels == 1 ? self->tr("channel")
+                                       : self->tr("channels"))
+                    .arg(fftFrames),
+                &dialog));
+            layout->addWidget(
+                new ResponsePlot(std::move(result.curves), &dialog));
+            auto *close = new QPushButton(self->tr("Close"), &dialog);
+            QObject::connect(close, &QPushButton::clicked, &dialog,
+                             &QDialog::accept);
+            layout->addWidget(close, 0, Qt::AlignRight);
+            dialog.resize(820, 500);
+            dialog.exec();
+          },
+          Qt::QueuedConnection);
+    });
+    self->responseThread = worker;
+    worker->setParent(self);
+    QObject::connect(worker, &QThread::finished, self, [self, worker] {
+      if (self && self->responseThread == worker)
+        self->responseThread = nullptr;
+      worker->deleteLater();
+    });
+    worker->start();
+  };
+  if (!useRuntimeFormat) {
+    startAnalysis(selectedRate, selectedChannels);
+    return;
+  }
+  runCli({QStringLiteral("status")}, [self, startAnalysis](int result,
+                                                           QByteArray output,
+                                                           QByteArray error) {
+    if (!self)
+      return;
+    unsigned sampleRate = 0;
+    unsigned channels = 0;
+    if (result != 0 || !parseStreamingFormat(output, sampleRate, channels)) {
+      self->responseButton->setEnabled(true);
+      self->responseButton->setText(self->tr("Analyze response"));
+      const QString detail =
+          QString::fromUtf8(error.isEmpty() ? output : error).trimmed();
+      QMessageBox::warning(
+          self, self->tr("Response analysis"),
+          self->tr("The daemon is not streaming with a known sample "
+                   "rate and channel count. Start SkyAPO, or disable "
+                   "'Use live PipeWire format' and choose a manual "
+                   "analysis format.%1")
+              .arg(detail.isEmpty() ? QString{}
+                                    : QStringLiteral("\n") + detail));
+      return;
+    }
+    startAnalysis(sampleRate, channels);
   });
-  responseThread = worker;
-  worker->setParent(this);
-  connect(worker, &QThread::finished, this, [this, worker] {
-    if (responseThread == worker)
-      responseThread = nullptr;
-    worker->deleteLater();
-  });
-  worker->start();
 #endif
 }
 
@@ -1934,6 +2069,8 @@ void MainWindow::refreshDevices() {
       const QString nodeName = columns[1];
       const QString description = columns[2];
       QString label = description + "  —  " + nodeName;
+      if (columns.size() >= 11 && columns[10] == "yes")
+        label += tr("  (default input)");
       if (columns.size() >= 6) {
         const QString channelCount = columns[4];
         const QString sampleRate = columns[5];

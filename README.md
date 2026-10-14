@@ -157,7 +157,7 @@ Alternatively, use the installed user service:
 systemctl --user enable --now skyapod
 ```
 
-The default config is `$XDG_CONFIG_HOME/skyapo/config.txt`, falling back to `~/.config/skyapo/config.txt`. Device selection persists the stable PipeWire node name rather than only a runtime numeric ID. Validate a config before enabling it:
+The default config is `$XDG_CONFIG_HOME/skyapo/config.txt`, falling back to `~/.config/skyapo/config.txt`. Device selection persists a stable PipeWire identity (`device.serial`/`device.bus-id` when advertised, otherwise `node.name`) rather than only a runtime numeric ID. Validate a config before enabling it:
 
 ```sh
 skyapo config check examples/basic.txt
@@ -165,7 +165,7 @@ skyapo config check examples/basic.txt
 
 ## Verification
 
-The following results were recorded for the 0.9.0 candidate on the current Linux workstation (2026-10-01):
+The following results were recorded for the published 0.9.0 beta candidate on the development workstation (2026-10-01):
 
 - PipeWire-enabled CTest: **58/58 passed**, including private-graph capture, source/server recovery, config reload and plugin/PDC E2E tests.
 - Opt-in FST/VST2 fixture suite: **57/57 passed**; this does not imply general VST2 product support.
@@ -174,17 +174,16 @@ The following results were recorded for the 0.9.0 candidate on the current Linux
 - Arch, DEB, RPM and generic tar candidate checksums and staged payload smoke: **passed**. These checks are not equivalent to dependency-populated clean installs on every target distribution.
 - Physical PipeWire recording and numerical `Preamp: -6 dB` measurement are documented in [realtime verification](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/REALTIME.md).
 
-These are local recorded results, not hosted CI results or certification across machines.
+The current development tree has since expanded the test matrix. On 2026-10-14, the source snapshot being prepared for synchronization built locally and passed CTest **66/66** (31 private PipeWire integration cases) and ASan/UBSan CTest **67/67** (32 private PipeWire E2Es, including plugin fixtures). One initial sanitizer run missed timestamp markers in the synthetic latency probe while still recording audio; the isolated case then passed 3/3 repeats and a complete sanitizer rerun passed. This timing-sensitive diagnostic remains distinct from total hardware latency. Hosted CI run [38513757741](https://github.com/MiniSharkCraft/LinuxAPO/actions/runs/38513757741) passed on commit `e1add4c`; that run predates the synchronized local changes. These checks do not certify arbitrary devices/plugins or every distribution.
 
 ## Current limitations and deferred to 1.0.0
 
 - Full Windows Equalizer APO parser, directive, editor and device semantics are not implemented.
-- Physical microphone unplug/replug and automatic desktop-client source following are not verified across hardware and applications.
-- Dependency-populated clean install/uninstall and Arch ALPM hook execution have not been fully verified in a clean root; extracted-payload smoke is not equivalent.
-- Hosted CI results are pending.
+- Synthetic PipeWire source/link replug and daemon/server recovery are tested; physical microphone unplug/replug and automatic desktop-client source following are not verified across hardware and applications.
+- A dependency-populated Arch install/remove and installed offline render passed in hosted CI; booted-root Arch ALPM hooks, native Debian/RPM install transactions and clean install/upgrade behavior across all distributions remain unverified.
 - Legal/distribution review and VST2/FST scope remain open; the experimental host is disabled by default.
 - Plugin crash/hang isolation, auxiliary buses, broad third-party/yabridge compatibility and total end-to-end latency remain unverified or unsupported.
-- Hardware recording evidence currently covers one Linux/PipeWire workstation. Package downloads are available, but clean install/lifecycle behavior is not verified across distributions.
+- Physical recording evidence covers one Linux/PipeWire workstation. Package downloads are available, but the Arch install check does not establish clean install/lifecycle behavior across all distributions.
 
 See the [1.0.0 deferred backlog](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/ROADMAP.md#deferred-to-100) for details. **0.9.0 is a beta daily-use preview, not production-final.**
 

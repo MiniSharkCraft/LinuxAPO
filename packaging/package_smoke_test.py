@@ -131,18 +131,36 @@ def main():
         "usr/share/applications/skyapo.desktop",
         "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
         "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
-        "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
-        "usr/share/licenses/skyapo/CLAP-License.txt",
-        "usr/share/licenses/skyapo/Steinberg-VST3-base-License.txt",
-        "usr/share/licenses/skyapo/Steinberg-VST3-pluginterfaces-License.txt",
-        "usr/share/licenses/skyapo/Steinberg-VST3-public-sdk-License.txt",
-        "usr/share/licenses/skyapo/MuParserX-License.txt",
-        "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt",
     ]
     for relative in required:
         path = root / relative
         if not path.is_file():
             raise RuntimeError(f"package is missing required file: {relative}")
+    license_dir = next(
+        (
+            root / relative
+            for relative in (
+                "usr/share/licenses/skyapo",
+                "usr/share/doc/skyapo/licenses",
+                "usr/share/doc/SkyAPO/licenses",
+            )
+            if (root / relative / "EqualizerAPO-License.txt").is_file()
+        ),
+        None,
+    )
+    if license_dir is None:
+        raise RuntimeError("package is missing the upstream Equalizer APO license")
+    for license_file in (
+        "EqualizerAPO-License.txt",
+        "CLAP-License.txt",
+        "Steinberg-VST3-base-License.txt",
+        "Steinberg-VST3-pluginterfaces-License.txt",
+        "Steinberg-VST3-public-sdk-License.txt",
+        "MuParserX-License.txt",
+        "Qt-LGPL-3.0-License.txt",
+    ):
+        if not (license_dir / license_file).is_file():
+            raise RuntimeError(f"package is missing required license: {license_file}")
     for page in ("skyapo.1", "skyapod.1", "skyapo-bench.1"):
         base = root / "usr/share/man/man1" / page
         if not base.is_file() and not pathlib.Path(str(base) + ".gz").is_file():
@@ -156,7 +174,7 @@ def main():
         raise RuntimeError("packaged skyapo --version returned an unknown version")
     application_version = version_output[0].removeprefix("SkyAPO ").strip()
     validate_desktop_metadata(root, application_version)
-    qt_license = (root / "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt").read_text(errors="replace")
+    qt_license = (license_dir / "Qt-LGPL-3.0-License.txt").read_text(errors="replace")
     if "GNU LESSER GENERAL PUBLIC LICENSE" not in qt_license:
         raise RuntimeError("package Qt LGPL license text is invalid")
     for binary in (

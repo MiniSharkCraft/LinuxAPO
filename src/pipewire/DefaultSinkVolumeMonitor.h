@@ -63,7 +63,7 @@ public:
                          DefaultSinkVolumeSnapshot &snapshot) noexcept;
 
   /** Extract stable node.name from standard PipeWire default metadata JSON. */
-  static bool parseDefaultSinkMetadata(const char *value,
+  static bool parseDefaultNodeMetadata(const char *value,
                                        std::string &stableName);
 
 private:

@@ -12,33 +12,42 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <time.h>
 
 namespace {
 constexpr uint32_t Invalid = SPA_ID_INVALID;
 constexpr double InputAmplitude = 0.1;
+constexpr unsigned MaxChannels = 8;
+constexpr std::array<const char *, MaxChannels> Surround51 = {
+    "FL", "FR", "FC", "LFE", "RL", "RR", "", ""};
+constexpr std::array<const char *, MaxChannels> Surround71 = {
+    "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"};
 
 struct Consumer {
-  pw_main_loop* loop{};
-  pw_context* context{};
-  pw_core* core{};
-  pw_registry* registry{};
-  pw_filter* filter{};
+  pw_main_loop *loop{};
+  pw_context *context{};
+  pw_core *core{};
+  pw_registry *registry{};
+  pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
-  spa_source* timeout{};
+  spa_source *timeout{};
   unsigned channels{2};
   bool expectSilent{};
   bool acceptAnyAudio{};
   double expectedDb{-6.0};
   unsigned expectedRate{};
-  std::array<const char*, 2> channelNames{};
-  std::array<void*, 2> inputs{};
-  std::array<uint32_t, 2> inputIds{Invalid, Invalid};
-  std::array<uint32_t, 2> outputIds{Invalid, Invalid};
-  std::array<pw_proxy*, 2> links{};
+  std::array<const char *, MaxChannels> channelNames{};
+  std::array<void *, MaxChannels> inputs{};
+  std::array<uint32_t, MaxChannels> inputIds{
+      Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid};
+  std::array<uint32_t, MaxChannels> outputIds{
+      Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid};
+  std::array<pw_proxy *, MaxChannels> links{};
   uint32_t sourceNode{Invalid};
   uint32_t ownNode{Invalid};
   std::atomic<uint64_t> frames{0};
@@ -46,6 +55,9 @@ struct Consumer {
   std::atomic<double> energy{0.0};
   std::atomic<double> channelDifferenceEnergy{0.0};
   bool expectIdenticalChannels{};
+  bool measureSourceLag{};
+  std::array<uint32_t, 64> sourceConsumerLatencyUs{};
+  size_t sourceConsumerLatencyCount{};
   std::atomic<unsigned> processCalls{0};
   std::atomic<unsigned> invalidRateCalls{0};
   std::atomic<unsigned> zeroDurationCalls{0};
@@ -56,16 +68,25 @@ struct Consumer {
   size_t recordedSamples{};
   std::atomic<bool> failed{false};
 
-  explicit Consumer(bool mono, bool silent, bool anyAudio, double gainDb,
-                    unsigned rate)
-      : channels(mono ? 1 : 2), expectSilent(silent), acceptAnyAudio(anyAudio),
-        expectedDb(gainDb), expectedRate(rate),
-        channelNames(mono ? std::array<const char *, 2>{"MONO", ""}
-                          : std::array<const char *, 2>{"FL", "FR"}) {}
+  explicit Consumer(bool mono, bool surround51, bool surround71, bool silent,
+                    bool anyAudio, double gainDb, unsigned rate)
+      : channels(mono ? 1 : (surround51 ? 6 : (surround71 ? 8 : 2))),
+        expectSilent(silent), acceptAnyAudio(anyAudio), expectedDb(gainDb),
+        expectedRate(rate),
+        channelNames(
+            mono ? std::array<const char *, MaxChannels>{"MONO", "", "", "", "",
+                                                         "", "", ""}
+                 : (surround51
+                        ? Surround51
+                        : (surround71
+                               ? Surround71
+                               : std::array<const char *, MaxChannels>{
+                                     "FL", "FR", "", "", "", "", "", ""}))) {}
 
-  static unsigned channelIndex(const char* channel, const Consumer& c) {
+  static unsigned channelIndex(const char *channel, const Consumer &c) {
     for (unsigned i = 0; i < c.channels; ++i)
-      if (std::strcmp(channel, c.channelNames[i]) == 0) return i;
+      if (std::strcmp(channel, c.channelNames[i]) == 0)
+        return i;
     return c.channels;
   }
 
@@ -74,14 +95,14 @@ struct Consumer {
         outputIds[channel] == Invalid || inputIds[channel] == Invalid ||
         links[channel])
       return;
-    auto* properties = pw_properties_new(nullptr, nullptr);
+    auto *properties = pw_properties_new(nullptr, nullptr);
     pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", sourceNode);
     pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u",
                        outputIds[channel]);
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u", ownNode);
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
                        inputIds[channel]);
-    links[channel] = reinterpret_cast<pw_proxy*>(
+    links[channel] = reinterpret_cast<pw_proxy *>(
         pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
                               PW_VERSION_LINK, &properties->dict, 0));
     pw_properties_free(properties);
@@ -93,31 +114,37 @@ struct Consumer {
     }
   }
 
-  static void global(void* data, uint32_t id, uint32_t, const char* type,
-                     uint32_t, const spa_dict* props) {
-    auto& c = *static_cast<Consumer*>(data);
-    if (!props) return;
+  static void global(void *data, uint32_t id, uint32_t, const char *type,
+                     uint32_t, const spa_dict *props) {
+    auto &c = *static_cast<Consumer *>(data);
+    if (!props)
+      return;
     if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
-      const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+      const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
       if (name && std::strcmp(name, "skyapo.virtual_mic") == 0)
         c.sourceNode = id;
       else if (name && std::strcmp(name, "skyapo.test.consumer") == 0)
         c.ownNode = id;
       else
         return;
-      for (unsigned ch = 0; ch < c.channels; ++ch) c.linkChannel(ch);
+      for (unsigned ch = 0; ch < c.channels; ++ch)
+        c.linkChannel(ch);
       return;
     }
-    if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0) return;
-    const char* nodeValue = spa_dict_lookup(props, PW_KEY_NODE_ID);
-    const char* direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
-    const char* channel = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNEL);
-    if (!nodeValue || !direction || !channel) return;
-    char* end = nullptr;
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0)
+      return;
+    const char *nodeValue = spa_dict_lookup(props, PW_KEY_NODE_ID);
+    const char *direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+    const char *channel = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNEL);
+    if (!nodeValue || !direction || !channel)
+      return;
+    char *end = nullptr;
     const auto nodeId = std::strtoul(nodeValue, &end, 10);
-    if (!end || *end) return;
+    if (!end || *end)
+      return;
     const unsigned index = channelIndex(channel, c);
-    if (index >= c.channels) return;
+    if (index >= c.channels)
+      return;
     if (nodeId == c.ownNode && std::strcmp(direction, "in") == 0)
       c.inputIds[index] = id;
     else if (nodeId == c.sourceNode && std::strcmp(direction, "out") == 0)
@@ -127,11 +154,11 @@ struct Consumer {
     c.linkChannel(index);
   }
 
-  static void globalRemove(void*, uint32_t) {}
+  static void globalRemove(void *, uint32_t) {}
 
-  static void coreError(void* data, uint32_t, int, int result,
-                        const char* message) {
-    auto& c = *static_cast<Consumer*>(data);
+  static void coreError(void *data, uint32_t, int, int result,
+                        const char *message) {
+    auto &c = *static_cast<Consumer *>(data);
     c.failed.store(true, std::memory_order_relaxed);
     std::fprintf(stderr, "test consumer: PipeWire error %d: %s\n", result,
                  message ? message : "unknown error");
@@ -140,7 +167,7 @@ struct Consumer {
 
   static void stateChanged(void *data, pw_filter_state, pw_filter_state state,
                            const char *error) {
-    auto& c = *static_cast<Consumer*>(data);
+    auto &c = *static_cast<Consumer *>(data);
     c.filterState.store(static_cast<int>(state), std::memory_order_relaxed);
     if (state != PW_FILTER_STATE_ERROR)
       return;
@@ -150,12 +177,12 @@ struct Consumer {
     pw_main_loop_quit(c.loop);
   }
 
-  static void process(void* data, spa_io_position* position) {
-    auto& c = *static_cast<Consumer*>(data);
+  static void process(void *data, spa_io_position *position) {
+    auto &c = *static_cast<Consumer *>(data);
     c.processCalls.fetch_add(1, std::memory_order_relaxed);
-    const auto rate = position->clock.rate.num
-                          ? position->clock.rate.denom / position->clock.rate.num
-                          : 0;
+    const auto rate = position->clock.rate.num ? position->clock.rate.denom /
+                                                     position->clock.rate.num
+                                               : 0;
     const auto previousRate = c.sampleRate.load(std::memory_order_relaxed);
     if (!rate || (c.expectedRate && rate != c.expectedRate) ||
         (previousRate && previousRate != rate)) {
@@ -169,7 +196,14 @@ struct Consumer {
       c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
     double blockEnergy = 0.0;
     double blockChannelDifferenceEnergy = 0.0;
-    std::array<float *, 2> channelData{};
+    uint64_t callbackUs = 0;
+    if (c.measureSourceLag) {
+      timespec now{};
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      callbackUs = static_cast<uint64_t>(now.tv_sec) * 1000000u +
+                   static_cast<uint64_t>(now.tv_nsec) / 1000u;
+    }
+    std::array<float *, MaxChannels> channelData{};
     for (unsigned ch = 0; ch < c.channels; ++ch) {
       channelData[ch] =
           static_cast<float *>(pw_filter_get_dsp_buffer(c.inputs[ch], count));
@@ -181,11 +215,36 @@ struct Consumer {
         blockEnergy +=
             static_cast<double>(channelData[ch][i]) * channelData[ch][i];
     }
+    if (c.measureSourceLag && c.channels == 2) {
+      constexpr double preampGain = 0.5011872336272722;
+      for (uint32_t i = 0;
+           i < count && c.sourceConsumerLatencyCount <
+                            c.sourceConsumerLatencyUs.size();
+           ++i) {
+        if (channelData[0][i] < 0.1f || channelData[1][i] < 0.1f)
+          continue;
+        const auto low = static_cast<uint32_t>(std::clamp(
+            std::lround((channelData[0][i] / preampGain - 0.25) * 262144.0),
+            0l, 65535l));
+        const auto high = static_cast<uint32_t>(std::clamp(
+            std::lround((channelData[1][i] / preampGain - 0.25) * 262144.0),
+            0l, 65535l));
+        const uint32_t sourceUs = (high << 16) | low;
+        const uint32_t consumerUs = static_cast<uint32_t>(
+            callbackUs + static_cast<uint64_t>(i * 1000000.0 / rate));
+        const uint32_t elapsedUs = consumerUs - sourceUs;
+        if (elapsedUs < 1000000u)
+          c.sourceConsumerLatencyUs[c.sourceConsumerLatencyCount++] =
+              elapsedUs;
+      }
+    }
     if (c.expectIdenticalChannels) {
       for (uint32_t i = 0; i < count; ++i) {
-        const double difference =
-            static_cast<double>(channelData[0][i]) - channelData[1][i];
-        blockChannelDifferenceEnergy += difference * difference;
+        for (unsigned ch = 1; ch < c.channels; ++ch) {
+          const double difference =
+              static_cast<double>(channelData[0][i]) - channelData[ch][i];
+          blockChannelDifferenceEnergy += difference * difference;
+        }
       }
       const auto remaining = c.recordedLeft.size() - c.recordedSamples;
       const auto copyCount = std::min<size_t>(count, remaining);
@@ -210,11 +269,14 @@ struct Consumer {
     c.frames.fetch_add(count, std::memory_order_relaxed);
   }
 
-  static void finish(void* data, uint64_t) {
-    pw_main_loop_quit(static_cast<Consumer*>(data)->loop);
+  static void finish(void *data, uint64_t) {
+    pw_main_loop_quit(static_cast<Consumer *>(data)->loop);
   }
 
   int run() {
+    if (measureSourceLag && channels != 2)
+      throw std::runtime_error(
+          "source-to-consumer timestamp measurement requires stereo");
     if (expectIdenticalChannels) {
       constexpr size_t sampleCapacity = 48000 * 5;
       recordedLeft.resize(sampleCapacity);
@@ -222,11 +284,14 @@ struct Consumer {
     }
     pw_init(nullptr, nullptr);
     loop = pw_main_loop_new(nullptr);
-    if (!loop) throw std::runtime_error("cannot create PipeWire loop");
+    if (!loop)
+      throw std::runtime_error("cannot create PipeWire loop");
     context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
-    if (!context) throw std::runtime_error("cannot create PipeWire context");
+    if (!context)
+      throw std::runtime_error("cannot create PipeWire context");
     core = pw_context_connect(context, nullptr, 0);
-    if (!core) throw std::runtime_error("cannot connect to PipeWire");
+    if (!core)
+      throw std::runtime_error("cannot connect to PipeWire");
 
     static const pw_core_events coreEvents = [] {
       pw_core_events value{};
@@ -246,16 +311,20 @@ struct Consumer {
     pw_registry_add_listener(registry, &registryHook, &registryEvents, this);
 
     const bool mono = channels == 1;
-    auto* properties = pw_properties_new(
+    auto *properties = pw_properties_new(
         PW_KEY_NODE_NAME, "skyapo.test.consumer", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS, "Audio/Sink",
         PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER, "true",
         PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
-    pw_properties_set(properties, SPA_KEY_AUDIO_POSITION,
-                      mono ? "[ MONO ]" : "[ FL FR ]");
+    std::string positions = "[";
+    for (unsigned channel = 0; channel < channels; ++channel)
+      positions += std::string(" ") + channelNames[channel];
+    positions += " ]";
+    pw_properties_set(properties, SPA_KEY_AUDIO_POSITION, positions.c_str());
     filter = pw_filter_new(core, "SkyAPO Test Consumer", properties);
-    if (!filter) throw std::runtime_error("cannot create consumer filter");
+    if (!filter)
+      throw std::runtime_error("cannot create consumer filter");
     static const pw_filter_events filterEvents = [] {
       pw_filter_events value{};
       value.version = PW_VERSION_FILTER_EVENTS;
@@ -272,23 +341,26 @@ struct Consumer {
                             PW_KEY_PORT_NAME, portName.c_str(),
                             PW_KEY_AUDIO_CHANNEL, channelNames[ch], nullptr),
           nullptr, 0);
-      if (!inputs[ch]) throw std::runtime_error("cannot create consumer port");
+      if (!inputs[ch])
+        throw std::runtime_error("cannot create consumer port");
     }
     if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0)
       throw std::runtime_error("cannot connect consumer filter");
     ownNode = pw_filter_get_node_id(filter);
     timeout = pw_loop_add_timer(pw_main_loop_get_loop(loop), finish, this);
-    if (!timeout) throw std::runtime_error("cannot create test timer");
+    if (!timeout)
+      throw std::runtime_error("cannot create test timer");
     timespec duration{3, 0};
     pw_loop_update_timer(pw_main_loop_get_loop(loop), timeout, &duration,
                          nullptr, false);
     pw_main_loop_run(loop);
 
     const auto actualFilterState = pw_filter_get_state(filter, nullptr);
-    for (auto* link : links)
-      if (link) pw_proxy_destroy(link);
+    for (unsigned channel = 0; channel < channels; ++channel)
+      if (links[channel])
+        pw_proxy_destroy(links[channel]);
     pw_filter_destroy(filter);
-    pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
+    pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
     pw_core_disconnect(core);
     pw_context_destroy(context);
     pw_main_loop_destroy(loop);
@@ -314,6 +386,16 @@ struct Consumer {
     const double expected =
         InputAmplitude * std::pow(10.0, expectedDb / 20.0) / std::sqrt(2.0);
     const double ratio = expected > 0 ? rms / expected : 0.0;
+    auto sortedLatency = sourceConsumerLatencyUs;
+    std::sort(sortedLatency.begin(),
+              sortedLatency.begin() + sourceConsumerLatencyCount);
+    const auto medianLatency = sourceConsumerLatencyCount
+                                   ? sortedLatency[sourceConsumerLatencyCount / 2]
+                                   : 0u;
+    const auto p95Latency = sourceConsumerLatencyCount
+                                ? sortedLatency[(sourceConsumerLatencyCount - 1) *
+                                                95 / 100]
+                                : 0u;
     const double channelDifferenceRatio =
         expectIdenticalChannels && energy.load() > 0.0
             ? std::sqrt(channelDifferenceEnergy.load() / energy.load())
@@ -323,8 +405,14 @@ struct Consumer {
     double recordedLeftRms = 0.0;
     double recordedRightRms = 0.0;
     if (expectIdenticalChannels && recordedSamples > 256) {
+      // This is a test-only alignment diagnostic. Its exhaustive ±128-sample
+      // lag search is quadratic in the recording length; cap its working
+      // window while retaining the full capture for RMS/amplitude checks.
+      // 8192 samples still spans many periods of the deterministic test tone
+      // and is far longer than the plugin PDC offsets covered by this suite.
+      const size_t correlationSamples = std::min<size_t>(recordedSamples, 8192);
       double bestCorrelation = -std::numeric_limits<double>::infinity();
-      const auto count = recordedSamples;
+      const auto count = correlationSamples;
       double leftEnergy = 0.0;
       double rightEnergy = 0.0;
       for (size_t i = 0; i < count; ++i) {
@@ -359,12 +447,18 @@ struct Consumer {
         }
       }
     }
-    std::printf(
-        "Captured frames: %llu\nChannels: %u\nSample rate: %u Hz\nRMS: %.8f\n"
-        "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
-        static_cast<unsigned long long>(capturedFrames), channels,
-        sampleRate.load(), rms,
-        expected, ratio);
+    if (measureSourceLag) {
+      std::printf("Captured frames: %llu\nChannels: %u\nSample rate: %u Hz\n"
+                  "Timestamp-probe RMS: %.8f\n",
+                  static_cast<unsigned long long>(capturedFrames), channels,
+                  sampleRate.load(), rms);
+    } else {
+      std::printf(
+          "Captured frames: %llu\nChannels: %u\nSample rate: %u Hz\nRMS: %.8f\n"
+          "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
+          static_cast<unsigned long long>(capturedFrames), channels,
+          sampleRate.load(), rms, expected, ratio);
+    }
     if (expectIdenticalChannels)
       std::printf("Inter-channel difference ratio: %.8f\n",
                   channelDifferenceRatio);
@@ -374,36 +468,53 @@ struct Consumer {
                   "Left RMS: %.8f\nRight RMS: %.8f\n",
                   bestChannelLag, bestLagDifferenceRatio, recordedLeftRms,
                   recordedRightRms);
+    if (measureSourceLag)
+      std::printf("Source callback to virtual-consumer callback latency: "
+                  "median %u us, p95 %u us, n=%zu at %u Hz\n",
+                  medianLatency, p95Latency, sourceConsumerLatencyCount,
+                  sampleRate.load());
     const bool audioMatches =
         acceptAnyAudio ||
         (expectSilent ? rms < 1.0e-6 : std::abs(ratio - 1.0) < 0.03);
     const bool channelsMatch =
         !expectIdenticalChannels || channelDifferenceRatio < 0.01;
+    const bool latencyMatches =
+        !measureSourceLag ||
+        sourceConsumerLatencyCount >= 4;
     return !failed.load() && capturedFrames > 48000 && audioMatches &&
-                   channelsMatch
+                   channelsMatch && latencyMatches
                ? 0
                : 1;
   }
 };
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   bool mono = false;
+  bool surround51 = false;
+  bool surround71 = false;
   bool expectSilent = false;
   bool acceptAnyAudio = false;
   bool expectIdenticalChannels = false;
+  bool measureSourceLag = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
   for (int arg = 1; arg < argc; ++arg) {
     const std::string option(argv[arg]);
     if (option == "--mono")
       mono = true;
+    else if (option == "--surround51")
+      surround51 = true;
+    else if (option == "--surround71")
+      surround71 = true;
     else if (option == "--expect-silent")
       expectSilent = true;
     else if (option == "--accept-any-audio")
       acceptAnyAudio = true;
     else if (option == "--expect-identical-channels")
       expectIdenticalChannels = true;
+    else if (option == "--measure-source-lag")
+      measureSourceLag = true;
     else if (option == "--expected-db" && arg + 1 < argc) {
       char *end = nullptr;
       expectedDb = std::strtod(argv[++arg], &end);
@@ -420,16 +531,24 @@ int main(int argc, char** argv) {
       }
       expectedRate = static_cast<unsigned>(parsed);
     } else {
-      std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer [--mono] "
+      std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer "
+                           "[--mono|--surround51|--surround71] "
                            "[--expect-silent] [--accept-any-audio] "
                            "[--expect-identical-channels] "
+                           "[--measure-source-lag] "
                            "[--expected-db DB] [--expected-rate HZ]\n");
       return 2;
     }
   }
   try {
-    Consumer consumer(mono, expectSilent, acceptAnyAudio, expectedDb,
-                      expectedRate);
+    if (static_cast<unsigned>(mono) + static_cast<unsigned>(surround51) +
+            static_cast<unsigned>(surround71) >
+        1) {
+      std::fprintf(stderr, "test consumer: choose only one channel layout\n");
+      return 2;
+    }
+    Consumer consumer(mono, surround51, surround71, expectSilent,
+                      acceptAnyAudio, expectedDb, expectedRate);
     if (expectIdenticalChannels && mono) {
       std::fprintf(
           stderr,
@@ -437,8 +556,9 @@ int main(int argc, char** argv) {
       return 2;
     }
     consumer.expectIdenticalChannels = expectIdenticalChannels;
+    consumer.measureSourceLag = measureSourceLag;
     return consumer.run();
-  } catch (const std::exception& error) {
+  } catch (const std::exception &error) {
     std::fprintf(stderr, "test consumer: %s\n", error.what());
     return 1;
   }

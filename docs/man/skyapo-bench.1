@@ -18,6 +18,13 @@ The JSON also includes process peak RSS in KiB. This includes the executable,
 loaded libraries and runtime state; it is not an isolated measurement of the
 filter graph's allocation.
 .PP
+Schema v2 additionally reports known float-sample payload bytes for the
+upstream FilterConfiguration scratch planes, upstream DelayFilter rings, and
+the graph's PdcAlignmentFilter/PdcCopyFilter ring capacities. This deliberately
+excludes convolution/plugin-private buffers (including plugin dry-bypass delay),
+PipeWire scratch, object/pointer storage and allocator metadata; it is not a
+complete graph-memory measurement.
+.PP
 This measures the local DSP engine only. It does not measure PipeWire graph
 latency, scheduling jitter, device latency, or callback overhead,
 and it is not a realtime-safety guarantee.

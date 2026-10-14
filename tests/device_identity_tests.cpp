@@ -93,7 +93,26 @@ int main() {
     return 1;
   }
 
+  Devices defaultSources;
+  defaultSources.sources.push_back(
+      AudioDevice{55, "source.default", "Default source", 2, 48000, {}});
+  defaultSources.sources.push_back(
+      AudioDevice{56, "source.other", "Other source", 1, 44100, {}});
+  markDefaultCaptureSource(defaultSources, std::string("source.default"));
+  if (defaultSources.sources[0].isDefault != std::optional<bool>(true) ||
+      defaultSources.sources[1].isDefault != std::optional<bool>(false)) {
+    std::cerr
+        << "PipeWire default source name was not mapped to capture nodes\n";
+    return 1;
+  }
+  markDefaultCaptureSource(defaultSources, std::nullopt);
+  if (defaultSources.sources[0].isDefault.has_value() ||
+      defaultSources.sources[1].isDefault.has_value()) {
+    std::cerr << "missing default-source metadata was not kept unknown\n";
+    return 1;
+  }
+
   std::cout
-      << "device identity metadata, renamed-node recovery, legacy fallback, "
-         "and ambiguity tests passed\n";
+      << "device identity/default metadata, renamed-node recovery, legacy "
+         "fallback, unknown default state, and ambiguity tests passed\n";
 }

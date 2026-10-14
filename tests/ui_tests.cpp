@@ -45,6 +45,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -544,6 +545,33 @@ int main(int argc, char **argv) {
     return 1;
   }
   defaultConfig.close();
+  const auto shortResponse =
+      analyzeConfigResponse(defaultConfigPath, 44100, 1, 128);
+  if (!shortResponse.error.isEmpty() || shortResponse.curves.size() != 1 ||
+      shortResponse.curves.front().points.size() != 64 ||
+      std::abs(shortResponse.curves.front().points.front().y() + 6.0) > 0.01) {
+    std::cerr << "128-sample response analysis did not process a partial "
+                 "Engine block correctly: "
+              << shortResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  const auto largestResponse =
+      analyzeConfigResponse(defaultConfigPath, 44100, 1, 1U << 20);
+  if (!largestResponse.error.isEmpty() || largestResponse.curves.size() != 1 ||
+      largestResponse.curves.front().points.size() != (1U << 19) ||
+      std::abs(largestResponse.curves.front().points.front().y() + 6.0) >
+          0.01) {
+    std::cerr << "largest advertised response FFT size failed: "
+              << largestResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  const auto oversizedResponse =
+      analyzeConfigResponse(defaultConfigPath, 48000, 8, 1U << 20);
+  if (oversizedResponse.error.isEmpty() ||
+      !oversizedResponse.error.contains("64 MiB")) {
+    std::cerr << "response analysis did not reject a workspace over budget\n";
+    return 1;
+  }
   const QString responseConfigPath = temporary.filePath("response-config.txt");
   QFile responseConfig(responseConfigPath);
   if (!responseConfig.open(QIODevice::WriteOnly) ||
@@ -559,6 +587,15 @@ int main(int argc, char **argv) {
               << response.error.toStdString() << '\n';
     return 1;
   }
+  const auto monoResponse =
+      analyzeConfigResponse(responseConfigPath, 44100, 1, 8192);
+  if (!monoResponse.error.isEmpty() || monoResponse.curves.size() != 1 ||
+      monoResponse.curves.front().points.size() != 4096) {
+    std::cerr << "response analysis did not honor an explicit mono/44.1 kHz "
+                 "format: "
+              << monoResponse.error.toStdString() << '\n';
+    return 1;
+  }
   const auto gainAt = [](const ResponseCurve &curve, double frequency) {
     auto closest = curve.points.constBegin();
     for (auto point = curve.points.constBegin();
@@ -571,7 +608,7 @@ int main(int argc, char **argv) {
     if (curve.channel != "L → L" && curve.channel != "R → R")
       continue;
     if (curve.channel == "L → L") {
-      std::cout << "Measured Engine response L→L: " << gainAt(curve, 100.0)
+      std::cout << "Calculated Engine response L→L: " << gainAt(curve, 100.0)
                 << " dB near 100 Hz, " << gainAt(curve, 1000.0)
                 << " dB near 1 kHz\n";
     }
@@ -685,10 +722,17 @@ int main(int argc, char **argv) {
   auto *responseSource = liveWindow.findChild<QComboBox *>("analysisSource");
   auto *responseResolution =
       liveWindow.findChild<QComboBox *>("analysisResolution");
+  auto *useLiveAnalysisFormat =
+      liveWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+  auto *analysisSampleRate =
+      liveWindow.findChild<QSpinBox *>("analysisSampleRate");
+  auto *analysisChannels = liveWindow.findChild<QSpinBox *>("analysisChannels");
   bool responseDialogOpened = false;
   bool responseDialogFailed = false;
   double responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
   qlonglong responseBinCount = -1;
+  QString responseFormatLabel;
+  QString responseFailureText;
   QTimer responseDialogCloser;
   responseDialogCloser.setInterval(10);
   QObject::connect(&responseDialogCloser, &QTimer::timeout, &application, [&] {
@@ -703,25 +747,45 @@ int main(int argc, char **argv) {
               plot->property("responseAt1000HzLtoLDb").toDouble();
           responseBinCount = plot->property("analysisBinCount").toLongLong();
         }
+        for (auto *label : dialog->findChildren<QLabel *>())
+          if (label->text().contains("FFT samples"))
+            responseFormatLabel = label->text();
         dialog->accept();
         responseDialogCloser.stop();
       } else if (dialog->windowTitle() == "Response analysis") {
         responseDialogFailed = true;
         for (auto *label : dialog->findChildren<QLabel *>())
-          std::cerr << "response analysis dialog: "
-                    << label->text().toStdString() << '\n';
+          responseFailureText += label->text();
         dialog->accept();
         responseDialogCloser.stop();
       }
     }
   });
   if (!responseButton || !responseSource || !responseResolution ||
-      responseResolution->count() != 8 ||
+      !useLiveAnalysisFormat || !analysisSampleRate || !analysisChannels ||
+      responseResolution->count() != 14 ||
       responseResolution->currentData().toUInt() != 16384U ||
+      responseResolution->itemData(0).toUInt() != 128U ||
+      responseResolution->itemData(responseResolution->count() - 1).toUInt() !=
+          (1U << 20) ||
       responseSource->count() != 2 ||
       responseSource->itemText(0) != "config.txt" ||
       responseSource->itemText(1) != "Current file") {
     std::cerr << "response analysis source/resolution controls are missing\n";
+    return 1;
+  }
+  if (!useLiveAnalysisFormat->isChecked() || analysisSampleRate->isEnabled() ||
+      analysisChannels->isEnabled()) {
+    std::cerr
+        << "response analysis must default to the live negotiated format\n";
+    return 1;
+  }
+  useLiveAnalysisFormat->setChecked(false);
+  analysisSampleRate->setValue(44100);
+  analysisChannels->setValue(1);
+  if (analysisSampleRate->isEnabled() == false ||
+      analysisChannels->isEnabled() == false) {
+    std::cerr << "manual response format controls did not enable\n";
     return 1;
   }
   const int selectedResolutionIndex = responseResolution->findData(8192U);
@@ -741,6 +805,7 @@ int main(int argc, char **argv) {
     responseDialogFailed = false;
     responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
     responseBinCount = -1;
+    responseFormatLabel.clear();
     responseDialogCloser.start();
     responseButton->click();
     QElapsedTimer responseWait;
@@ -755,18 +820,52 @@ int main(int argc, char **argv) {
   };
   responseSource->setCurrentIndex(0);
   if (!runResponseAndCaptureGain() ||
-      std::abs(responseGainAt1kHz + 6.0) > 0.25) {
+      std::abs(responseGainAt1kHz + 6.0) > 0.25 ||
+      !responseFormatLabel.contains("44100 Hz") ||
+      !responseFormatLabel.contains("1 channel")) {
     std::cerr << "analysis did not use the saved default config.txt; gain="
               << responseGainAt1kHz << " dB\n";
     return 1;
   }
   responseSource->setCurrentIndex(1);
   if (!runResponseAndCaptureGain() ||
-      std::abs(responseGainAt1kHz + 3.0) > 0.25) {
+      std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
+      !responseFormatLabel.contains("44100 Hz") ||
+      !responseFormatLabel.contains("1 channel")) {
     std::cerr << "analysis did not use the current editor document; gain="
               << responseGainAt1kHz << " dB\n";
     return 1;
   }
+  useLiveAnalysisFormat->setChecked(true);
+  responseFailureText.clear();
+  responseDialogFailed = false;
+  responseDialogCloser.start();
+  responseButton->click();
+  QElapsedTimer unavailableFormatWait;
+  unavailableFormatWait.start();
+  while (!responseDialogFailed && unavailableFormatWait.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!responseDialogFailed ||
+      !responseFailureText.contains("not streaming with a known sample rate") ||
+      !responseButton->isEnabled()) {
+    std::cerr << "response analysis fabricated/failed to report an unknown "
+                 "live format\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
+  if (analysisSampleRate->isEnabled() || analysisChannels->isEnabled() ||
+      !runResponseAndCaptureGain() ||
+      std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
+      !responseFormatLabel.contains("96000 Hz") ||
+      !responseFormatLabel.contains("2 channels")) {
+    std::cerr << "response analysis did not use the daemon's negotiated "
+                 "96 kHz stereo format; label="
+              << responseFormatLabel.toStdString() << '\n';
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
 #endif
   QFile liveConfigAfterValid(liveConfigPath);
   if (!liveConfigAfterValid.open(QIODevice::ReadOnly) ||
@@ -1431,9 +1530,11 @@ int main(int argc, char **argv) {
     return list.write(contents) == contents.size();
   };
   const QByteArray selectedDeviceList =
-      "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
-      "41\tfixture.capture\tBuilt-in capture\t\t2\t48000\n"
-      "42\tfixture.usb-mic\tSelected USB microphone\tyes\t1\t44100\n";
+      "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+      "STABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA PATH\tDEFAULT\n"
+      "41\tfixture.capture\tBuilt-in capture\t\t2\t48000\t\t\t\t\tno\n"
+      "42\tfixture.usb-mic\tSelected USB microphone\tyes\t1\t44100\t"
+      "\t\t\t\tyes\n";
   if (!writeDynamicDeviceList(selectedDeviceList)) {
     std::cerr << "could not create changing device-list fixture\n";
     return 1;
@@ -1455,6 +1556,7 @@ int main(int argc, char **argv) {
   }
   if (!dynamicDeviceCombo || !deviceRefreshTimer ||
       dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic" ||
+      !dynamicDeviceCombo->currentText().contains("default input") ||
       !writeDynamicDeviceList(
           "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
           "41\tfixture.capture\tBuilt-in capture\t\t2\t48000\n")) {

@@ -148,12 +148,13 @@ int main(int argc, char **argv) {
     const double maxUs = durationsUs.back();
     const double blockBudgetUs =
         1.0e6 * options.blockFrames / static_cast<double>(options.rate);
+    const auto bufferPayload = engine.knownAudioBufferPayload();
     struct rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) != 0)
       throw std::runtime_error("cannot read process peak memory usage");
 
     std::cout << std::fixed << std::setprecision(3)
-              << "{\"schema\":\"skyapo-bench-v1\""
+              << "{\"schema\":\"skyapo-bench-v3\""
               << ",\"sample_rate_hz\":" << options.rate
               << ",\"channels\":" << options.channels
               << ",\"block_frames\":" << options.blockFrames
@@ -164,6 +165,16 @@ int main(int argc, char **argv) {
               << ",\"p95_us\":" << p95Us << ",\"max_us\":" << maxUs
               << ",\"block_budget_us\":" << blockBudgetUs
               << ",\"max_rss_kib\":" << usage.ru_maxrss
+              << ",\"engine_audio_buffer_payload_bytes\":"
+              << bufferPayload.totalBytes()
+              << ",\"filter_configuration_scratch_bytes\":"
+              << bufferPayload.filterConfigurationScratchBytes
+              << ",\"eapo_delay_ring_bytes\":"
+              << bufferPayload.eapoDelayRingBytes
+              << ",\"pdc_ring_capacity_bytes\":"
+              << bufferPayload.pdcRingCapacityBytes
+              << ",\"plugin_bypass_ring_capacity_bytes\":"
+              << bufferPayload.pluginBypassRingCapacityBytes
               << ",\"p95_budget_percent\":" << 100.0 * p95Us / blockBudgetUs
               << "}\n";
     return 0;

@@ -306,6 +306,7 @@ int main() {
       return 1;
     Engine latencyEngine(48000, 2, 128, {L"L", L"R"});
     latencyEngine.loadConfig(path);
+    const auto initialBufferPayload = latencyEngine.knownAudioBufferPayload();
     const auto initialLatency = latencyEngine.pluginLatencySamples();
     if (!initialLatency || *initialLatency != 64) {
       std::cerr << "LV2 latency port did not publish its run(0) snapshot ("
@@ -315,6 +316,12 @@ int main() {
                 << ", id=" << uri << "\n";
       return 1;
     }
+    if (initialBufferPayload.pluginBypassRingCapacityBytes !=
+        64U * 2U * sizeof(float)) {
+      std::cerr << "known audio-buffer payload omitted LV2 host bypass ring: "
+                << initialBufferPayload.pluginBypassRingCapacityBytes << " B\n";
+      return 1;
+    }
     float latencyImpulse[192]{};
     latencyImpulse[0] = 1.0f;
     latencyImpulse[1] = -0.5f;
@@ -322,6 +329,7 @@ int main() {
     const bool latencyPending = latencyEngine.pluginLatencyRefreshPending();
     const unsigned latencyRefreshes = latencyEngine.refreshPluginLatencies();
     const auto refreshedLatency = latencyEngine.pluginLatencySamples();
+    const auto refreshedBufferPayload = latencyEngine.knownAudioBufferPayload();
     if (std::abs(latencyImpulse[128] - 1.0f) > 1e-6f ||
         std::abs(latencyImpulse[129] + 0.5f) > 1e-6f || !latencyPending ||
         latencyRefreshes != 1 || !refreshedLatency || *refreshedLatency != 32) {
@@ -332,6 +340,14 @@ int main() {
                 << (refreshedLatency ? std::to_string(*refreshedLatency)
                                      : "unknown")
                 << '\n';
+      return 1;
+    }
+    if (refreshedBufferPayload.pluginBypassRingCapacityBytes !=
+        32U * 2U * sizeof(float)) {
+      std::cerr << "LV2 bypass-ring telemetry did not shrink with refreshed "
+                   "latency: "
+                << refreshedBufferPayload.pluginBypassRingCapacityBytes
+                << " B\n";
       return 1;
     }
 
@@ -367,6 +383,8 @@ int main() {
     return 1;
   Engine compensated(48000, 2, 128, {L"L", L"R"});
   compensated.loadConfig(path);
+  const auto initialCompensationBytes =
+      compensated.knownAudioBufferPayload().pdcRingCapacityBytes;
   float branchImpulse[192]{};
   branchImpulse[0] = 1.0f;
   branchImpulse[1] = 1.0f;
@@ -384,6 +402,16 @@ int main() {
       compensated.refreshPluginLatencies() != 1) {
     std::cerr << "PDC Copy fan-in did not align the initial 64-sample plugin "
                  "latency\n";
+    return 1;
+  }
+  const auto refreshedCompensationBytes =
+      compensated.knownAudioBufferPayload().pdcRingCapacityBytes;
+  if (initialCompensationBytes == 0 ||
+      refreshedCompensationBytes >= initialCompensationBytes) {
+    std::cerr << "shrinking 64-to-32 sample PDC retained historical ring "
+                 "capacity (before="
+              << initialCompensationBytes << " B, after="
+              << refreshedCompensationBytes << " B)\n";
     return 1;
   }
   float refreshedBranchImpulse[192]{};
@@ -505,6 +533,30 @@ int main() {
     return 1;
   }
 
+  std::string pluginBypassBudget;
+  for (unsigned plugin = 0; plugin < 420; ++plugin)
+    pluginBypassBudget +=
+        "Channel: L\n"
+        "Plugin: LV2 https://skyapo.example/plugins/test-latency-large\n"
+        "Channel: L R\n";
+  if (!write(path, pluginBypassBudget))
+    return 1;
+  bool rejectedPluginBypassBudget = false;
+  try {
+    Engine excessivePluginBypass(48000, 2, 128, {L"L", L"R"});
+    excessivePluginBypass.loadConfig(path);
+  } catch (const std::exception &error) {
+    rejectedPluginBypassBudget =
+        std::string(error.what())
+            .find("plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared "
+                  "16 MiB") != std::string::npos;
+  }
+  if (!rejectedPluginBypassBudget) {
+    std::cerr << "aggregate plugin host-bypass rings were not included in "
+                 "the shared 16 MiB budget\n";
+    return 1;
+  }
+
   double channelError = 0.0;
   double channelEnergy = 0.0;
   double phase = 0.0;
@@ -618,6 +670,40 @@ int main() {
     }
   }
 #endif
+
+  bool oversizedEngineFramesRejected = false;
+  try {
+    Engine oversizedEngine(48000, 2, 65537, {L"L", L"R"});
+  } catch (const std::exception &error) {
+    oversizedEngineFramesRejected =
+        std::string(error.what()).find("supported audio-buffer limits") !=
+        std::string::npos;
+  }
+  if (!oversizedEngineFramesRejected) {
+    std::cerr << "Engine accepted a frame capacity above the guarded maximum\n";
+    return 1;
+  }
+
+  std::string excessiveScratchLanes;
+  for (unsigned lane = 0; lane < 130; ++lane)
+    excessiveScratchLanes += "Copy: SKYAPO_SCRATCH_" +
+                             std::to_string(lane) + "=L\n";
+  if (!write(path, excessiveScratchLanes))
+    return 1;
+  bool excessiveScratchRejected = false;
+  try {
+    Engine excessiveScratch(48000, 2, 65536, {L"L", L"R"});
+    excessiveScratch.loadConfig(path);
+  } catch (const std::exception &error) {
+    excessiveScratchRejected =
+        std::string(error.what()).find("64 MiB per-graph scratch-buffer") !=
+        std::string::npos;
+  }
+  if (!excessiveScratchRejected) {
+    std::cerr << "high-fanout Copy config was not rejected by the bounded "
+                 "FilterConfiguration scratch allocation\n";
+    return 1;
+  }
 
 #ifdef SKYAPO_TEST_VST2
   const fs::path legacyModule =
@@ -769,7 +855,8 @@ int main() {
       return 1;
     }
   if (vst2Mono.savePersistentPluginStates() != 0) {
-    std::cerr << "VST2 host persisted state for a plugin without chunk support\n";
+    std::cerr
+        << "VST2 host persisted state for a plugin without chunk support\n";
     return 1;
   }
   for (const auto *invalid :
@@ -798,7 +885,8 @@ int main() {
   vst2DynamicLatency.loadConfig(path);
   if (vst2DynamicLatency.pluginLatencySamples() != 32 ||
       vst2DynamicLatency.pluginLatencyRefreshPending()) {
-    std::cerr << "VST2 fixture initial latency was not published as 32 samples\n";
+    std::cerr
+        << "VST2 fixture initial latency was not published as 32 samples\n";
     return 1;
   }
   float vst2LatencyNotifyBlock[128]{};
@@ -810,7 +898,8 @@ int main() {
   if (vst2DynamicLatency.refreshPluginLatencies() != 1 ||
       vst2DynamicLatency.pluginLatencySamples() != 64 ||
       vst2DynamicLatency.pluginLatencyRefreshPending()) {
-    std::cerr << "VST2 control-thread latency refresh did not publish 64 samples\n";
+    std::cerr
+        << "VST2 control-thread latency refresh did not publish 64 samples\n";
     return 1;
   }
   vst2DynamicLatency.setPluginBypass(SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH,
@@ -864,7 +953,8 @@ int main() {
     }
   if (std::abs(vst2RefreshedPdcImpulse[64 * 2] - 1.0f) > 1e-6f ||
       std::abs(vst2RefreshedPdcImpulse[64 * 2 + 1] - 1.0f) > 1e-6f) {
-    std::cerr << "VST2 rebuilt PDC did not align the Copy fan-in at sample 64\n";
+    std::cerr
+        << "VST2 rebuilt PDC did not align the Copy fan-in at sample 64\n";
     return 1;
   }
 
@@ -882,19 +972,18 @@ int main() {
   if (!setTestPluginPath("XDG_STATE_HOME", vst2StateHome.string().c_str()))
     return 1;
   const fs::path vst2StateModule =
-      vst2StateHome / ("vst2-state-fixture-" + std::to_string(getpid()) +
-                       ".so");
+      vst2StateHome /
+      ("vst2-state-fixture-" + std::to_string(getpid()) + ".so");
   std::error_code vst2StateCopyError;
-  fs::copy_file(SKYAPO_TEST_VST2_PATH, vst2StateModule,
-                fs::copy_options::none, vst2StateCopyError);
+  fs::copy_file(SKYAPO_TEST_VST2_PATH, vst2StateModule, fs::copy_options::none,
+                vst2StateCopyError);
   if (vst2StateCopyError) {
     std::cerr << "cannot stage isolated VST2 state fixture: "
               << vst2StateCopyError.message() << '\n';
     return 1;
   }
   const fs::path vst2StateConfig = vst2StateHome / "state-chain.txt";
-  const fs::path vst2StateDirectory =
-      vst2StateHome / "skyapo" / "vst2-state";
+  const fs::path vst2StateDirectory = vst2StateHome / "skyapo" / "vst2-state";
   const std::string vst2StateDirective =
       "Plugin: VST2 \"" + vst2StateModule.string() + "\" 0=0.25\n";
   if (!write(vst2StateConfig, vst2StateDirective))
@@ -919,8 +1008,8 @@ int main() {
     std::cerr << "expected exactly one VST2 state sidecar\n";
     return 1;
   }
-  struct stat vst2StateDirStatus {};
-  struct stat vst2StateFileStatus {};
+  struct stat vst2StateDirStatus{};
+  struct stat vst2StateFileStatus{};
   if (stat(vst2StateDirectory.c_str(), &vst2StateDirStatus) < 0 ||
       (vst2StateDirStatus.st_mode & 0077) != 0 ||
       stat(vst2Sidecars.front().c_str(), &vst2StateFileStatus) < 0 ||
@@ -955,8 +1044,7 @@ int main() {
         (std::istreambuf_iterator<char>(corruptFile)),
         std::istreambuf_iterator<char>());
     if (!rejected || std::abs(lastGood[0] - 0.75f) > 1e-6f ||
-        std::abs(lastGood[7] - 0.75f) > 1e-6f ||
-        corruptContents != "corrupt") {
+        std::abs(lastGood[7] - 0.75f) > 1e-6f || corruptContents != "corrupt") {
       std::cerr << "corrupt VST2 state changed the active graph or sidecar\n";
       return 1;
     }
@@ -1921,8 +2009,7 @@ int main() {
       return 1;
     }
 
-  if (!write(path,
-             "Filter: ON IIR Order 1 Coefficients 0.5 0.25 1 -0.5\n"))
+  if (!write(path, "Filter: ON IIR Order 1 Coefficients 0.5 0.25 1 -0.5\n"))
     return 1;
   Engine iirFeedback(48000, 2, 128);
   iirFeedback.loadConfig(path);
@@ -1930,8 +2017,8 @@ int main() {
   iirFeedback.process(feedbackImpulse, 1);
   iirFeedback.process(feedbackImpulse + 2, 2);
   iirFeedback.process(feedbackImpulse + 6, 1);
-  const float expectedFeedback[8] = {.5f, -1.0f, .5f, -1.0f,
-                                    .25f, -.5f, .125f, -.25f};
+  const float expectedFeedback[8] = {.5f,  -1.0f, .5f,   -1.0f,
+                                     .25f, -.5f,  .125f, -.25f};
   for (int i = 0; i < 8; ++i)
     if (std::abs(feedbackImpulse[i] - expectedFeedback[i]) > 1e-6f) {
       std::cerr << "upstream IIR coefficient order/feedback state mismatch at "
@@ -2158,6 +2245,55 @@ int main() {
     return 1;
   }
   sf_close(irFile);
+
+  const auto oversizedIrPath = dir / "oversized-sparse-impulse.wav";
+  constexpr uint32_t sparseIrFrames = 48000U * 60U;
+  constexpr uint32_t sparseIrDataBytes =
+      sparseIrFrames * 2U * static_cast<uint32_t>(sizeof(float));
+  const auto writeLe16 = [](std::ostream &stream, uint16_t value) {
+    stream.put(static_cast<char>(value & 0xff));
+    stream.put(static_cast<char>((value >> 8) & 0xff));
+  };
+  const auto writeLe32 = [](std::ostream &stream, uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+      stream.put(static_cast<char>((value >> shift) & 0xff));
+  };
+  {
+    std::ofstream wav(oversizedIrPath, std::ios::binary | std::ios::trunc);
+    wav.write("RIFF", 4);
+    writeLe32(wav, 36U + sparseIrDataBytes);
+    wav.write("WAVEfmt ", 8);
+    writeLe32(wav, 16);
+    writeLe16(wav, 3); // IEEE float
+    writeLe16(wav, 2);
+    writeLe32(wav, 48000);
+    writeLe32(wav, 48000U * 2U * static_cast<uint32_t>(sizeof(float)));
+    writeLe16(wav, 2U * static_cast<uint16_t>(sizeof(float)));
+    writeLe16(wav, 8U * static_cast<uint16_t>(sizeof(float)));
+    wav.write("data", 4);
+    writeLe32(wav, sparseIrDataBytes);
+    if (!wav)
+      return 1;
+  }
+  fs::resize_file(oversizedIrPath, 44ULL + sparseIrDataBytes);
+  auto oversizedConfig = dir / "oversized-convolution.txt";
+  if (!write(oversizedConfig,
+             "Convolution: oversized-sparse-impulse.wav\n"))
+    return 1;
+  bool oversizedConvolutionRejected = false;
+  try {
+    Engine oversizedConvolution(48000, 2, 256);
+    oversizedConvolution.loadConfig(oversizedConfig.string());
+  } catch (const std::exception &error) {
+    oversizedConvolutionRejected =
+        std::string(error.what()).find("64 MiB per-graph convolution-memory") !=
+        std::string::npos;
+  }
+  if (!oversizedConvolutionRejected) {
+    std::cerr << "oversized sparse convolution IR did not fail before loading\n";
+    return 1;
+  }
+
   auto convolutionConfig = dir / "convolution.txt";
   if (!write(convolutionConfig, "Convolution: impulse.wav\n"))
     return 1;
@@ -2335,8 +2471,13 @@ int main() {
     return 1;
   Engine staged(48000, 2, 128);
   staged.loadConfig(stageRoot.string());
-  if (staged.filterCount() != 2) {
-    std::cerr << "Stage filtering or Include-local stage scope mismatch\n";
+  if (staged.filterCount() != 2 || staged.configNotices().size() != 1 ||
+      staged.configNotices()[0].file != (dir / "staged-child.txt") ||
+      staged.configNotices()[0].line != 1 ||
+      staged.configNotices()[0].message.find("processing is unavailable") ==
+          std::string::npos) {
+    std::cerr << "Stage filtering, warning provenance, or Include-local stage "
+                 "scope mismatch\n";
     return 1;
   }
   float stageSample[2] = {1, -1};

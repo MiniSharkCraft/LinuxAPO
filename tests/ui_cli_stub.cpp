@@ -67,9 +67,13 @@ int main(int argc, char **argv) {
                                std::istreambuf_iterator<char>());
       return input.bad() ? 1 : 0;
     }
-    std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\n"
-                 "41\tfixture.capture\tDelayed Test Input\t\t2\t48000\n"
-                 "42\tfixture.usb-mic\tSelected USB Microphone\tyes\t1\t44100\n";
+    std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+                 "STABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA PATH\t"
+                 "DEFAULT\n"
+                 "41\tfixture.capture\tDelayed Test Input\t\t2\t48000\t"
+                 "\t\t\t\tno\n"
+                 "42\tfixture.usb-mic\tSelected USB Microphone\tyes\t1\t44100\t"
+                 "\t\t\t\tyes\n";
     return 0;
   }
   if (argc == 4 && std::string(argv[1]) == "device" &&
@@ -84,6 +88,16 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && std::string(argv[1]) == "status") {
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    if (const char *format = std::getenv("SKYAPO_UI_TEST_STREAMING_FORMAT")) {
+      const std::string value(format);
+      const auto separator = value.find(':');
+      if (separator != std::string::npos) {
+        std::cout << "Daemon: streaming\nSample rate: "
+                  << value.substr(0, separator)
+                  << " Hz\nChannels: " << value.substr(separator + 1) << "\n";
+        return 0;
+      }
+    }
     std::cout << "Daemon: not reachable\n";
     return 0;
   }

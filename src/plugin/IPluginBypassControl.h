@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -15,6 +16,7 @@ public:
   virtual ~IPluginBypassControl() = default;
   virtual void setPluginBypassed(bool bypassed) noexcept = 0;
   virtual bool pluginBypassed() const noexcept = 0;
+  virtual uint64_t bypassRingCapacitySamples() const noexcept = 0;
 };
 
 class AtomicPluginBypass : public IPluginBypassControl {
@@ -34,7 +36,7 @@ public:
       throw std::runtime_error(
           "plugin latency exceeds SkyAPO's realtime compensation safety limit");
     if (!latencySamples) {
-      bypassDelay_.clear();
+      std::vector<float>().swap(bypassDelay_);
       bypassLatency_ = 0;
       bypassChannels_ = channels;
       bypassCursor_ = 0;
@@ -43,10 +45,16 @@ public:
     if (!channels || latencySamples > std::numeric_limits<size_t>::max() /
                                           static_cast<size_t>(channels))
       throw std::runtime_error("plugin bypass delay buffer size overflow");
+    std::vector<float> replacement(
+        static_cast<size_t>(latencySamples) * channels, 0.0f);
+    bypassDelay_.swap(replacement);
     bypassLatency_ = latencySamples;
     bypassChannels_ = channels;
     bypassCursor_ = 0;
-    bypassDelay_.assign(static_cast<size_t>(latencySamples) * channels, 0.0f);
+  }
+
+  uint64_t bypassRingCapacitySamples() const noexcept override {
+    return bypassDelay_.capacity();
   }
 
 protected:

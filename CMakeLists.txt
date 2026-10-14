@@ -863,6 +863,51 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
     endforeach()
   endforeach()
+  add_test(NAME skyapo-pipewire-e2e-source-consumer-latency
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      source-consumer-latency)
+  set_tests_properties(skyapo-pipewire-e2e-source-consumer-latency
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;latency")
+  add_test(NAME skyapo-pipewire-e2e-surround51
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      surround51)
+  set_tests_properties(skyapo-pipewire-e2e-surround51
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;multichannel")
+  add_test(NAME skyapo-pipewire-e2e-surround71
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      surround71)
+  set_tests_properties(skyapo-pipewire-e2e-surround71
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;multichannel")
   add_test(NAME skyapo-pipewire-e2e-source-replug
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -952,6 +997,21 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
       device-filter)
   set_tests_properties(skyapo-pipewire-e2e-device-filter
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
+  add_test(NAME skyapo-pipewire-e2e-stage-warning
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      stage-warning)
+  set_tests_properties(skyapo-pipewire-e2e-stage-warning
     PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;config")
   add_test(NAME skyapo-pipewire-e2e-device-switch
     COMMAND ${Python3_EXECUTABLE}

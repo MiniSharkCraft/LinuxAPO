@@ -33,6 +33,28 @@ after numerical verification. This validates a live physical capture/DSP/
 virtual-source round trip on the current device, not unplug/replug, other
 hardware, or calibrated end-to-end latency.
 
+Repeat physical-device verification on 2026-10-14 after response-analysis
+changes: PipeWire 1.6.9 was active, with the user service still disabled and
+inactive. The selected source remained
+`alsa_input.pci-0000_00_1f.3.analog-stereo` (capture node 54). A foreground
+`build/skyapod --config examples/preamp.txt` exported `SkyAPO Virtual Mic`
+(`skyapo.virtual_mic`, node 83); both `wpctl status` and `pw-dump` showed the
+source and active FL/FR capture links. Negotiation was F32 planar DSP, 48 kHz,
+stereo FL/FR, quantum 1024. The independent native
+`build/skyapo-realtime-probe` recorded 192000 frames each from the physical
+input and virtual source with fallback disabled: correlation 1, alignment lag
+1024 frames, RMS ratio 0.501187 and gain −6 dB. Live status during streaming
+showed input RMS 0.522735, output RMS 0.261988, DSP ratio 0.501187, 2/2
+capture links, 0 overruns and 0 audited callback allocations/deallocations
+(processing average/max 67.9488/259.954 μs). The foreground daemon exited 0 on
+SIGINT and its virtual source disappeared; subsequent status was unreachable.
+`skyapo config show` remained `Preamp: 0 dB`, the selected physical node was
+unchanged, and `pw-metadata -n default` still showed configured source
+`music_virtual_mic` (WirePlumber's current `default.audio.source` metadata
+resolved to the physical node). The temporary raw/processed microphone WAVs
+were deleted. This proves live processing and independent consumption on this
+workstation device, not physical unplug/replug or total application latency.
+
 Current workstation revalidation on 2026-10-01: the selected physical source
 was `alsa_input.pci-0000_00_1f.3.analog-stereo` (Built-in Audio Analog
 Stereo, PipeWire node 88). SkyAPO created `SkyAPO Virtual Mic`
@@ -95,7 +117,11 @@ Both builds succeeded; both CTest suites passed **3/3** (core, realtime allocati
 
 `SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON` adds mono and stereo private-graph tests to CTest; each launches a private PipeWire server under temporary `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME`, enumerates/selects a deterministic source, checks live daemon status, and lets an independent native PipeWire consumer link to and record `skyapo.virtual_mic`. Both modes assert F32/48 kHz, quantum 1024, negotiated channel/link count, -6 dB DSP ratio and zero audited callback allocations/deallocations. Before recording, the test uses runtime IDs from status plus `pw-dump` to destroy one physical-to-SkyAPO link with `pw-cli`, waits for `skyapod` to restore the complete link count without exiting, then verifies the independent recording numerically. A source-replug mode stops the selected deterministic source, verifies the daemon stays alive while the status socket is unavailable, republishes the same stable `node.name`, and checks the `SkyAPO Virtual Mic` node and all capture links return before an independent client verifies -6 dB output. A server-restart mode stops the private PipeWire server and source, restarts both, then verifies daemon reconnection, the virtual-source properties, capture links and recorded -6 dB result. PipeWire runtime IDs may be reused after a full server restart; the test validates node properties and audio graph rather than assuming IDs are globally unique. On 2026-09-30 mono/stereo link-loss, synthetic source-replug and private server-restart tests passed. These private-graph tests are repeatable without physical hardware and do not validate physical device unplug/replug. They are enabled in the normal hosted Linux CI job; a hosted workflow run is still pending.
 
+On 2026-10-14, `skyapo-pipewire-e2e-source-consumer-latency` added a bounded stereo timestamp probe through the private graph. The synthetic producer encodes `CLOCK_MONOTONIC` timestamps in 17–18 low-amplitude impulses; an independent PipeWire consumer decodes them after the live daemon's upstream `Preamp: -6 dB` path and measures producer-callback to consumer-callback wall delay. Three serial repetitions passed at 48 kHz / 1024 frames: median 116–178 µs and p95 182–221 µs. This boundary is a useful measurement of the synthetic graph's processing handoff, not sample age/quantum buffering as seen by an application, physical ADC/device latency, or total end-to-end latency. A prior draft used shared PipeWire graph frame positions and returned 0 frames/correlation 1.0; that only established a common logical timeline and is not treated as latency evidence.
+
 The private E2E matrix now forces and verifies 44100, 48000 and 96000 Hz independently for both mono and stereo. The helper fails closed if the installed base `pipewire.conf` no longer has exactly one commented setting for each forced clock property. Both daemon status and an independent consumer's negotiated graph clock are checked, along with `MONO` or `FL FR`, F32 planar DSP, 1024-frame quantum, capture-link count and numerical -6 dB output. Local regression on 2026-10-01 passed all six cases; RMS ratio to expected processed output ranged from 1.000004 to 1.000031, with zero audited callback allocations/deallocations and zero overruns. The default full PipeWire-enabled CTest suite passed 58/58; the opt-in FST/VST2 suite passed 57/57, including a 32→64-sample VST2 latency notification, updated PDC/bypass impulse assertions and a private PipeWire E2E with an independent consumer. The ASan/UBSan/LeakSanitizer suite passed 35/35; PipeWire E2E remains disabled in that build. The E2E suites use an isolated synthetic PipeWire source and consumer, not the workstation microphone; hardware-specific claims above remain separate.
+
+The E2E harness now also runs independent 5.1 and 7.1 source → SkyAPO → consumer graphs. On this source revision both tests passed at F32P, 48 kHz, quantum 1024. The 5.1 graph negotiated `FL FR FC LFE RL RR`, 6/6 capture links, 143360 consumer frames, expected-output RMS ratio `1.000017`, zero callback allocations/deallocations and zero overruns. The 7.1 case independently checks `FL FR FC LFE RL RR SL SR` and all 8 links; both use the deterministic identical-channel signal and `Preamp: -6 dB`. Together with the mono E2E, these exercise all nine channel labels accepted by the current runtime. Both tests also pass under ASan/UBSan with `ASAN_OPTIONS=detect_leaks=0`; LeakSanitizer is disabled for this integration run because PipeWire context/library allocations are independently known to persist at teardown. The full default CTest run passed 64/64 and the sanitizer suite 35/35. This is PipeWire graph/mapping evidence, not a physical multichannel microphone test or exhaustive real-device channel-mask proof.
 
 Realtime allocation tests first verify allocator hooks detect deliberate allocations, then process 1000 variable-size blocks each in mono and stereo, plus 1000 blocks through Channel/Copy/Preamp/BiQuad/Delay routing: zero callback allocations/deallocations. Live status likewise reported **0 allocations / 0 deallocations**, and zero processing overruns in sampled normal/instrumented runs. Counters cover executable C++ and wrapped C allocation paths (including linked EAPO code), **not shared-library C allocator internals**. Buffers/pointer arrays/DSP states are initialized outside the callback. Process timing uses lock-free atomics and monotonic timestamps; logging/status serialization runs in the main loop.
 
@@ -203,9 +229,27 @@ The test LV2 bundle was selected via `LV2_PATH` and loaded by `skyapod` using `t
 renderer, warms it up, and reports JSON mean/median/p95/max processing time for
 a fixed block, plus that block's nominal time budget. Input copying and config
 construction are outside the measured interval. It is a local DSP benchmark,
-not a PipeWire callback, scheduling, or end-to-end latency benchmark. It also
-reports process peak RSS, which includes libraries and runtime state and cannot
-be attributed solely to the filter graph.
+not a PipeWire callback, scheduling, or end-to-end latency benchmark. Schema
+`skyapo-bench-v3` reports process peak RSS and a separate, deliberately narrow
+known-buffer payload breakdown: the two upstream `FilterConfiguration` float
+sample planes, upstream `DelayFilter` float rings, actual current PDC vector
+capacities, and SkyAPO-owned plugin dry-bypass rings. The Delay, bypass and PDC
+rings share a 16 MiB per-graph budget; FilterConfiguration scratch has a
+separate 64 MiB cap and a 256-lane/65,536-frame dimension limit. The payload
+total excludes plugin-private and convolution-internal buffers, PipeWire
+runtime scratch, object/pointer storage, allocator metadata, and shared-library
+allocations; it is not total graph memory. Ring storage is replaced on
+control-thread latency changes so a shrink releases historical capacity.
+
+Separately, Engine preflight estimates each convolution IR's decoded samples
+and the arrays allocated by the pinned `libHybridConv::hcInitSingle()` path,
+then enforces a 64 MiB aggregate per-graph convolution-memory budget before
+reading the IR payload into memory. The estimate adds 25% workspace headroom
+and a fixed allowance for FFTW plans/allocator overhead; it is not included in
+the benchmark's known-buffer byte breakdown and is not an exact RSS bound.
+`skyapo-core` creates a sparse 60-second stereo float WAV and verifies that
+loading it is rejected by this budget before payload decoding, while the
+three-tap reference convolution continues to process correctly.
 
 Example filter-count scaling on a development shell:
 

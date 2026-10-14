@@ -10,12 +10,14 @@
 #include <vector>
 
 class QComboBox;
+class QCheckBox;
 class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QMenu;
 class QPushButton;
 class QScrollArea;
+class QSpinBox;
 class QTimer;
 class QThread;
 
@@ -74,6 +76,9 @@ private:
   QPushButton *responseButton{};
   QComboBox *responseSourceCombo{};
   QComboBox *responseResolutionCombo{};
+  QCheckBox *analysisUseRuntimeFormat{};
+  QSpinBox *analysisSampleRate{};
+  QSpinBox *analysisChannels{};
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};

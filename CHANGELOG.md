@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — development after 0.9.0
+
+- Improve PipeWire device identity/default-source reporting, device switching and actionable notices when `Stage: pre-mix/post-mix` cannot run in the capture graph.
+- Harden graph reconfiguration and bounded-memory accounting for FilterConfiguration scratch, Convolution, EAPO Delay, plugin bypass and PDC rings; release stale ring capacity when reported latency shrinks.
+- Extend the editor's response-analysis format/size controls and saved plugin-parameter editing for supported native formats; these remain config-backed, not live plugin GUI/readback.
+- Expand independent PipeWire consumer tests for 5.1/7.1, format transitions, source-to-consumer callback timing, plugin control/PDC, reconnect/recovery and daemon crash restart.
+- Record current-tree verification: `cmake --build build -j2` and CTest **66/66 PASS**; ASan/UBSan build and a complete rerun **67/67 PASS**. One earlier sanitizer run missed timestamp markers in the synthetic latency probe; the focused test passed 3/3 repeats and the subsequent full suite passed. Do not interpret the timing probe as total hardware latency.
+- Do not treat this section as a new release: CMake version remains 0.9.0 and the published `v0.9.0` tag/assets are unchanged.
+
 ## 0.9.0 — daily-use preview (2026-10-01)
 
 - Set the supported release scope to the locally verified PipeWire/DSP/virtual-mic path, transactional config lifecycle, bounded supported plugin/PDC behavior, and Arch staged-install workflow. This is a preview, not 1.0.0 or production-final.

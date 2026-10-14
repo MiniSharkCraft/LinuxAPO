@@ -72,8 +72,7 @@ std::string jsonString(const std::string &value) {
           length = 4;
         bool valid = length && i + length <= value.size();
         for (size_t j = 1; valid && j < length; ++j) {
-          const auto continuation =
-              static_cast<unsigned char>(value[i + j]);
+          const auto continuation = static_cast<unsigned char>(value[i + j]);
           valid = continuation >= 0x80 && continuation <= 0xbf;
           if (j == 1) {
             if (ch == 0xe0)
@@ -107,9 +106,8 @@ std::optional<std::string> statusValue(const std::string &status,
   size_t begin = 0;
   while (begin < status.size()) {
     const size_t end = status.find('\n', begin);
-    const auto line = status.substr(begin, end == std::string::npos
-                                               ? std::string::npos
-                                               : end - begin);
+    const auto line = status.substr(
+        begin, end == std::string::npos ? std::string::npos : end - begin);
     if (line.rfind(prefix, 0) == 0)
       return line.substr(prefix.size());
     if (end == std::string::npos)
@@ -163,8 +161,8 @@ std::optional<unsigned long long> statusUnsigned(const std::string &status,
   return value ? unsignedValue(*value) : std::nullopt;
 }
 
-std::optional<std::vector<std::string>> statusListAfter(
-    const std::string &status, const std::string &label) {
+std::optional<std::vector<std::string>>
+statusListAfter(const std::string &status, const std::string &label) {
   const std::string marker = "\n" + label + ":";
   const auto markerPosition = status.find(marker);
   if (markerPosition == std::string::npos)
@@ -177,9 +175,8 @@ std::optional<std::vector<std::string>> statusListAfter(
   std::vector<std::string> values;
   while (begin < status.size()) {
     const auto end = status.find('\n', begin);
-    const auto line = status.substr(begin, end == std::string::npos
-                                               ? std::string::npos
-                                               : end - begin);
+    const auto line = status.substr(
+        begin, end == std::string::npos ? std::string::npos : end - begin);
     const auto first = line.find_first_not_of(" \t");
     if (first != std::string::npos)
       values.push_back(line.substr(first));
@@ -234,7 +231,7 @@ struct ConfigDiagnostic {
 ConfigDiagnostic parseConfigDiagnostic(const std::string &message,
                                        const std::string &requestedFile) {
   ConfigDiagnostic diagnostic{requestedFile, std::nullopt, std::nullopt,
-                              std::nullopt, message, {}};
+                              std::nullopt,  message,      {}};
   const std::string openError = "cannot open config: ";
   if (message.rfind(openError, 0) == 0) {
     diagnostic.file = message.substr(openError.size());
@@ -262,13 +259,15 @@ ConfigDiagnostic parseConfigDiagnostic(const std::string &message,
     return diagnostic;
 
   diagnostic.file = message.substr(0, marker);
-  diagnostic.line = unsignedValue(message.substr(lineBegin, lineEnd - lineBegin));
+  diagnostic.line =
+      unsignedValue(message.substr(lineBegin, lineEnd - lineBegin));
   size_t reasonBegin = lineEnd + 1;
   while (reasonBegin < message.size() && message[reasonBegin] == ' ')
     ++reasonBegin;
   diagnostic.reason = message.substr(reasonBegin);
 
-  if (diagnostic.line && *diagnostic.line <= std::numeric_limits<unsigned>::max()) {
+  if (diagnostic.line &&
+      *diagnostic.line <= std::numeric_limits<unsigned>::max()) {
     std::ifstream input(diagnostic.file);
     std::string line;
     for (unsigned long long current = 1; current <= *diagnostic.line; ++current)
@@ -295,8 +294,8 @@ void writeConfigCheckJson(const std::string &file, Engine *engine,
     std::cout << "null";
   std::cout << ",\n  \"diagnostics\": [";
   if (diagnostic) {
-    std::cout << "\n    {\n      \"file\": "
-              << jsonString(diagnostic->file) << ",\n      \"line\": ";
+    std::cout << "\n    {\n      \"file\": " << jsonString(diagnostic->file)
+              << ",\n      \"line\": ";
     writeJsonUnsigned(std::cout, diagnostic->line);
     std::cout << ",\n      \"directive\": ";
     if (diagnostic->directive)
@@ -312,15 +311,34 @@ void writeConfigCheckJson(const std::string &file, Engine *engine,
               << ",\n      \"include_chain\": [";
     for (size_t i = 0; i < diagnostic->includeChain.size(); ++i) {
       const auto &site = diagnostic->includeChain[i];
-      std::cout << (i ? "," : "") << "\n        {\"file\": "
-                << jsonString(site.file.string()) << ", \"line\": "
-                << site.line << "}";
+      std::cout << (i ? "," : "")
+                << "\n        {\"file\": " << jsonString(site.file.string())
+                << ", \"line\": " << site.line << "}";
     }
     if (!diagnostic->includeChain.empty())
       std::cout << "\n      ";
     std::cout << "]\n    }\n  ";
   }
+  std::cout << "],\n  \"warnings\": [";
+  if (engine) {
+    const auto &warnings = engine->configNotices();
+    for (size_t i = 0; i < warnings.size(); ++i) {
+      const auto &warning = warnings[i];
+      std::cout << (i ? "," : "")
+                << "\n    {\"file\": " << jsonString(warning.file.string())
+                << ", \"line\": " << warning.line
+                << ", \"message\": " << jsonString(warning.message) << "}";
+    }
+    if (!warnings.empty())
+      std::cout << "\n  ";
+  }
   std::cout << "]\n}\n";
+}
+
+void printConfigWarnings(const Engine &engine) {
+  for (const auto &warning : engine.configNotices())
+    std::cerr << "Warning: " << warning.file.string() << ':' << warning.line
+              << ": " << warning.message << '\n';
 }
 
 void writeJsonNumber(std::ostream &out, const std::optional<double> &value) {
@@ -422,8 +440,8 @@ void writeDiagnosticsJson(const std::string &status) {
       writeJsonUnsigned(out, id);
       out << ", \"name\": ";
       if (open != std::string::npos && virtualNode->back() == ')')
-        out << jsonString(virtualNode->substr(open + 2,
-                                              virtualNode->size() - open - 3));
+        out << jsonString(
+            virtualNode->substr(open + 2, virtualNode->size() - open - 3));
       else
         out << "null";
       out << '}';
@@ -480,13 +498,13 @@ void writeDiagnosticsJson(const std::string &status) {
       begin += std::string("\nFilter chain:").size();
       while (begin < status.size()) {
         const auto end = status.find('\n', begin);
-        const auto line = status.substr(begin, end == std::string::npos
-                                                   ? std::string::npos
-                                                   : end - begin);
+        const auto line = status.substr(
+            begin, end == std::string::npos ? std::string::npos : end - begin);
         if (line.rfind("Config: ", 0) == 0)
           break;
         const auto firstText = line.find_first_not_of(" \t");
-        if (firstText != std::string::npos && line.substr(firstText) != "(none)") {
+        if (firstText != std::string::npos &&
+            line.substr(firstText) != "(none)") {
           if (!first)
             out << ", ";
           out << jsonString(line.substr(firstText));
@@ -662,8 +680,7 @@ int main(int argc, char **argv) {
         std::cout << status;
       return 0;
     }
-    if (cmd == "diagnostics" && argc == 3 &&
-        std::string(argv[2]) == "--json") {
+    if (cmd == "diagnostics" && argc == 3 && std::string(argv[2]) == "--json") {
       const auto status = settings::queryStatus();
       writeDiagnosticsJson(status);
       return 0;
@@ -672,8 +689,8 @@ int main(int argc, char **argv) {
       const auto status = settings::queryStatus();
       if (status.empty() ||
           status.find("Daemon: not reachable") != std::string::npos)
-        throw std::runtime_error(
-            "daemon is unavailable or unresponsive; active filters unavailable");
+        throw std::runtime_error("daemon is unavailable or unresponsive; "
+                                 "active filters unavailable");
       const auto begin = status.find("Filter chain:");
       const auto end = status.find("\nConfig:", begin);
       if (begin == std::string::npos)
@@ -727,19 +744,17 @@ int main(int argc, char **argv) {
         throw std::runtime_error("plugin parameter value must be finite");
       const auto command =
           "PLUGIN_SET " + settings::ipc::lengthPrefixed(argv[3]) + " " +
-          settings::ipc::lengthPrefixed(argv[4]) + " " +
-          std::to_string(value);
+          settings::ipc::lengthPrefixed(argv[4]) + " " + std::to_string(value);
       std::cout << settings::daemonRequest(command);
       return 0;
     }
-    if (cmd == "plugin" && argc == 5 &&
-        std::string(argv[2]) == "bypass") {
+    if (cmd == "plugin" && argc == 5 && std::string(argv[2]) == "bypass") {
       const std::string state(argv[4]);
       if (state != "on" && state != "off")
         throw std::runtime_error("plugin bypass state must be 'on' or 'off'");
-      const auto command =
-          "PLUGIN_BYPASS " + settings::ipc::lengthPrefixed(argv[3]) + " " +
-          settings::ipc::lengthPrefixed(state);
+      const auto command = "PLUGIN_BYPASS " +
+                           settings::ipc::lengthPrefixed(argv[3]) + " " +
+                           settings::ipc::lengthPrefixed(state);
       std::cout << settings::daemonRequest(command);
       return 0;
     }
@@ -750,13 +765,11 @@ int main(int argc, char **argv) {
         const std::string requested = argv[3];
         const auto plugins = clapHost.list();
         const auto found = std::find_if(
-            plugins.begin(), plugins.end(), [&](const auto &plugin) {
-              return plugin.first == requested;
-            });
+            plugins.begin(), plugins.end(),
+            [&](const auto &plugin) { return plugin.first == requested; });
         if (found != plugins.end()) {
           const auto info = clapHost.describe(requested);
-          std::cout << info.name << "\nFormat: CLAP\nID: " << info.uri
-                    << "\n";
+          std::cout << info.name << "\nFormat: CLAP\nID: " << info.uri << "\n";
           if (info.inputParameters.empty())
             std::cout << "Input parameters: none\n";
           for (const auto &parameter : info.inputParameters)
@@ -774,9 +787,8 @@ int main(int argc, char **argv) {
         VST3PluginHost host;
         const auto plugins = host.list();
         const auto found = std::find_if(
-            plugins.begin(), plugins.end(), [&](const auto &plugin) {
-              return plugin.first == requested;
-            });
+            plugins.begin(), plugins.end(),
+            [&](const auto &plugin) { return plugin.first == requested; });
         if (found != plugins.end()) {
           const auto info = host.describe(requested);
           std::cout << info.name << "\nFormat: VST3\nClass UID: " << info.uri
@@ -851,7 +863,7 @@ int main(int argc, char **argv) {
         const auto selection = settings::deviceSelection();
         std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\t"
                      "SAMPLE RATE\tSTABLE PROPERTY\tDEVICE BUS ID\t"
-                     "ALSA CARD\tALSA PATH\n";
+                     "ALSA CARD\tALSA PATH\tDEFAULT\n";
         for (auto &d : ds.sources)
           if (d.name != "skyapo.virtual_mic")
             std::cout << d.id << '\t' << d.name << '\t' << d.description << '\t'
@@ -866,7 +878,11 @@ int main(int argc, char **argv) {
                                        : "unknown")
                       << '\t' << d.identity.stableProperty() << '\t'
                       << d.identity.busId << '\t' << d.identity.alsaCard << '\t'
-                      << d.identity.alsaPath << '\n';
+                      << d.identity.alsaPath << '\t'
+                      << (d.isDefault.has_value()
+                              ? (*d.isDefault ? "yes" : "no")
+                              : "unknown")
+                      << '\n';
         return 0;
       }
       if (action == "set" && argc == 4) {
@@ -895,8 +911,7 @@ int main(int argc, char **argv) {
       std::cout << settings::daemonRequest("RELOAD\n");
       return 0;
     }
-    if (cmd == "config" && argc == 5 &&
-        std::string(argv[2]) == "check" &&
+    if (cmd == "config" && argc == 5 && std::string(argv[2]) == "check" &&
         std::string(argv[3]) == "--json") {
       const std::string file = argv[4];
       std::unique_ptr<Engine> engine;
@@ -913,6 +928,7 @@ int main(int argc, char **argv) {
         writeConfigCheckJson(file, nullptr, diagnostic);
         return 1;
       }
+      printConfigWarnings(*engine);
       writeConfigCheckJson(file, engine.get(), std::nullopt);
       return 0;
     }
@@ -920,6 +936,7 @@ int main(int argc, char **argv) {
       Engine e(48000, 2, 8192, {}, false, true, configDeviceMatchText());
       e.loadConfig(argv[3]);
       std::cout << "Valid config: " << e.filterCount() << " filters\n";
+      printConfigWarnings(e);
       return 0;
     }
     printUsage(std::cerr);

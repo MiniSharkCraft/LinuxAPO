@@ -198,7 +198,7 @@ struct DefaultSinkVolumeMonitor::Impl {
       return 0;
     std::string name;
     if (!value ||
-        !DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(value, name))
+        !DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(value, name))
       self.select({});
     else
       self.select(name);
@@ -274,7 +274,7 @@ DefaultSinkVolumeMonitor::snapshot() const noexcept {
   return impl_->current;
 }
 
-bool DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(
+bool DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
     const char *value, std::string &stableName) {
   if (!value)
     return false;
