@@ -37,7 +37,14 @@ FIXED_FILES = (
     "usr/share/licenses/skyapo/MuParserX-License.txt",
 )
 MAN_PAGES = ("skyapo.1", "skyapod.1", "skyapo-bench.1")
+MAN_PAGE_SUFFIXES = ("", ".gz", ".zst", ".xz", ".bz2")
 PACKAGE_FILES = tuple(f"usr/bin/{binary}" for binary in EXECUTABLES) + FIXED_FILES
+
+
+def man_page_paths(root, page):
+    """Return installed forms used by Arch's man-page compression hooks."""
+    directory = pathlib.Path(root) / "usr/share/man/man1"
+    return [directory / f"{page}{suffix}" for suffix in MAN_PAGE_SUFFIXES]
 
 
 def run(command, env=None, expected=0):
@@ -96,7 +103,7 @@ def validate_payload(root, env, verify_systemd, render_test_binary):
         if not os.access(path, os.X_OK):
             raise RuntimeError(f"installed binary is not executable: {path}")
     for page in MAN_PAGES:
-        if not any((root / f"usr/share/man/man1/{page}{suffix}").is_file() for suffix in ("", ".gz")):
+        if not any(path.is_file() for path in man_page_paths(root, page)):
             raise RuntimeError(f"installed man page is missing: {page}")
 
     unit_path = root / "usr/lib/systemd/user/skyapod.service"
@@ -127,8 +134,7 @@ def assert_package_payload_removed():
         if path.exists():
             raise RuntimeError(f"pacman -Rns left package file behind: {path}")
     for page in MAN_PAGES:
-        for suffix in ("", ".gz"):
-            path = pathlib.Path("/usr/share/man/man1") / f"{page}{suffix}"
+        for path in man_page_paths("/", page):
             if path.exists():
                 raise RuntimeError(f"pacman -Rns left package man page behind: {path}")
 
