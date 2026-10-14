@@ -433,10 +433,13 @@ void Engine::ConfigurationDeleter::operator()(
 
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
                std::vector<std::wstring> names, bool allowPendingEndpointVolume,
-               bool enablePluginFilters, std::wstring deviceMatchText)
+               bool enablePluginFilters, std::wstring deviceMatchText,
+               std::wstring deviceName, std::wstring connectionName)
     : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames),
       allowPendingEndpointVolume(allowPendingEndpointVolume),
-      deviceMatchText(std::move(deviceMatchText)) {
+      deviceMatchText(std::move(deviceMatchText)),
+      deviceName(std::move(deviceName)),
+      connectionName(std::move(connectionName)) {
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
@@ -499,6 +502,12 @@ void Engine::loadConfig(const std::string &path) {
                                static_cast<mup::float_type>(channelCount));
   expressionParser.DefineConst(L"outputChannelCount",
                                static_cast<mup::float_type>(channelCount));
+  // EAPO exposes device strings and the active processing stage to config
+  // expressions. Linux maps these to the selected PipeWire source description,
+  // stable node name and capture stage respectively.
+  expressionParser.DefineConst(L"deviceName", mup::Value(deviceName));
+  expressionParser.DefineConst(L"connectionName", mup::Value(connectionName));
+  expressionParser.DefineConst(L"stage", mup::Value(L"capture"));
   expressionParser.DefineFun(new skyapo::config::RegexSearchFunction());
   expressionParser.DefineFun(new skyapo::config::RegexReplaceFunction());
   // These are the actual Equalizer APO operators used by its
@@ -1174,6 +1183,26 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     }
     if (!stageActive)
       continue;
+
+    // The upstream BiQuadFilterFactory deliberately returns no filter for
+    // disabled slots and for its "None" sentinel (the official example uses
+    // `Filter N: OFF None`, while its demo uses `Filter N: ON None`). Treat
+    // those forms as valid no-ops before the Linux strict-unknown-command
+    // validation below. OFF slots may retain the disabled filter's parameters
+    // (for example `OFF PK Fc ...`), which upstream also ignores.
+    if (command == L"Filter" || command.rfind(L"Filter ", 0) == 0) {
+      std::wistringstream filterState(params);
+      std::wstring state;
+      filterState >> state;
+      if (state == L"OFF")
+        continue;
+      if (state == L"ON") {
+        std::wstring type;
+        filterState >> type;
+        if (type == L"None")
+          continue;
+      }
+    }
 
     if (command == L"Include") {
       if (params.size() >= 2 && params.front() == L'"' && params.back() == L'"')

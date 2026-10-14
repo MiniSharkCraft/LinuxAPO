@@ -6,6 +6,7 @@
 #include <QString>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QComboBox;
@@ -31,6 +32,8 @@ private:
   void openConfig(const QString &path);
   void rebuildRows();
   void addFilter(const QString &line);
+  void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {});
+  void configureSelectedPluginParameters();
   void markModified();
   bool saveConfig();
   Q_INVOKABLE bool saveConfigAsPath(const QString &path);
@@ -69,6 +72,8 @@ private:
   QString diagnosticSourcePath;
   int diagnosticSourceLine{};
   QPushButton *responseButton{};
+  QComboBox *responseSourceCombo{};
+  QComboBox *responseResolutionCombo{};
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};

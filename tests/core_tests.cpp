@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -254,12 +255,34 @@ int main() {
   plugin.setPluginBypass("https://skyapo.example/plugins/test-gain", true);
   float lv2Bypassed[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
   const float lv2Dry[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
+  const auto lv2ModulePath = fs::path(SKYAPO_TEST_LV2_PATH) /
+                             "skyapo-test.lv2" / "skyapo_test_gain.so";
+  void *lv2Fixture = dlopen(lv2ModulePath.c_str(), RTLD_NOW | RTLD_LOCAL);
+  using LV2IntState = int (*)();
+  using LV2CallCount = unsigned (*)();
+  const auto lv2LastEnabled =
+      lv2Fixture ? reinterpret_cast<LV2IntState>(
+                       dlsym(lv2Fixture, "skyapo_test_lv2_last_enabled"))
+                 : nullptr;
+  const auto lv2ProcessCalls =
+      lv2Fixture ? reinterpret_cast<LV2CallCount>(
+                       dlsym(lv2Fixture, "skyapo_test_lv2_process_calls"))
+                 : nullptr;
+  const unsigned lv2CallsBeforeBypass = lv2ProcessCalls ? lv2ProcessCalls() : 0;
   plugin.process(lv2Bypassed, 4);
   for (unsigned i = 0; i < 8; ++i)
     if (std::abs(lv2Bypassed[i] - lv2Dry[i]) > 1e-6f) {
       std::cerr << "LV2 host bypass did not preserve dry samples\n";
       return 1;
     }
+  if (!lv2LastEnabled || !lv2ProcessCalls || lv2LastEnabled() != 0 ||
+      lv2ProcessCalls() <= lv2CallsBeforeBypass) {
+    std::cerr << "LV2 native bypass did not disable the plugin while still "
+                 "calling run()\n";
+    if (lv2Fixture)
+      dlclose(lv2Fixture);
+    return 1;
+  }
   plugin.setPluginBypass("https://skyapo.example/plugins/test-gain", false);
   float lv2Reenabled[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
   plugin.process(lv2Reenabled, 4);
@@ -268,6 +291,13 @@ int main() {
       std::cerr << "LV2 host unbypass did not resume plugin processing\n";
       return 1;
     }
+  if (lv2LastEnabled() != 1) {
+    std::cerr << "LV2 native bypass did not re-enable the plugin\n";
+    if (lv2Fixture)
+      dlclose(lv2Fixture);
+    return 1;
+  }
+  dlclose(lv2Fixture);
 
   for (const char *uri :
        {"https://skyapo.example/plugins/test-latency-legacy",
@@ -1057,9 +1087,35 @@ int main() {
       std::cerr << "VST3 host bypass did not preserve dry samples\n";
       return 1;
     }
+#ifdef SKYAPO_TEST_VST3
+  void *vst3Fixture =
+      dlopen(SKYAPO_TEST_VST3_MODULE_PATH, RTLD_NOW | RTLD_LOCAL);
+  using VST3BypassState = bool (*)();
+  auto vst3BypassState =
+      vst3Fixture ? reinterpret_cast<VST3BypassState>(dlsym(
+                        vst3Fixture, "skyapo_test_vst3_last_process_bypass"))
+                  : nullptr;
+  if (!vst3BypassState || !vst3BypassState()) {
+    std::cerr << "VST3 host bypass did not reach/process the native bypass "
+                 "parameter\n";
+    if (vst3Fixture)
+      dlclose(vst3Fixture);
+    return 1;
+  }
+#endif
   vst3Plugin.setPluginBypass(vst3Uid, false);
   if (!checkVst3GainBlock(0.25f, "unbypassed"))
     return 1;
+#ifdef SKYAPO_TEST_VST3
+  if (!vst3BypassState || vst3BypassState()) {
+    std::cerr << "VST3 host unbypass did not clear the native bypass "
+                 "parameter\n";
+    if (vst3Fixture)
+      dlclose(vst3Fixture);
+    return 1;
+  }
+  dlclose(vst3Fixture);
+#endif
   for (const auto &invalid : {std::pair<const char *, float>{"999", 0.5f},
                               {"bad", 0.5f},
                               {"7", -0.01f},
@@ -1384,6 +1440,23 @@ int main() {
       std::cerr << "CLAP host bypass did not preserve dry samples\n";
       return 1;
     }
+#ifdef SKYAPO_TEST_CLAP
+  void *clapFixture = dlopen(
+      (fs::path(SKYAPO_TEST_CLAP_PATH) / "skyapo-test-clap.clap").c_str(),
+      RTLD_NOW | RTLD_LOCAL);
+  using ClapBypassState = bool (*)();
+  auto clapBypassState =
+      clapFixture ? reinterpret_cast<ClapBypassState>(dlsym(
+                        clapFixture, "skyapo_test_clap_last_process_bypass"))
+                  : nullptr;
+  if (!clapBypassState || !clapBypassState()) {
+    std::cerr << "CLAP host bypass did not reach/process the native bypass "
+                 "parameter\n";
+    if (clapFixture)
+      dlclose(clapFixture);
+    return 1;
+  }
+#endif
   clapOverride.setPluginBypass("org.skyapo.test.gain", false);
   float clapWetAgain[8] = {.2f, -.4f, .6f, -.8f, 1.0f, -1.0f, .5f, -.5f};
   clapOverride.process(clapWetAgain, 4);
@@ -1392,6 +1465,15 @@ int main() {
       std::cerr << "CLAP host unbypass did not resume plugin processing\n";
       return 1;
     }
+#ifdef SKYAPO_TEST_CLAP
+  if (clapBypassState()) {
+    std::cerr
+        << "CLAP host unbypass did not clear its native bypass parameter\n";
+    dlclose(clapFixture);
+    return 1;
+  }
+  dlclose(clapFixture);
+#endif
 
   // Exercise the format-neutral live control API directly while the actual
   // CLAP instance is processing. Its mailbox and event storage are allocated
@@ -1505,7 +1587,7 @@ int main() {
   const double expectedSavedGain = 0.875;
   std::memcpy(expectedPayload + 8, &expectedSavedGain,
               sizeof(expectedSavedGain));
-  expectedPayload[16] = 0x53;
+  expectedPayload[16] = 0;
   expectedPayload[17] = 0x4b;
   expectedPayload[18] = 0x59;
   expectedPayload[19] = 0x31;
@@ -1553,7 +1635,7 @@ int main() {
     return 1;
   }
   auto pluginRejectedBytes = stateBytes;
-  pluginRejectedBytes[payloadOffset + 16] ^= 0x01;
+  pluginRejectedBytes[payloadOffset + 17] ^= 0x01;
   uint64_t checksum = 14695981039346656037ull;
   const auto hashByte = [&checksum](uint8_t byte) {
     checksum ^= byte;
@@ -1800,6 +1882,30 @@ int main() {
   if (!rejected) {
     std::cerr << "unsupported config command was not rejected\n";
     return 1;
+  }
+
+  // The upstream BiQuad factory treats disabled slots and the `None`
+  // placeholder as intentional no-ops. Cover forms present in the pinned
+  // EAPO example/demo configs, including disabled rows that retain parameters.
+  for (const auto &disabled : {
+           std::string("Filter 3: OFF None\n"),
+           std::string("Filter 3: OFF PK Fc 100 Hz Gain 6 dB Q 1\n"),
+           std::string("Filter 3: ON None\n"),
+       }) {
+    if (!write(path, disabled))
+      return 1;
+    Engine noOp(48000, 2, 128);
+    noOp.loadConfig(path);
+    float unchanged[] = {.25f, -.5f, 1.0f, -2.0f};
+    const float expectedUnchanged[] = {.25f, -.5f, 1.0f, -2.0f};
+    noOp.process(unchanged, 2);
+    if (noOp.filterCount() != 0 ||
+        !std::equal(std::begin(unchanged), std::end(unchanged),
+                    std::begin(expectedUnchanged))) {
+      std::cerr << "upstream disabled/None Filter slot was not a no-op: "
+                << disabled;
+      return 1;
+    }
   }
 
   if (!write(path, "Filter: ON IIR Order 1 Coefficients 1 0 1 0\n"))
@@ -2265,6 +2371,31 @@ int main() {
     std::cerr << "EAPO Device matching OR/AND/GUID or Include scope failed\n";
     return 1;
   }
+  const auto nestedScope = dir / "nested-scope-root.txt";
+  if (!write(nestedScope,
+             "Stage: capture\nDevice: USB Microphone\nPreamp: -6 dB\n"
+             "Include: nested-scope-child.txt\nPreamp: -3 dB\n") ||
+      !write(dir / "nested-scope-child.txt",
+             "Device: no-such-device\nPreamp: 48 dB\n"
+             "Device: USB Microphone\nPreamp: 3 dB\n"
+             "Include: nested-scope-grandchild.txt\nPreamp: -1 dB\n") ||
+      !write(dir / "nested-scope-grandchild.txt",
+             "Stage: post-mix\nPreamp: 48 dB\n"
+             "Include: skipped-by-stage.txt\nStage: capture\n"
+             "Device: no-such-device\nPreamp: 48 dB\n"
+             "Device: USB Microphone\nPreamp: 1 dB\n") ||
+      !write(dir / "skipped-by-stage.txt", "Unsupported: must not load\n"))
+    return 1;
+  Engine nestedScopeEngine(48000, 2, 128, {}, false, true, testDevice);
+  nestedScopeEngine.loadConfig(nestedScope.string());
+  float nestedScopeSamples[2] = {1.0f, -1.0f};
+  nestedScopeEngine.process(nestedScopeSamples, 1);
+  if (nestedScopeEngine.filterCount() != 5 ||
+      std::abs(nestedScopeSamples[0] - expectedDeviceGain) > 1e-5f ||
+      std::abs(nestedScopeSamples[1] + expectedDeviceGain) > 1e-5f) {
+    std::cerr << "nested Include did not restore its Device/Stage scope\n";
+    return 1;
+  }
   if (!write(deviceConfig, "Device: all\nPreamp: -6 dB\n"))
     return 1;
   Engine wildcardDevice(48000, 2, 128);
@@ -2337,6 +2468,27 @@ int main() {
     std::cerr << "nested If/ElseIf config selected the wrong branch\n";
     return 1;
   }
+
+#ifdef SKYAPO_TEST_MUPARSERX
+  if (!write(conditional, "If: deviceName == \"Test Microphone\"\n"
+                          "If: connectionName == \"alsa_input.test\"\n"
+                          "If: stage == \"capture\"\n"
+                          "Preamp: -6 dB\n"
+                          "EndIf:\nEndIf:\nEndIf:\n"))
+    return 1;
+  Engine expressionContext(48000, 2, 128, {}, false, false, {},
+                           L"Test Microphone", L"alsa_input.test");
+  expressionContext.loadConfig(conditional.string());
+  float contextSamples[2] = {1.0f, -1.0f};
+  expressionContext.process(contextSamples, 1);
+  if (expressionContext.filterCount() != 1 ||
+      std::abs(contextSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(contextSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "PipeWire-mapped EAPO string/stage expression variables "
+                 "selected the wrong branch\n";
+    return 1;
+  }
+#endif
 
   if (!write(conditional, "If: sampleRate >>> 1\nPreamp: -6 dB\nEndIf:\n"))
     return 1;

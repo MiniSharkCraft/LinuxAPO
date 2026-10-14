@@ -9,8 +9,20 @@ typedef struct {
   const float *input[2];
   float *output[2];
   float *gain;
+  float *enabled;
   LV2_URID_Map *map;
 } TestGain;
+
+static int last_enabled = -1;
+static unsigned process_calls = 0;
+
+LV2_SYMBOL_EXPORT int skyapo_test_lv2_last_enabled(void) {
+  return last_enabled;
+}
+
+LV2_SYMBOL_EXPORT unsigned skyapo_test_lv2_process_calls(void) {
+  return process_calls;
+}
 
 static LV2_Handle instantiate(const LV2_Descriptor *descriptor, double rate,
                               const char *bundle, const LV2_Feature *const *features) {
@@ -72,14 +84,19 @@ static void connect_port(LV2_Handle instance, uint32_t port, void *data) {
     gain->output[port - 2] = (float *)data;
   else if (port == 4)
     gain->gain = (float *)data;
+  else if (port == 5)
+    gain->enabled = (float *)data;
 }
 
 static void run(LV2_Handle instance, uint32_t frames) {
   TestGain *gain = (TestGain *)instance;
+  const int enabled = gain->enabled ? (int)*gain->enabled : 1;
+  last_enabled = enabled;
+  ++process_calls;
   const float multiplier = gain->gain ? *gain->gain : 0.0f;
   for (uint32_t i = 0; i < frames; ++i) {
-    gain->output[0][i] = gain->input[0][i] * multiplier;
-    gain->output[1][i] = gain->input[1][i] * multiplier;
+    gain->output[0][i] = gain->input[0][i] * (enabled ? multiplier : 1.0f);
+    gain->output[1][i] = gain->input[1][i] * (enabled ? multiplier : 1.0f);
   }
 }
 

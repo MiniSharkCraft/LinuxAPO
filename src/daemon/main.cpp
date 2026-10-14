@@ -19,14 +19,15 @@ int main(int argc, char **argv) {
     if (config.empty())
       config = settings::config();
     config = std::filesystem::absolute(config).string();
-    if (settings::device().empty())
+    if (settings::deviceSelection().name.empty())
       throw std::runtime_error(
           "select an input with skyapo device set <id-or-name>");
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
     while (!stopping) {
       try {
-        runPipeWire(settings::device(), config, stopping);
+        const auto selection = settings::deviceSelection();
+        runPipeWire(selection.name, selection.stableProperty, config, stopping);
       } catch (const std::exception &e) {
         std::cerr << "skyapod: " << e.what() << "; retrying in 2 seconds\n";
         for (int i = 0; i < 20 && !stopping; ++i)

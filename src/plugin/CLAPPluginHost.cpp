@@ -451,8 +451,16 @@ bool CLAP_ABI rejectEvent(const clap_output_events_t *,
   return false;
 }
 
+class IClapNativeBypass {
+public:
+  virtual ~IClapNativeBypass() = default;
+  virtual bool hasNativeBypass() const noexcept = 0;
+  virtual void setNativeBypass(bool bypassed) noexcept = 0;
+};
+
 class CLAPInstance final : public IPluginInstance,
                            public IPluginParameterControl,
+                           public IClapNativeBypass,
                            public IPluginLatencyRefresh,
                            public IPluginFailureState,
                            public IPluginStatePersistence {
@@ -580,6 +588,16 @@ public:
                                  static_cast<float>(info.min_value),
                                  static_cast<float>(info.max_value),
                                  static_cast<float>(value)});
+        if (info.flags & CLAP_PARAM_IS_BYPASS) {
+          if (nativeBypassIndex || info.min_value != 0.0 ||
+              info.max_value != 1.0 || !(info.flags & CLAP_PARAM_IS_STEPPED) ||
+              (info.flags & CLAP_PARAM_IS_READONLY))
+            throw std::runtime_error(
+                "CLAP plugin supplied an invalid or duplicate bypass "
+                "parameter: " +
+                pluginId);
+          nativeBypassIndex = i;
+        }
       }
     }
     for (const auto &override : overrides) {
@@ -671,6 +689,17 @@ public:
 
   const std::string &uri() const noexcept override {
     return pluginId;
+  }
+  bool hasNativeBypass() const noexcept override {
+    return nativeBypassIndex.has_value();
+  }
+  void setNativeBypass(bool bypassed) noexcept override {
+    if (!nativeBypassIndex)
+      return;
+    const size_t index = *nativeBypassIndex;
+    liveParameters[index].value.store(bypassed ? 1.0f : 0.0f,
+                                      std::memory_order_relaxed);
+    liveParameters[index].revision.fetch_add(1, std::memory_order_release);
   }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfo;
@@ -933,6 +962,7 @@ private:
   std::unique_ptr<uint32_t[]> consumedRevisions;
   std::vector<bool> hasStaticOverride;
   std::vector<size_t> staticOverrideIndices;
+  std::optional<size_t> nativeBypassIndex;
   uint32_t eventBatchCount{};
   clap_audio_port_info_t inputInfo{}, outputInfo{};
   bool active = false, processing = false;
@@ -969,6 +999,9 @@ public:
     channelCount = static_cast<unsigned>(channels.size());
     instance = host.createForConfig(pluginId, sampleRate, maxFrames, channels,
                                     parameterOverrides, source, line);
+    nativeBypassControl = dynamic_cast<IClapNativeBypass *>(instance.get());
+    nativeBypassSupported =
+        nativeBypassControl && nativeBypassControl->hasNativeBypass();
     auto outputChannels = instance->initialize(sampleRate, maxFrames, channels);
     prepareBypassDelay(instance->latencySamples(), channelCount);
     return outputChannels;
@@ -979,9 +1012,15 @@ public:
         std::fill_n(output[channel], frames, 0.0f);
       return;
     }
-    if (copyInputWhenBypassed(output, input, frames, channelCount))
+    if (!nativeBypassSupported &&
+        copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
+  }
+  void setPluginBypassed(bool bypassed) noexcept override {
+    AtomicPluginBypass::setPluginBypassed(bypassed);
+    if (nativeBypassSupported)
+      nativeBypassControl->setNativeBypass(bypassed);
   }
   bool processingFailed() const noexcept override {
     return instance && instance->processingFailed();
@@ -1038,6 +1077,8 @@ public:
 private:
   CLAPPluginHost &host;
   std::string pluginId;
+  IClapNativeBypass *nativeBypassControl{};
+  bool nativeBypassSupported{};
   std::vector<PluginParameterValue> parameterOverrides;
   std::filesystem::path source;
   unsigned line{};
@@ -1200,6 +1241,8 @@ PluginDescription CLAPPluginHost::describe(const std::string &id) const {
     clap_param_info_t info{};
     if (!params->get_info(plugin, i, &info))
       throw std::runtime_error("cannot read CLAP parameter metadata: " + id);
+    if (info.flags & CLAP_PARAM_IS_READONLY)
+      continue;
     double value = info.default_value;
     (void)params->get_value(plugin, info.id, &value);
     result.inputParameters.push_back(

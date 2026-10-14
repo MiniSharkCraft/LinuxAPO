@@ -72,6 +72,9 @@ jobs:
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     steps:
+      - name: Bootstrap Git for recursive checkout
+        run: pacman -Syu --noconfirm --needed git
+
       - name: Check out source and pinned upstreams
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -135,6 +138,9 @@ jobs:
     runs-on: ubuntu-24.04
     container: archlinux:base
     steps:
+      - name: Bootstrap Git for checkout
+        run: pacman -Syu --noconfirm --needed git
+
       - name: Check out package smoke harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

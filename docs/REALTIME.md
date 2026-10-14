@@ -13,6 +13,26 @@ directory as `proof-final-20261001-1630-raw.wav` and
 `proof-final-20261001-1630-processed.wav`; they contain microphone audio. The
 daemon received SIGTERM and removed its virtual source afterward.
 
+Fresh physical-device verification on 2026-10-14 (PipeWire 1.6.9): with the
+user daemon and service inactive, `skyapo device list/current` selected
+`alsa_input.pci-0000_00_1f.3.analog-stereo` (Built-in Audio Analog Stereo,
+node 54). A foreground `skyapod --config examples/preamp.txt` negotiated F32
+planar DSP, 48 kHz, stereo FL/FR, quantum 1024, and created `SkyAPO Virtual
+Mic` (`skyapo.virtual_mic`, node 84). `wpctl status` and `pw-dump` both showed
+the source. `skyapo-realtime-probe` explicitly captured the physical input and
+virtual output concurrently with fallback disabled: 192000 frames each,
+correlation 1, alignment lag 1024 frames, RMS ratio 0.501187 and gain −6 dB.
+During capture `skyapo status --verbose` reported input RMS 0.721468, output
+RMS 0.36159, DSP ratio 0.501187, one upstream Preamp filter, 2/2 active links,
+60.8055 μs average / 112.126 μs maximum processing time, 0 overruns, and 0
+audited callback allocations/deallocations. The foreground daemon exited
+cleanly on SIGINT; subsequent status reported unreachable and PipeWire no
+longer listed the virtual source. The configured default source remained
+`music_virtual_mic`. Temporary raw/processed microphone WAVs were deleted
+after numerical verification. This validates a live physical capture/DSP/
+virtual-source round trip on the current device, not unplug/replug, other
+hardware, or calibrated end-to-end latency.
+
 Current workstation revalidation on 2026-10-01: the selected physical source
 was `alsa_input.pci-0000_00_1f.3.analog-stereo` (Built-in Audio Analog
 Stereo, PipeWire node 88). SkyAPO created `SkyAPO Virtual Mic`
@@ -137,6 +157,12 @@ The separate `skyapo-pipewire-e2e-transition-format` case compiles an E2E-only t
 
 On 2026-09-30, `skyapo start` and `skyapo restart` were exercised against the live desktop PipeWire server with isolated XDG configuration; separate PIDs `1726284` and `1726296` both returned to streaming with 2/2 links. The stronger acceptance used an isolated PipeWire 1.6.9 graph and deterministic `skyapo.test.input` source (node 33), with `Preamp: -6 dB`. Before restart, daemon PID `1771944` exposed `SkyAPO Virtual Mic` node 37 at F32 planar, 48 kHz, stereo FL/FR, quantum 1024; status measured amplitude ratio 0.501187, zero overruns and zero audited callback allocations/deallocations. `skyapo restart` created PID `1772247`, restored the same virtual source/format/links/filter and 0.501187 ratio. The independent native consumer then exited 0 after capturing 144384 stereo frames: RMS 0.03543952 versus expected 0.03543929, ratio 1.000006. Status remained streaming with 2/2 links and zero overruns/allocations after the consumer detached; `skyapo stop` and private server shutdown were clean. A separate physical-mic probe during changing ambient input produced correlation 0.199082 and was discarded; it is not used as gain evidence.
 
+### User-systemd daemon crash recovery
+
+On 2026-10-14, the opt-in `skyapo-pipewire-e2e-systemd-crash-restart` test ran against the current user's active systemd manager and a private PipeWire graph/source. It reads `Restart`/`RestartSec` from `packaging/skyapod.service.in`, launches a uniquely named transient user service with those settings and isolated XDG/PipeWire paths, then deliberately SIGKILLs only that test unit's `skyapod`. systemd reported one restart and replaced PID `404840` with `404926`; the daemon returned to `streaming` with its selected test source and `SkyAPO Virtual Mic` visible, F32 planar 48 kHz stereo FL/FR, quantum 1024, 2/2 links, zero overruns and zero audited callback allocations/deallocations. An independent PipeWire consumer recorded 143360 frames and measured RMS ratio `0.999961` against the expected `Preamp: -6 dB` output. PipeWire reused virtual node ID 37 after the service restart, so node-ID change is not used as evidence; the test verifies the node's properties and independent audio instead. This tests recovery when users run SkyAPO under systemd; manual `skyapod` execution is not supervised, and it does not establish recovery from an in-process plugin crash (which may terminate or corrupt the daemon before systemd restarts it).
+
+The test is opt-in because it requires a functioning user systemd manager and intentionally kills a daemon process: configure with `-DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON -DSKYAPO_ENABLE_SYSTEMD_E2E_TESTS=ON`, build, then run `ctest --test-dir build --output-on-failure -R '^skyapo-pipewire-e2e-systemd-crash-restart$'`. It uses a transient test-only unit and does not start/stop the installed `skyapod.service`.
+
 ### Sustained-load overrun reporting
 
 On 2026-09-30, an isolated PipeWire 1.6.9 graph used deterministic source `skyapo.test.input` (node 33) and virtual source node 37 at F32 planar, 48 kHz, stereo FL/FR, quantum 1024 (21.33 ms callback budget). Baseline `Preamp: -6 dB` had 2/2 links, zero overruns and zero audited callback allocations/deallocations. A validated hot reload replaced it with 2048 upstream BiQuad `Filter` directives. Over a 20-second observation, block count rose from 607 to 1015 and overruns from 607 to 1015: 408/408 callbacks exceeded budget. Reported process average was 51–53 ms and maximum 338.093 ms; status still showed `streaming`, 2/2 links and zero host-audited allocations/deallocations. This deliberately overloaded setup proves the overrun counter/telemetry responds; it does not establish usable realtime audio under overload, nor does the allocation audit cover allocations inside shared-library plugin code. The private daemon/source/server were stopped, and the desktop PipeWire session remained intact.
@@ -211,4 +237,4 @@ PipeWire scheduling jitter.
 
 ## Remaining limitations / next task
 
-The physical-to-virtual hardware chain, transactional reload, private-graph recovery (source/link loss and PipeWire server restart), mono/stereo routing, 44.1/48/96 kHz negotiation, and LV2/CLAP/VST3 fixture graphs have automated numerical consumer evidence. The existing physical-microphone -6 dB regression remains documented above. Channel and Copy pass offline expected-sample and callback-allocation tests, including intermediate EAPO channels mixed back into the fixed PipeWire virtual-source layout. Full upstream FilterEngine/config-parser compatibility remains incomplete. Convolution hardware/rate variation and physical-device unplug/replug with ordinary desktop clients remain outstanding. LV2/CLAP/VST3 support is limited; plugin-native bypass synchronization, delay compensation and process isolation are not complete; CLAP/LV2/VST3 state persistence has limited fixture-backed tests. FST-based VST2-compatible processing is opt-in and fixture-tested but not production support or validated against third-party VST2 plugins. The Qt editor is a growing daemon client and reuses upstream editor components, but plugin GUI/management and some workflows are still missing.
+The physical-to-virtual hardware chain, transactional reload, private-graph recovery (source/link loss and PipeWire server restart), mono/stereo routing, 44.1/48/96 kHz negotiation, and LV2/CLAP/VST3 fixture graphs have automated numerical consumer evidence. The existing physical-microphone -6 dB regression remains documented above. Channel and Copy pass offline expected-sample and callback-allocation tests, including intermediate EAPO channels mixed back into the fixed PipeWire virtual-source layout. Full upstream FilterEngine/config-parser compatibility remains incomplete. Convolution hardware/rate variation and physical-device unplug/replug with ordinary desktop clients remain outstanding. LV2/CLAP/VST3 support is limited; CLAP/VST3 standard bypass parameters and LV2's `lv2:enabled` control are synchronized when advertised, while plugins without those controls and FST/VST2 still use host dry bypass. Delay compensation is fixture-backed but end-to-end latency and plugin process isolation remain incomplete; CLAP/LV2/VST3 state persistence has limited fixture-backed tests. FST-based VST2-compatible processing is opt-in and fixture-tested but not production support or validated against third-party VST2 plugins. The Qt editor is a growing daemon client and reuses upstream editor components, but plugin GUI/management and some workflows are still missing.

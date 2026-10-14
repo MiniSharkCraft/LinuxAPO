@@ -313,19 +313,36 @@ inline std::optional<std::string> exchangeDaemonRequest(
                                  : response.payload);
   return response.payload;
 }
-inline std::string device() {
+struct DeviceSelection {
+  std::string name;
+  std::string stableProperty;
+};
+inline DeviceSelection deviceSelection() {
   std::ifstream f(configDir() / "device");
-  std::string s;
-  std::getline(f, s);
-  return s;
+  DeviceSelection selection;
+  std::getline(f, selection.name);
+  std::getline(f, selection.stableProperty);
+  return selection;
 }
-inline void select(const std::string &name) {
+inline std::string device() {
+  return deviceSelection().name;
+}
+inline std::string deviceStableProperty() {
+  return deviceSelection().stableProperty;
+}
+inline void select(const std::string &name,
+                   const std::string &stableProperty = {}) {
+  if (name.find_first_of("\r\n") != std::string::npos ||
+      stableProperty.find_first_of("\r\n") != std::string::npos)
+    throw std::runtime_error("device selection contains a line break");
+  if (stableProperty.size() > 4096)
+    throw std::runtime_error("device identity is too long to persist");
   std::filesystem::create_directories(configDir());
   auto path = configDir() / "device";
   auto temp = path.string() + ".tmp." + std::to_string(getpid());
   {
     std::ofstream f(temp);
-    f << name << '\n';
+    f << name << '\n' << stableProperty << '\n';
     if (!f)
       throw std::runtime_error("cannot save device");
   }

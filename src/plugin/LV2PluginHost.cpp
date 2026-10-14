@@ -229,6 +229,13 @@ void atomicWriteState(const fs::path &path, const std::string &data) {
 static_assert(std::atomic<float>::is_always_lock_free,
               "LV2 live parameter mailboxes must be lock-free");
 
+class ILV2NativeBypass {
+public:
+  virtual ~ILV2NativeBypass() = default;
+  virtual bool hasNativeBypass() const noexcept = 0;
+  virtual void setNativeBypass(bool bypassed) noexcept = 0;
+};
+
 LilvWorld *processWorld() {
   // Keep one catalog for the process, not one catalog per Engine/reload. The
   // installed Lilv 0.28 build leaves a 24-byte allocation from
@@ -250,7 +257,8 @@ class LV2Instance final : public IPluginInstance,
                           public IPluginStatePersistence,
                           public IPluginLatencyState,
                           public IPluginLatencyRefresh,
-                          public IPluginFailureState {
+                          public IPluginFailureState,
+                          public ILV2NativeBypass {
   enum class PortKind { AudioInput, AudioOutput, Control, LatencyOutput };
   struct Port {
     PortKind kind{};
@@ -332,19 +340,24 @@ public:
       LilvNodes *designations =
           lilv_port_get_value(plugin, descriptor, designationProperty);
       bool designatedLatency = false;
+      bool designatedEnabled = false;
       if (designations) {
         for (LilvIter *designation = lilv_nodes_begin(designations);
              !lilv_nodes_is_end(designations, designation);
-             designation = lilv_nodes_next(designations, designation))
-          designatedLatency |= lilv_node_equals(
-              lilv_nodes_get(designations, designation), latencyDesignation);
+             designation = lilv_nodes_next(designations, designation)) {
+          const LilvNode *value = lilv_nodes_get(designations, designation);
+          designatedLatency |= lilv_node_equals(value, latencyDesignation);
+          designatedEnabled |=
+              value && lilv_node_is_uri(value) &&
+              std::strcmp(lilv_node_as_uri(value), LV2_CORE__enabled) == 0;
+        }
         lilv_nodes_free(designations);
       }
       const bool reportsLatency =
           lilv_port_has_property(plugin, descriptor, latencyProperty) ||
           designatedLatency;
       if (reportsLatency) {
-        if (!control || !output || latencyPortIndex >= 0) {
+        if (!control || !output || latencyPortIndex >= 0 || designatedEnabled) {
           cleanupNodes(audioPort, controlPort, inputPort, outputPort,
                        latencyProperty, designationProperty,
                        latencyDesignation);
@@ -358,6 +371,13 @@ public:
         ports[i].controlInput = false;
         ports[i].control = 0.0f;
         continue;
+      }
+      if (designatedEnabled && (!control || !input)) {
+        cleanupNodes(audioPort, controlPort, inputPort, outputPort,
+                     latencyProperty, designationProperty, latencyDesignation);
+        throw std::runtime_error(
+            "LV2 lv2:enabled designation must be an input ControlPort: " +
+            pluginUri);
       }
       if (audio && input) {
         ports[i].kind = PortKind::AudioInput;
@@ -404,13 +424,34 @@ public:
           maxValue = lilv_node_as_float(maximum);
         else if (maximum && lilv_node_is_int(maximum))
           maxValue = static_cast<float>(lilv_node_as_int(maximum));
+        if (designatedEnabled) {
+          // lv2:enabled is an integer-valued host bypass designation: zero
+          // bypasses and a positive value enables processing. SkyAPO drives
+          // the conventional 0/1 range and starts the plugin enabled.
+          if (minValue > 0.0f || maxValue < 1.0f ||
+              (minimum && lilv_node_is_float(minimum)) ||
+              (maximum && lilv_node_is_float(maximum))) {
+            cleanupNodes(audioPort, controlPort, inputPort, outputPort,
+                         latencyProperty, designationProperty,
+                         latencyDesignation);
+            lilv_node_free(def);
+            lilv_node_free(minimum);
+            lilv_node_free(maximum);
+            throw std::runtime_error(
+                "LV2 lv2:enabled port must accept integer values 0 and 1: " +
+                pluginUri);
+          }
+          defaultValue = 1.0f;
+        }
         ports[i].control = defaultValue;
         if (input) {
           LilvNode *name = lilv_port_get_name(plugin, descriptor);
           const std::string displayName =
               name ? lilv_node_as_string(name) : ports[i].symbol;
-          parameterInfos.push_back({ports[i].symbol, displayName, defaultValue,
-                                    minValue, maxValue, defaultValue});
+          if (!designatedEnabled)
+            parameterInfos.push_back({ports[i].symbol, displayName,
+                                      defaultValue, minValue, maxValue,
+                                      defaultValue});
           auto parameter = std::make_unique<LiveParameter>();
           parameter->symbol = ports[i].symbol;
           parameter->name = displayName;
@@ -418,6 +459,20 @@ public:
           parameter->minimum = minValue;
           parameter->maximum = maxValue;
           parameter->value.store(defaultValue, std::memory_order_relaxed);
+          if (designatedEnabled) {
+            if (nativeBypassIndex >= 0) {
+              lilv_node_free(name);
+              lilv_node_free(def);
+              lilv_node_free(minimum);
+              lilv_node_free(maximum);
+              cleanupNodes(audioPort, controlPort, inputPort, outputPort,
+                           latencyProperty, designationProperty,
+                           latencyDesignation);
+              throw std::runtime_error(
+                  "LV2 plugin has multiple lv2:enabled ports: " + pluginUri);
+            }
+            nativeBypassIndex = static_cast<int32_t>(liveParameters.size());
+          }
           liveParameters.push_back(std::move(parameter));
           lilv_node_free(name);
         }
@@ -530,6 +585,14 @@ public:
         }
       }
     }
+    // Host bypass is an independent host control, not persistent plugin
+    // state. Start the LV2 enabled designation in its normal processing state
+    // even if a plugin serialized that port as disabled.
+    if (nativeBypassIndex >= 0) {
+      auto &parameter = *liveParameters[static_cast<size_t>(nativeBypassIndex)];
+      parameter.value.store(1.0f, std::memory_order_relaxed);
+      ports[parameter.portIndex].control = 1.0f;
+    }
     lilv_instance_activate(instance);
     active = true;
     if (latencyPortIndex >= 0) {
@@ -557,6 +620,15 @@ public:
 
   const std::string &uri() const noexcept override {
     return pluginUri;
+  }
+  bool hasNativeBypass() const noexcept override {
+    return nativeBypassIndex >= 0;
+  }
+  void setNativeBypass(bool bypassed) noexcept override {
+    if (nativeBypassIndex < 0)
+      return;
+    liveParameters[static_cast<size_t>(nativeBypassIndex)]->value.store(
+        bypassed ? 0.0f : 1.0f, std::memory_order_release);
   }
   const std::vector<PluginParameterInfo> &parameters() const noexcept override {
     return parameterInfos;
@@ -755,6 +827,7 @@ private:
   unsigned maxFrameCount;
   unsigned channelCount;
   int32_t latencyPortIndex{-1};
+  int32_t nativeBypassIndex{-1};
   std::atomic<uint32_t> observedLatency{0};
   std::atomic<uint32_t> publishedLatency{0};
   std::atomic<uint32_t> latencyInvalid{0};
@@ -804,6 +877,9 @@ public:
                                           source, line);
     auto outputChannels =
         instance->initialize(sampleRate, maxFrameCount, channelNames);
+    nativeBypassControl = dynamic_cast<ILV2NativeBypass *>(instance.get());
+    nativeBypassSupported =
+        nativeBypassControl && nativeBypassControl->hasNativeBypass();
     prepareBypassDelay(instance->latencySamples(), channelCount);
     return outputChannels;
   }
@@ -814,9 +890,15 @@ public:
         std::fill_n(output[channel], frames, 0.0f);
       return;
     }
-    if (copyInputWhenBypassed(output, input, frames, channelCount))
+    if (!nativeBypassSupported &&
+        copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
+  }
+  void setPluginBypassed(bool bypassed) noexcept override {
+    AtomicPluginBypass::setPluginBypassed(bypassed);
+    if (nativeBypassSupported)
+      nativeBypassControl->setNativeBypass(bypassed);
   }
   uint32_t latencySamples() const noexcept override {
     return instance && !processingFailed() ? instance->latencySamples() : 0;
@@ -875,6 +957,8 @@ private:
   unsigned line{};
   std::unique_ptr<IPluginInstance> instance;
   unsigned channelCount{};
+  ILV2NativeBypass *nativeBypassControl{};
+  bool nativeBypassSupported{};
 };
 
 IFilter *allocatePluginFilter(LV2PluginHost &host, std::string uri,

@@ -18,6 +18,7 @@ struct Source {
   pw_filter* filter{};
   unsigned channels{2};
   std::string nodeName;
+  std::string deviceSerial;
   std::array<void*, 2> ports{};
   double phase{};
   bool failed{};
@@ -63,8 +64,9 @@ struct Source {
     }
   }
 
-  explicit Source(unsigned channelCount, std::string name)
-      : channels(channelCount), nodeName(std::move(name)) {}
+  explicit Source(unsigned channelCount, std::string name, std::string serial)
+      : channels(channelCount), nodeName(std::move(name)),
+        deviceSerial(std::move(serial)) {}
 
   int run() {
     pw_init(nullptr, nullptr);
@@ -90,6 +92,8 @@ struct Source {
                           PW_KEY_MEDIA_CLASS, "Audio/Source", PW_KEY_NODE_VIRTUAL,
                           "true", PW_KEY_NODE_WANT_DRIVER, "true",
                           PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
+    if (!deviceSerial.empty())
+      pw_properties_set(properties, "device.serial", deviceSerial.c_str());
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     pw_properties_set(properties, SPA_KEY_AUDIO_POSITION, positions);
     filter = pw_filter_new(core, "SkyAPO Test Input", properties);
@@ -140,6 +144,7 @@ int main(int argc, char** argv) {
   try {
     unsigned channels = 2;
     std::string name = "skyapo.test.input";
+    std::string serial;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--mono") {
@@ -147,13 +152,15 @@ int main(int argc, char** argv) {
         name = "skyapo.test.mono";
       } else if (arg == "--name" && i + 1 < argc) {
         name = argv[++i];
+      } else if (arg == "--serial" && i + 1 < argc) {
+        serial = argv[++i];
       } else {
         fprintf(stderr, "usage: skyapo-pipewire-test-source [--mono] "
-                        "[--name NODE_NAME]\n");
+                        "[--name NODE_NAME] [--serial DEVICE_SERIAL]\n");
         return 2;
       }
     }
-    Source source(channels, std::move(name));
+    Source source(channels, std::move(name), std::move(serial));
     return source.run();
   } catch (const std::exception& error) {
     fprintf(stderr, "test source: %s\n", error.what());

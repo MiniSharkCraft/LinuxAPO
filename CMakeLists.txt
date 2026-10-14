@@ -19,7 +19,14 @@ option(SKYAPO_ENABLE_FST_VST2_HOST
   "Enable the experimental in-process FST-based legacy plugin host" OFF)
 option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
   "Run an isolated PipeWire server and verify captured SkyAPO DSP output" OFF)
+option(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS
+  "Enable opt-in recovery tests using the current user's systemd manager" OFF)
 option(SKYAPO_ENABLE_CPACK "Enable DEB and RPM generators for CPack" ON)
+
+if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS AND NOT SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  message(FATAL_ERROR
+    "SKYAPO_ENABLE_SYSTEMD_E2E_TESTS requires SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS")
+endif()
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
@@ -412,7 +419,7 @@ if(SKYAPO_BUILD_UI)
       ${SKYAPO_EDITOR}/IFilterGUIFactory.h
       ${SKYAPO_EDITOR}/FilterTemplate.cpp
       ${SKYAPO_EDITOR}/FilterTemplate.h
-      ${SKYAPO_EDITOR}/helpers/GUIHelper.cpp
+      ${EAPO_PORT}/Editor/helpers/GUIHelper.cpp
       ${SKYAPO_EDITOR}/helpers/GUIHelper.h
       ${SKYAPO_EDITOR}/guis/PreampFilterGUI.cpp
       ${SKYAPO_EDITOR}/guis/PreampFilterGUI.h
@@ -445,8 +452,9 @@ if(SKYAPO_BUILD_UI)
     set_target_properties(skyapo-eapo-editor PROPERTIES
       AUTOMOC ON AUTOUIC ON AUTORCC ON)
     set_property(TARGET skyapo-eapo-editor PROPERTY AUTOUIC_SEARCH_PATHS
-      "${EAPO_PORT}/Editor;${SKYAPO_EDITOR};${SKYAPO_EDITOR}/guis;${SKYAPO_EDITOR}/widgets")
-    target_include_directories(skyapo-eapo-editor BEFORE PUBLIC ${EAPO_PORT} ${EAPO})
+      "${EAPO_PORT}/Editor;${SKYAPO_EDITOR};${SKYAPO_EDITOR}/helpers;${SKYAPO_EDITOR}/guis;${SKYAPO_EDITOR}/widgets")
+    target_include_directories(skyapo-eapo-editor BEFORE PUBLIC
+      ${EAPO_PORT} ${EAPO} ${SKYAPO_EDITOR}/helpers)
     if(FFTW3F_FOUND)
       target_include_directories(skyapo-eapo-editor PRIVATE
         ${SKYAPO_EDITOR}/guis ${SKYAPO_EDITOR}/widgets)
@@ -489,6 +497,7 @@ if(SKYAPO_BUILD_UI)
 
     add_executable(skyapo-ui src/ui/main.cpp src/ui/MainWindow.cpp
       src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/ConfigFile.h
+      src/ui/DeviceFilterEditor.cpp src/ui/DeviceFilterEditor.h
       src/ui/IncludeEditor.cpp src/ui/IncludeEditor.h
       src/ui/ConvolutionEditor.cpp src/ui/ConvolutionEditor.h
       src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h
@@ -501,7 +510,8 @@ if(SKYAPO_BUILD_UI)
 
     add_executable(skyapo-ui-test-cli tests/ui_cli_stub.cpp)
     add_executable(skyapo-ui-tests tests/ui_tests.cpp src/ui/MainWindow.cpp
-      src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/IncludeEditor.cpp
+      src/ui/MainWindow.h src/ui/ConfigFile.cpp src/ui/DeviceFilterEditor.cpp
+      src/ui/DeviceFilterEditor.h src/ui/IncludeEditor.cpp
       src/ui/IncludeEditor.h src/ui/ConvolutionEditor.cpp
       src/ui/ConvolutionEditor.h src/ui/ChannelCopyEditor.cpp
       src/ui/ChannelCopyEditor.h src/ui/IIRFilterEditor.cpp
@@ -777,6 +787,8 @@ if(SKYAPO_HAVE_VST3)
   target_compile_definitions(skyapo-tests PRIVATE SKYAPO_TEST_VST3=1)
   target_compile_definitions(skyapo-tests PRIVATE
     SKYAPO_TEST_VST3_PATH="${CMAKE_CURRENT_BINARY_DIR}/test-plugins")
+  target_compile_definitions(skyapo-tests PRIVATE
+    SKYAPO_TEST_VST3_MODULE_PATH="${SKYAPO_TEST_VST3_ARCH}/skyapo-test-gain.so")
   add_dependencies(skyapo-tests skyapo-test-vst3)
   set_property(TEST skyapo-realtime-safety APPEND PROPERTY ENVIRONMENT
     "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
@@ -823,6 +835,10 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   find_program(SKYAPO_PW_CLI_EXECUTABLE pw-cli REQUIRED)
   find_program(SKYAPO_PW_DUMP_EXECUTABLE pw-dump REQUIRED)
   find_program(SKYAPO_PW_METADATA_EXECUTABLE pw-metadata REQUIRED)
+  if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS)
+    find_program(SKYAPO_SYSTEMD_RUN_EXECUTABLE systemd-run REQUIRED)
+    find_program(SKYAPO_SYSTEMCTL_EXECUTABLE systemctl REQUIRED)
+  endif()
   target_compile_definitions(skyapo-pipewire PRIVATE
     SKYAPO_PIPEWIRE_E2E_TESTING=1)
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
@@ -862,6 +878,21 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       source-replug)
   set_tests_properties(skyapo-pipewire-e2e-source-replug
     PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;recovery")
+  add_test(NAME skyapo-pipewire-e2e-source-replug-stable-id
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      source-replug-stable-id)
+  set_tests_properties(skyapo-pipewire-e2e-source-replug-stable-id
+    PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;recovery;device-id")
   add_test(NAME skyapo-pipewire-e2e-delay-pdc
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1040,6 +1071,22 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
   endif()
   if(LILV_FOUND AND LV2_FOUND)
+    add_test(NAME skyapo-pipewire-e2e-lv2-native-bypass
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt
+        lv2-bypass)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-native-bypass
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin;bypass"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
     add_test(NAME skyapo-pipewire-e2e-lv2-live-parameter
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1090,6 +1137,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   endif()
   if(SKYAPO_HAVE_VST3 AND TARGET skyapo-test-vst3)
+    add_test(NAME skyapo-pipewire-e2e-vst3-bypass
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_realtime_chain.txt
+        vst3-bypass)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-bypass
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
     add_test(NAME skyapo-pipewire-e2e-vst3-live-parameter
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1169,6 +1233,25 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
       ENVIRONMENT
         "SKYAPO_TEST_VST2_DYNAMIC_LATENCY_PATH=$<TARGET_FILE:skyapo-test-vst2-dynamic-latency-plugin>")
+  endif()
+  if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS)
+    add_test(NAME skyapo-pipewire-e2e-systemd-crash-restart
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        systemd-crash-restart)
+    set_tests_properties(skyapo-pipewire-e2e-systemd-crash-restart
+      PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;recovery;systemd"
+      ENVIRONMENT
+        "SKYAPO_SYSTEMD_UNIT_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapod.service.in")
   endif()
 endif()
 

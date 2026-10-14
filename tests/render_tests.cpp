@@ -10,6 +10,12 @@
 int main(int argc, char **argv) {
   if (argc < 3 || argc > 5)
     return 2;
+  const std::string helpCommand =
+      "\"" + std::string(argv[1]) + "\" --help > /dev/null";
+  if (std::system(helpCommand.c_str()) != 0) {
+    std::cerr << "renderer --help failed\n";
+    return 1;
+  }
   const double expectedDb = argc >= 4 ? std::strtod(argv[3], nullptr) : -6.0;
   const auto stem = "/tmp/skyapo-render-test-" + std::to_string(getpid());
   const auto input = stem + "-in.wav", output = stem + "-out.wav";

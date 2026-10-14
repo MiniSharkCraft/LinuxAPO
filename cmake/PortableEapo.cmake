@@ -1,7 +1,8 @@
 # Upstream remains pristine. Only selected DSP translation units and their
 # relative headers are copied into the build directory, preserving notices.
 set(EAPO_PORT ${CMAKE_CURRENT_BINARY_DIR}/eapo-port)
-file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers)
+file(MAKE_DIRECTORY ${EAPO_PORT}/filters ${EAPO_PORT}/helpers
+     ${EAPO_PORT}/Editor/helpers)
 set(EAPO_SOURCES)
 set(EAPO_EXPRESSION_SOURCES)
 # Preserve the parser semantics installed by upstream ExpressionFilterFactory
@@ -43,6 +44,40 @@ if(SKYAPO_HAVE_MUPARSERX)
     list(APPEND EAPO_EXPRESSION_SOURCES "${ported_source}")
   endforeach()
 endif()
+
+# Qt 6.5 added QStyleHints::colorScheme. Keep the upstream editor helper
+# untouched while compiling a build-tree adaptation that works across older
+# Qt 6 releases. The application palette is the portable theme signal.
+set(upstream_gui_helper ${EAPO}/Editor/helpers/GUIHelper.cpp)
+set(ported_gui_helper ${EAPO_PORT}/Editor/helpers/GUIHelper.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${upstream_gui_helper}")
+file(READ "${upstream_gui_helper}" gui_helper_content)
+string(REPLACE "\r\n" "\n" gui_helper_content "${gui_helper_content}")
+set(upstream_color_scheme
+  "return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;")
+set(portable_color_scheme
+  "return QGuiApplication::palette().color(QPalette::Window).lightness() < 128;")
+string(FIND "${gui_helper_content}" "#include <QStyleHints>" style_hints_include)
+string(FIND "${gui_helper_content}" "${upstream_color_scheme}" theme_query)
+if(style_hints_include EQUAL -1 OR theme_query EQUAL -1)
+  message(FATAL_ERROR
+    "Upstream GUIHelper changed; review the Qt theme compatibility adapter")
+endif()
+string(REPLACE "#include <QStyleHints>"
+  "#include <QPalette>"
+  gui_helper_content "${gui_helper_content}")
+string(REPLACE "${upstream_color_scheme}" "${portable_color_scheme}"
+  gui_helper_content "${gui_helper_content}")
+if(EXISTS "${ported_gui_helper}")
+  file(READ "${ported_gui_helper}" old_gui_helper_content)
+else()
+  set(old_gui_helper_content "")
+endif()
+if(NOT "${old_gui_helper_content}" STREQUAL "${gui_helper_content}")
+  file(WRITE "${ported_gui_helper}" "${gui_helper_content}")
+endif()
+
 # FilterConfiguration and IFilterFactory consume only immutable sizing values
 # at construction/configuration time. Adapt generated copies to their shared
 # context interface so both the Linux runtime and a future upstream FilterEngine

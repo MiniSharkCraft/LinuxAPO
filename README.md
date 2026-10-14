@@ -77,7 +77,7 @@ An FST-based VST2-ABI path is **experimental and opt-in**; it is disabled in def
 
 ## Editor, daemon and CLI
 
-The optional Qt 6 Widgets editor provides device/daemon/config workflows, preserves untouched config text and offers visual editing for selected filters. It does not provide a plugin GUI, syntax highlighting or full Windows editor parity. See [UI notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/UI.md).
+The optional Qt 6 Widgets editor provides device/daemon/config workflows, preserves untouched config text and offers visual editing for selected filters. Add Filter can insert a discovered LV2, CLAP or VST3 plugin directive; Tools can edit writable parameter values stored in those configuration directives. These are saved config values, not live plugin readbacks; Save & Reload applies them. State editing, native plugin GUI, syntax highlighting and full Windows editor parity are not provided. See [UI notes](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/UI.md).
 
 The daemon runs as the current user; it does not require root. Common commands:
 

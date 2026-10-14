@@ -38,6 +38,9 @@ int main() {
       R"({"name":"alsa_output.pci-0000_00_1f.3.analog-stereo","description":"Built-in"})",
       name));
   CHECK(name == "alsa_output.pci-0000_00_1f.3.analog-stereo");
+  CHECK(Monitor::parseDefaultSinkMetadata(
+      R"({"nested":{"name":"not-the-node"},"name":"actual-node"})", name));
+  CHECK(name == "actual-node");
   CHECK(!Monitor::parseDefaultSinkMetadata("not-json", name));
   CHECK(!Monitor::parseDefaultSinkMetadata(R"({"other":"sink"})", name));
   CHECK(!Monitor::parseDefaultSinkMetadata(R"({"name":""})", name));

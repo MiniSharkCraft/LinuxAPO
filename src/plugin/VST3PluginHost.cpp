@@ -86,6 +86,13 @@ private:
   std::atomic<uint32_t> pendingFlags{0};
 };
 
+class IVST3NativeBypass {
+public:
+  virtual ~IVST3NativeBypass() = default;
+  virtual bool hasNativeBypass() const noexcept = 0;
+  virtual void setNativeBypass(bool bypassed) noexcept = 0;
+};
+
 uint64_t stateHash(std::string_view text) {
   uint64_t hash = 14695981039346656037ull;
   for (const unsigned char byte : text) {
@@ -471,7 +478,8 @@ class VST3Instance final : public IPluginInstance,
                            public IPluginParameterControl,
                            public IPluginLatencyRefresh,
                            public IPluginFailureState,
-                           public IPluginStatePersistence {
+                           public IPluginStatePersistence,
+                           public IVST3NativeBypass {
 public:
   struct LiveParameter {
     std::atomic<float> value{0.0f};
@@ -528,6 +536,13 @@ public:
         if (parameterController->getParameterInfo(index, info) != kResultOk ||
             (info.flags & ParameterInfo::kIsReadOnly))
           continue;
+        if (info.flags & ParameterInfo::kIsBypass) {
+          if (nativeBypassIndex)
+            throw std::runtime_error("VST3 plugin exposes multiple bypass "
+                                     "parameters: " +
+                                     pluginUid);
+          nativeBypassIndex = parameterInfos.size();
+        }
         parameterInfos.push_back(
             {std::to_string(info.id), parameterName(info),
              static_cast<float>(info.defaultNormalizedValue), 0.0f, 1.0f,
@@ -672,6 +687,17 @@ public:
   }
   uint32_t latencySamples() const noexcept override {
     return latency.load(std::memory_order_acquire);
+  }
+  bool hasNativeBypass() const noexcept override {
+    return nativeBypassIndex.has_value();
+  }
+  void setNativeBypass(bool bypassed) noexcept override {
+    if (!nativeBypassIndex)
+      return;
+    const size_t index = *nativeBypassIndex;
+    liveParameters[index].value.store(bypassed ? 1.0f : 0.0f,
+                                      std::memory_order_relaxed);
+    liveParameters[index].revision.fetch_add(1, std::memory_order_release);
   }
   bool latencyRefreshPending() const noexcept override {
     return componentHandler && componentHandler->hasPendingFlags();
@@ -899,6 +925,7 @@ private:
   std::vector<Steinberg::Vst::ParamID> parameterIds;
   std::unique_ptr<LiveParameter[]> liveParameters;
   std::unique_ptr<Steinberg::Vst::ParameterChanges> parameterChanges;
+  std::optional<size_t> nativeBypassIndex;
   std::string persistentIdentity;
   fs::path savedStatePath;
   bool active = false, processing = false;
@@ -932,6 +959,9 @@ public:
                    : host.createForConfig(pluginUid, rate, maxFrames, channels,
                                           parameterOverrides, source, line);
     auto outputChannels = instance->initialize(rate, maxFrames, channels);
+    nativeBypassControl = dynamic_cast<IVST3NativeBypass *>(instance.get());
+    nativeBypassSupported =
+        nativeBypassControl && nativeBypassControl->hasNativeBypass();
     prepareBypassDelay(instance->latencySamples(), channelCount);
     return outputChannels;
   }
@@ -941,9 +971,15 @@ public:
         std::fill_n(output[channel], frames, 0.0f);
       return;
     }
-    if (copyInputWhenBypassed(output, input, frames, channelCount))
+    if (!nativeBypassSupported &&
+        copyInputWhenBypassed(output, input, frames, channelCount))
       return;
     instance->process(output, input, frames);
+  }
+  void setPluginBypassed(bool bypassed) noexcept override {
+    AtomicPluginBypass::setPluginBypassed(bypassed);
+    if (nativeBypassSupported)
+      nativeBypassControl->setNativeBypass(bypassed);
   }
   bool processingFailed() const noexcept override {
     return instance && instance->processingFailed();
@@ -999,6 +1035,8 @@ private:
   unsigned line{};
   std::unique_ptr<IPluginInstance> instance;
   unsigned channelCount{};
+  IVST3NativeBypass *nativeBypassControl{};
+  bool nativeBypassSupported{};
 };
 
 IFilter *allocateFilter(VST3PluginHost &host, std::string uid,

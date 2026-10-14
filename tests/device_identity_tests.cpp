@@ -1,4 +1,5 @@
 #include "../src/pipewire/DeviceIdentity.h"
+#include "../src/pipewire/DeviceSelection.h"
 
 #include <iostream>
 
@@ -49,5 +50,50 @@ int main() {
     return 1;
   }
 
-  std::cout << "device identity metadata priority and non-stable ALSA hint tests passed\n";
+  Devices devices;
+  AudioDevice renamed{52,      "skyapo.test.renamed", "Test input", 2, 48000,
+                      identity};
+  devices.sources.push_back(renamed);
+  const std::string oldName = "skyapo.test.input";
+  const std::string stable = "device.serial=USB-serial-42";
+  if (findSelectedDevice(devices, oldName, stable) != &devices.sources[0] ||
+      !isSelectedDevice(devices.sources[0], oldName, stable)) {
+    std::cerr << "saved stable identity did not recover a renamed node\n";
+    return 1;
+  }
+
+  AudioDevice sameNameWithoutIdentity{53, oldName, "Different device",
+                                      2,  48000,   {}};
+  Devices missingStableIdentity;
+  missingStableIdentity.sources.push_back(sameNameWithoutIdentity);
+  if (findSelectedDevice(missingStableIdentity, oldName, stable) != nullptr ||
+      isSelectedDevice(missingStableIdentity.sources[0], oldName, stable)) {
+    std::cerr << "missing stable identity incorrectly fell back to node name\n";
+    return 1;
+  }
+
+  if (findSelectedDevice(missingStableIdentity, oldName, {}) !=
+      &missingStableIdentity.sources[0]) {
+    std::cerr << "legacy name-only selection did not retain its fallback\n";
+    return 1;
+  }
+
+  Devices ambiguous;
+  ambiguous.sources.push_back(renamed);
+  ambiguous.sources.push_back(AudioDevice{
+      54, "another.node", "Duplicate identity", 2, 48000, identity});
+  bool rejectedAmbiguousIdentity = false;
+  try {
+    (void)findSelectedDevice(ambiguous, oldName, stable);
+  } catch (const std::runtime_error &) {
+    rejectedAmbiguousIdentity = true;
+  }
+  if (!rejectedAmbiguousIdentity) {
+    std::cerr << "ambiguous stable identity was not rejected\n";
+    return 1;
+  }
+
+  std::cout
+      << "device identity metadata, renamed-node recovery, legacy fallback, "
+         "and ambiguity tests passed\n";
 }

@@ -1,6 +1,7 @@
 #include "ConfigFile.h"
 #include "ChannelCopyEditor.h"
 #include "ConvolutionEditor.h"
+#include "DeviceFilterEditor.h"
 #include "IncludeEditor.h"
 #include "IIRFilterEditor.h"
 #include "MainWindow.h"
@@ -11,6 +12,7 @@
 #include "Editor/FilterTable.h"
 #include "Editor/FilterTableRow.h"
 #include "Editor/FilterTemplate.h"
+#include "Editor/helpers/GUIHelper.h"
 #include "Editor/guis/BiQuadFilterGUI.h"
 #include "Editor/guis/BiQuadFilterGUIFactory.h"
 #include "Editor/guis/DelayFilterGUI.h"
@@ -24,20 +26,24 @@
 #include "Editor/guis/StageFilterGUIFactory.h"
 #include <QApplication>
 #include <QByteArray>
+#include <QColor>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QAction>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QPlainTextEdit>
+#include <QPalette>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -46,7 +52,9 @@
 #include <QMessageBox>
 #include <QMenu>
 #include <QSettings>
+#include <QStandardPaths>
 #include <cmath>
+#include <limits>
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
 #include <QTableWidget>
 #endif
@@ -84,10 +92,9 @@ bool writeTestImpulseResponse(const QString &path) {
 
 bool writeStatusCliFixture(const QString &path, const QString &state,
                            int exitCode = 0) {
-  QByteArray script =
-      "#!/bin/sh\n"
-      "if [ \"$1\" = \"status\" ]; then\n"
-      "  printf '%s\\n' 'Daemon: ";
+  QByteArray script = "#!/bin/sh\n"
+                      "if [ \"$1\" = \"status\" ]; then\n"
+                      "  printf '%s\\n' 'Daemon: ";
   script += state.toUtf8();
   script += "' 'Selected device: fixture.mic' 'Capture node: 52 (Test mic)' "
             "'Virtual microphone: SkyAPO Virtual Mic' 'Virtual node: 90 "
@@ -120,7 +127,8 @@ bool writeDeviceQueryFailureCliFixture(const QString &path) {
       "fi\n"
       "exit 0\n";
   QFile file(path);
-  return file.open(QIODevice::WriteOnly) && file.write(script) == script.size() &&
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
          file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                              QFileDevice::ExeOwner);
 }
@@ -219,6 +227,22 @@ bool waitForValidation(QLabel *label, const QString &prefix,
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+  application.setQuitOnLastWindowClosed(false);
+  const QPalette initialPalette = application.palette();
+  QPalette forcedPalette = initialPalette;
+  forcedPalette.setColor(QPalette::Window, QColor(16, 16, 16));
+  application.setPalette(forcedPalette);
+  if (!GUIHelper::isDarkMode()) {
+    std::cerr << "upstream GUI theme adapter did not detect a dark palette\n";
+    return 1;
+  }
+  forcedPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+  application.setPalette(forcedPalette);
+  if (GUIHelper::isDarkMode()) {
+    std::cerr << "upstream GUI theme adapter misdetected a light palette\n";
+    return 1;
+  }
+  application.setPalette(initialPalette);
   QCoreApplication::setOrganizationName(QStringLiteral("SkyAPOTests"));
   QCoreApplication::setApplicationName(QStringLiteral("SkyAPOUITests"));
   ConfigFile file;
@@ -377,10 +401,12 @@ int main(int argc, char **argv) {
   }
 
   auto *channelEditor = ChannelCopyEditor::create("Channel", "L SUB");
-  if (!channelEditor || channelEditor->kind() != ChannelCopyEditor::Kind::Channel ||
+  if (!channelEditor ||
+      channelEditor->kind() != ChannelCopyEditor::Kind::Channel ||
       !channelEditor->findChild<QCheckBox *>("channel_L")->isChecked() ||
       !channelEditor->findChild<QCheckBox *>("channel_LFE")->isChecked()) {
-    std::cerr << "Channel visual editor did not load supported EAPO names/alias\n";
+    std::cerr
+        << "Channel visual editor did not load supported EAPO names/alias\n";
     delete channelEditor;
     return 1;
   }
@@ -427,7 +453,8 @@ int main(int argc, char **argv) {
   if (storedCommand != "Copy" || storedParameters != "L=0.75*C R=L" ||
       ChannelCopyEditor::create("Copy", "L=R+C") != nullptr ||
       ChannelCopyEditor::create("Copy", "L=unknown") != nullptr) {
-    std::cerr << "Copy editor serialization/unsupported-expression boundary failed\n";
+    std::cerr
+        << "Copy editor serialization/unsupported-expression boundary failed\n";
     return 1;
   }
 
@@ -495,11 +522,33 @@ int main(int argc, char **argv) {
     std::cerr << "could not create temporary UI test directory\n";
     return 1;
   }
+  QSettings::setDefaultFormat(QSettings::IniFormat);
+  QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                     temporary.path() + QStringLiteral("/settings"));
+  QSettings isolatedSettings;
+  isolatedSettings.clear();
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  qputenv("XDG_CONFIG_HOME",
+          QDir(temporary.path()).filePath("xdg-config").toLocal8Bit());
+  const QString defaultConfigPath =
+      QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
+      QStringLiteral("/skyapo/config.txt");
+  if (!QDir().mkpath(QFileInfo(defaultConfigPath).absolutePath())) {
+    std::cerr << "could not create isolated default config directory\n";
+    return 1;
+  }
+  QFile defaultConfig(defaultConfigPath);
+  if (!defaultConfig.open(QIODevice::WriteOnly) ||
+      defaultConfig.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not write isolated default config fixture\n";
+    return 1;
+  }
+  defaultConfig.close();
   const QString responseConfigPath = temporary.filePath("response-config.txt");
   QFile responseConfig(responseConfigPath);
   if (!responseConfig.open(QIODevice::WriteOnly) ||
-      responseConfig.write("Preamp: -6 dB\nFilter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n") < 0) {
+      responseConfig.write(
+          "Preamp: -6 dB\nFilter: ON PK Fc 1000 Hz Gain 6 dB Q 1.0\n") < 0) {
     std::cerr << "could not create response analysis fixture\n";
     return 1;
   }
@@ -512,7 +561,8 @@ int main(int argc, char **argv) {
   }
   const auto gainAt = [](const ResponseCurve &curve, double frequency) {
     auto closest = curve.points.constBegin();
-    for (auto point = curve.points.constBegin(); point != curve.points.constEnd(); ++point)
+    for (auto point = curve.points.constBegin();
+         point != curve.points.constEnd(); ++point)
       if (std::abs(point->x() - frequency) < std::abs(closest->x() - frequency))
         closest = point;
     return closest->y();
@@ -543,7 +593,8 @@ int main(int argc, char **argv) {
   pluginResponseConfig.close();
   const auto pluginResponse = analyzeConfigResponse(pluginResponsePath);
   if (pluginResponse.error.isEmpty()) {
-    std::cerr << "response analysis accepted a plugin config in the editor process\n";
+    std::cerr
+        << "response analysis accepted a plugin config in the editor process\n";
     return 1;
   }
 #endif
@@ -587,10 +638,10 @@ int main(int argc, char **argv) {
                          : nullptr;
   auto *invalidRowNumber =
       invalidRow ? invalidRow->findChild<QLabel *>("labelNumber") : nullptr;
-  if (!invalidRow ||
-      !invalidRow->property("skyapoValidationError").toBool() ||
-      !invalidRowNumber || !invalidRowNumber->toolTip().contains(
-                               "fixture rejected unsaved Preamp")) {
+  if (!invalidRow || !invalidRow->property("skyapoValidationError").toBool() ||
+      !invalidRowNumber ||
+      !invalidRowNumber->toolTip().contains(
+          "fixture rejected unsaved Preamp")) {
     std::cerr << "live diagnostic was not attached to its filter row\n";
     return 1;
   }
@@ -631,8 +682,13 @@ int main(int argc, char **argv) {
   }
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
   auto *responseButton = liveWindow.findChild<QPushButton *>("analyzeResponse");
+  auto *responseSource = liveWindow.findChild<QComboBox *>("analysisSource");
+  auto *responseResolution =
+      liveWindow.findChild<QComboBox *>("analysisResolution");
   bool responseDialogOpened = false;
   bool responseDialogFailed = false;
+  double responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
+  qlonglong responseBinCount = -1;
   QTimer responseDialogCloser;
   responseDialogCloser.setInterval(10);
   QObject::connect(&responseDialogCloser, &QTimer::timeout, &application, [&] {
@@ -640,8 +696,13 @@ int main(int argc, char **argv) {
       auto *dialog = qobject_cast<QDialog *>(widget);
       if (!dialog)
         continue;
-      if (dialog->windowTitle() == "Measured filter response") {
+      if (dialog->windowTitle() == "Calculated filter response") {
         responseDialogOpened = true;
+        if (auto *plot = dialog->findChild<QWidget *>("responsePlot")) {
+          responseGainAt1kHz =
+              plot->property("responseAt1000HzLtoLDb").toDouble();
+          responseBinCount = plot->property("analysisBinCount").toLongLong();
+        }
         dialog->accept();
         responseDialogCloser.stop();
       } else if (dialog->windowTitle() == "Response analysis") {
@@ -654,21 +715,56 @@ int main(int argc, char **argv) {
       }
     }
   });
-  if (!responseButton) {
-    std::cerr << "response analysis action is missing from the window\n";
+  if (!responseButton || !responseSource || !responseResolution ||
+      responseResolution->count() != 8 ||
+      responseResolution->currentData().toUInt() != 16384U ||
+      responseSource->count() != 2 ||
+      responseSource->itemText(0) != "config.txt" ||
+      responseSource->itemText(1) != "Current file") {
+    std::cerr << "response analysis source/resolution controls are missing\n";
     return 1;
   }
-  responseDialogCloser.start();
-  responseButton->click();
-  QElapsedTimer responseWait;
-  responseWait.start();
-  while (!responseDialogOpened && !responseDialogFailed &&
-         responseWait.elapsed() < 5000) {
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-    QThread::msleep(5);
+  const int selectedResolutionIndex = responseResolution->findData(8192U);
+  if (selectedResolutionIndex < 0) {
+    std::cerr << "response analysis does not offer 8192-sample resolution\n";
+    return 1;
   }
-  if (!responseDialogOpened || responseDialogFailed) {
-    std::cerr << "asynchronous GUI response analysis did not open its measured plot\n";
+  responseResolution->setCurrentIndex(selectedResolutionIndex);
+  QSettings savedAnalysisSettings;
+  if (savedAnalysisSettings.value(QStringLiteral("analysis/resolution"))
+          .toUInt() != 8192U) {
+    std::cerr << "response analysis resolution was not persisted\n";
+    return 1;
+  }
+  const auto runResponseAndCaptureGain = [&] {
+    responseDialogOpened = false;
+    responseDialogFailed = false;
+    responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
+    responseBinCount = -1;
+    responseDialogCloser.start();
+    responseButton->click();
+    QElapsedTimer responseWait;
+    responseWait.start();
+    while (!responseDialogOpened && !responseDialogFailed &&
+           responseWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return responseDialogOpened && !responseDialogFailed &&
+           std::isfinite(responseGainAt1kHz) && responseBinCount == 4096;
+  };
+  responseSource->setCurrentIndex(0);
+  if (!runResponseAndCaptureGain() ||
+      std::abs(responseGainAt1kHz + 6.0) > 0.25) {
+    std::cerr << "analysis did not use the saved default config.txt; gain="
+              << responseGainAt1kHz << " dB\n";
+    return 1;
+  }
+  responseSource->setCurrentIndex(1);
+  if (!runResponseAndCaptureGain() ||
+      std::abs(responseGainAt1kHz + 3.0) > 0.25) {
+    std::cerr << "analysis did not use the current editor document; gain="
+              << responseGainAt1kHz << " dB\n";
     return 1;
   }
 #endif
@@ -735,8 +831,7 @@ int main(int argc, char **argv) {
   QFile navigationChild(navigationChildPath);
   if (!navigationChild.open(QIODevice::WriteOnly) ||
       navigationChild.write(
-          "# included child\nFilter: ON PK Fc 30000 Hz Gain 6 dB Q 1\n") <
-          0) {
+          "# included child\nFilter: ON PK Fc 30000 Hz Gain 6 dB Q 1\n") < 0) {
     std::cerr << "could not create Include navigation child fixture\n";
     return 1;
   }
@@ -794,13 +889,13 @@ int main(int argc, char **argv) {
   auto *includeRow = navigationTable && navigationTable->itemAt(1)
                          ? navigationTable->itemAt(1)->row.data()
                          : nullptr;
-  auto *openDiagnostic = navigationWindow.findChild<QPushButton *>(
-      "openDiagnosticSource");
-  if (!includeRow ||
-      !includeRow->property("skyapoValidationError").toBool() ||
+  auto *openDiagnostic =
+      navigationWindow.findChild<QPushButton *>("openDiagnosticSource");
+  if (!includeRow || !includeRow->property("skyapoValidationError").toBool() ||
       !includeRow->toolTip().contains(navigationChildPath + ":2") ||
       !openDiagnostic || openDiagnostic->isHidden()) {
-    std::cerr << "included-file diagnostic was not mapped to its root Include row\n";
+    std::cerr
+        << "included-file diagnostic was not mapped to its root Include row\n";
     return 1;
   }
   openDiagnostic->click();
@@ -811,9 +906,8 @@ int main(int argc, char **argv) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     for (auto *widget : QApplication::topLevelWidgets()) {
       auto *candidate = qobject_cast<MainWindow *>(widget);
-      auto *path = candidate
-                       ? candidate->findChild<QLineEdit *>("configPath")
-                       : nullptr;
+      auto *path =
+          candidate ? candidate->findChild<QLineEdit *>("configPath") : nullptr;
       if (path && path->text() == navigationChildPath) {
         childWindow = candidate;
         break;
@@ -821,10 +915,12 @@ int main(int argc, char **argv) {
     }
     QThread::msleep(5);
   }
-  auto *childTable = childWindow ? childWindow->findChild<FilterTable *>() : nullptr;
+  auto *childTable =
+      childWindow ? childWindow->findChild<FilterTable *>() : nullptr;
   if (!childTable || !childTable->getFocusedItem() ||
       childTable->getFocusedItem()->index != 1) {
-    std::cerr << "Open error location did not select the included source line\n";
+    std::cerr
+        << "Open error location did not select the included source line\n";
     return 1;
   }
   childWindow->close();
@@ -996,9 +1092,12 @@ int main(int argc, char **argv) {
     std::cerr << "editor did not restore its saved window geometry\n";
     return 1;
   }
-  const auto recentFiles = uiSettings.value(QStringLiteral("ui/recentFiles")).toStringList();
-  auto *recentMenu = window.findChild<QMenu *>(QStringLiteral("recentFilesMenu"));
-  if (recentFiles.isEmpty() || recentFiles.first() != QFileInfo(configPath).absoluteFilePath() ||
+  const auto recentFiles =
+      uiSettings.value(QStringLiteral("ui/recentFiles")).toStringList();
+  auto *recentMenu =
+      window.findChild<QMenu *>(QStringLiteral("recentFilesMenu"));
+  if (recentFiles.isEmpty() ||
+      recentFiles.first() != QFileInfo(configPath).absoluteFilePath() ||
       !recentMenu || recentMenu->actions().isEmpty() ||
       recentMenu->actions().first()->data().toString() != recentFiles.first()) {
     std::cerr << "opening a config did not persist it in Open Recent\n";
@@ -1142,19 +1241,30 @@ int main(int argc, char **argv) {
   }
   const auto addActions = rowMenu->actions();
   bool hasConvolutionTemplate = false;
+  bool hasPluginPicker = false;
+  bool hasIncludeTemplate = false;
   for (const auto *action : addActions) {
     if (action->data().canConvert<FilterTemplate>() &&
         action->data().value<FilterTemplate>().getLine() ==
             "Convolution: impulse-response.wav") {
       hasConvolutionTemplate = true;
-      break;
+    }
+    if (action->data().canConvert<FilterTemplate>() &&
+        action->data().value<FilterTemplate>().getLine() ==
+            "__SKYAPO_PICK_INSTALLED_PLUGIN__") {
+      hasPluginPicker = true;
+    }
+    if (action->data().canConvert<FilterTemplate>() &&
+        action->data().value<FilterTemplate>().getLine() ==
+            "Include: child.txt") {
+      hasIncludeTemplate = true;
     }
   }
   if (addActions.isEmpty() ||
       !addActions.first()->data().canConvert<FilterTemplate>() ||
       addActions.first()->data().value<FilterTemplate>().getLine() !=
           "Preamp: 0 dB" ||
-      !hasConvolutionTemplate) {
+      !hasConvolutionTemplate || !hasPluginPicker || !hasIncludeTemplate) {
     std::cerr
         << "row add-menu did not preserve upstream and Convolution templates\n";
     return 1;
@@ -1228,15 +1338,16 @@ int main(int argc, char **argv) {
     std::cerr << "GUI event loop stalled while CLI fixture was running\n";
     return 1;
   }
-  auto *deviceCombo = window.findChild<QComboBox *>();
+  auto *deviceCombo = window.findChild<QComboBox *>("inputDeviceCombo");
   if (!deviceCombo || deviceCombo->count() != 2 ||
       deviceCombo->currentData().toString() != "fixture.usb-mic" ||
       !deviceCombo->currentText().contains("1 ch, 44100 Hz") ||
       !deviceCombo->toolTip().contains("stable PipeWire node name")) {
     std::cerr << "device selector did not display enumerated format details: "
               << (deviceCombo ? deviceCombo->count() : -1) << ", "
-              << (deviceCombo ? deviceCombo->currentData().toString().toStdString()
-                              : "missing")
+              << (deviceCombo
+                      ? deviceCombo->currentData().toString().toStdString()
+                      : "missing")
               << ", "
               << (deviceCombo ? deviceCombo->currentText().toStdString()
                               : "missing")
@@ -1247,7 +1358,8 @@ int main(int argc, char **argv) {
   if (!runtimeStatus || !runtimeStatus->wordWrap() ||
       runtimeStatus->textFormat() != Qt::PlainText ||
       !runtimeStatus->accessibleName().contains("PipeWire")) {
-    std::cerr << "runtime status does not expose readable accessible PipeWire details\n";
+    std::cerr << "runtime status does not expose readable accessible PipeWire "
+                 "details\n";
     return 1;
   }
   const QList<QPair<QString, QString>> statusCases{
@@ -1259,10 +1371,11 @@ int main(int argc, char **argv) {
       {"not reachable", "Daemon offline or unresponsive"},
       {"future-state", "Daemon state unknown: future-state"},
       {"", "Daemon offline or unresponsive"}};
-  for (qsizetype stateIndex = 0; stateIndex < statusCases.size(); ++stateIndex) {
+  for (qsizetype stateIndex = 0; stateIndex < statusCases.size();
+       ++stateIndex) {
     const auto &[state, expectedSummary] = statusCases[stateIndex];
-    const QString scriptPath = temporary.filePath(
-        QStringLiteral("status-cli-%1.sh").arg(stateIndex));
+    const QString scriptPath =
+        temporary.filePath(QStringLiteral("status-cli-%1.sh").arg(stateIndex));
     const int exitCode = state.isEmpty() ? 1 : 0;
     if (!writeStatusCliFixture(scriptPath, state, exitCode)) {
       std::cerr << "could not create PipeWire status fixture script\n";
@@ -1284,7 +1397,8 @@ int main(int argc, char **argv) {
           label->accessibleDescription() != label->text()))) {
       std::cerr << "UI did not accurately summarize PipeWire state '"
                 << state.toStdString() << "': "
-                << (label ? label->text().toStdString() : "status label missing")
+                << (label ? label->text().toStdString()
+                          : "status label missing")
                 << '\n';
       return 1;
     }
@@ -1304,7 +1418,8 @@ int main(int argc, char **argv) {
   QFile deviceLog(deviceLogPath);
   if (!deviceLog.open(QIODevice::ReadOnly) ||
       deviceLog.readAll() != "fixture.capture\n") {
-    std::cerr << "device selector did not persist exactly one stable node name\n";
+    std::cerr
+        << "device selector did not persist exactly one stable node name\n";
     return 1;
   }
   const QString dynamicDeviceListPath =
@@ -1326,7 +1441,8 @@ int main(int argc, char **argv) {
   qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE",
           dynamicDeviceListPath.toLocal8Bit());
   MainWindow dynamicDeviceWindow(configPath, QString::fromLocal8Bit(argv[1]));
-  auto *dynamicDeviceCombo = dynamicDeviceWindow.findChild<QComboBox *>();
+  auto *dynamicDeviceCombo =
+      dynamicDeviceWindow.findChild<QComboBox *>("inputDeviceCombo");
   auto *deviceRefreshTimer =
       dynamicDeviceWindow.findChild<QTimer *>("deviceRefreshTimer");
   QElapsedTimer dynamicDeviceWait;
@@ -1391,14 +1507,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   graphicConfig.close();
-  MainWindow graphicWindow(graphicConfigPath,
-                           QString::fromLocal8Bit(argv[1]));
+  MainWindow graphicWindow(graphicConfigPath, QString::fromLocal8Bit(argv[1]));
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   auto *graphicEditor = graphicWindow.findChild<GraphicEQFilterGUI *>();
-  auto *graphicTable = graphicEditor
-                           ? graphicEditor->findChild<QTableWidget *>(
-                                 "tableWidget")
-                           : nullptr;
+  auto *graphicTable =
+      graphicEditor ? graphicEditor->findChild<QTableWidget *>("tableWidget")
+                    : nullptr;
   if (!graphicEditor || !graphicTable || graphicTable->rowCount() != 3) {
     std::cerr << "MainWindow did not create upstream GraphicEQ visual row\n";
     return 1;
@@ -1409,8 +1523,7 @@ int main(int argc, char **argv) {
       button->click();
   QFile savedGraphicConfig(graphicConfigPath);
   if (!savedGraphicConfig.open(QIODevice::ReadOnly) ||
-      savedGraphicConfig.readAll() !=
-          "GraphicEQ: 100 0; 1000 4.5; 5000 -3\n") {
+      savedGraphicConfig.readAll() != "GraphicEQ: 100 0; 1000 4.5; 5000 -3\n") {
     std::cerr << "GraphicEQ visual edit did not serialize to config text\n";
     return 1;
   }
@@ -1421,12 +1534,52 @@ int main(int argc, char **argv) {
   }
   QFile rawGraphicConfig(graphicConfigPath);
   if (!rawGraphicConfig.open(QIODevice::ReadOnly) ||
-      rawGraphicConfig.readAll() !=
-          "GraphicEQ: 100 0; 1000 2; 5000 -3\n") {
+      rawGraphicConfig.readAll() != "GraphicEQ: 100 0; 1000 2; 5000 -3\n") {
     std::cerr << "unsupported GraphicEQ text was changed by the editor\n";
     return 1;
   }
 #endif
+  const QString deviceEditorConfigPath =
+      temporary.filePath("device-editor.txt");
+  QFile deviceEditorConfig(deviceEditorConfigPath);
+  if (!deviceEditorConfig.open(QIODevice::WriteOnly) ||
+      deviceEditorConfig.write("Device: Built-in Audio; USB Microphone\n") <
+          0) {
+    std::cerr << "could not create Device editor UI fixture\n";
+    return 1;
+  }
+  deviceEditorConfig.close();
+  MainWindow deviceEditorWindow(deviceEditorConfigPath,
+                                QString::fromLocal8Bit(argv[1]));
+  auto *deviceEditor = deviceEditorWindow.findChild<DeviceFilterEditor *>();
+  auto *devicePattern =
+      deviceEditor ? deviceEditor->findChild<QLineEdit *>("devicePatternEdit")
+                   : nullptr;
+  if (!deviceEditor || !devicePattern ||
+      devicePattern->text() != "Built-in Audio; USB Microphone") {
+    std::cerr << "MainWindow did not create Device match editor from config\n";
+    return 1;
+  }
+  devicePattern->setText("USB Microphone; Built-in Audio");
+  QMetaObject::invokeMethod(devicePattern, "editingFinished",
+                            Qt::DirectConnection);
+  bool savedDeviceEditor = false;
+  for (auto *button : deviceEditorWindow.findChildren<QPushButton *>()) {
+    if (button->text() == "Save") {
+      button->click();
+      savedDeviceEditor = true;
+      break;
+    }
+  }
+  QFile savedDeviceEditorConfig(deviceEditorConfigPath);
+  if (!savedDeviceEditor ||
+      !savedDeviceEditorConfig.open(QIODevice::ReadOnly) ||
+      savedDeviceEditorConfig.readAll() !=
+          "Device: USB Microphone; Built-in Audio\n") {
+    std::cerr << "Device editor did not serialize its edited pattern\n";
+    return 1;
+  }
+
   auto *pluginAction = window.findChild<QAction *>("browsePlugins");
   if (!pluginAction) {
     std::cerr << "plugin catalog action is missing from the UI\n";
@@ -1450,10 +1603,9 @@ int main(int argc, char **argv) {
       }
     QThread::msleep(5);
   }
-  auto *pluginCatalog = pluginDialog
-                            ? pluginDialog->findChild<QPlainTextEdit *>(
-                                  "pluginCatalog")
-                            : nullptr;
+  auto *pluginCatalog =
+      pluginDialog ? pluginDialog->findChild<QPlainTextEdit *>("pluginCatalog")
+                   : nullptr;
   if (!pluginDialog || !pluginCatalog ||
       !pluginCatalog->toPlainText().contains(
           "https://example.test/plugins/gain") ||
@@ -1464,6 +1616,190 @@ int main(int argc, char **argv) {
   }
   pluginDialog->accept();
 
+  auto *addPluginAction = window.findChild<QAction *>("addInstalledPlugin");
+  if (!addPluginAction) {
+    std::cerr << "plugin insertion action is missing from the editor\n";
+    return 1;
+  }
+  bool pickerWasValid = false;
+  bool pickerWasAccepted = false;
+  QTimer::singleShot(200, &window, [&] {
+    for (auto *candidate : window.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginPicker")
+        continue;
+      auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+      auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+      pickerWasValid = choices && choices->count() == 1 &&
+                       choices->item(0)->text().contains("Test Gain") && add;
+      if (pickerWasValid) {
+        add->click();
+        pickerWasAccepted = true;
+      }
+      break;
+    }
+  });
+  addPluginAction->trigger();
+  QElapsedTimer pickerWait;
+  pickerWait.start();
+  while (pickerWait.elapsed() < 2000 && !pickerWasAccepted) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!pickerWasValid || !pickerWasAccepted) {
+    std::cerr << "plugin picker did not present discovered catalog entries\n";
+    return 1;
+  }
+  bool insertedPluginDirective = false;
+  for (int index = 0; table->itemAt(index); ++index)
+    insertedPluginDirective =
+        insertedPluginDirective ||
+        table->itemAt(index)->text ==
+            "Plugin: LV2 https://example.test/plugins/gain";
+  if (!insertedPluginDirective) {
+    std::cerr
+        << "choosing a discovered plugin did not insert its config line\n";
+    return 1;
+  }
+
+  const QString pluginParameterConfigPath =
+      temporary.filePath(QStringLiteral("plugin-parameters.txt"));
+  const QByteArray pluginParameterOriginal =
+      "; preserve this header\r\n"
+      "Plugin: LV2 https://example.test/plugins/gain   gain=0.25 # keep "
+      "note\r\n";
+  QFile pluginParameterConfig(pluginParameterConfigPath);
+  if (!pluginParameterConfig.open(QIODevice::WriteOnly) ||
+      pluginParameterConfig.write(pluginParameterOriginal) !=
+          pluginParameterOriginal.size()) {
+    std::cerr << "could not create plugin parameter editor fixture\n";
+    return 1;
+  }
+  pluginParameterConfig.close();
+  MainWindow pluginParameterWindow(pluginParameterConfigPath,
+                                   QString::fromLocal8Bit(argv[1]));
+  auto *parameterTable = pluginParameterWindow.findChild<FilterTable *>();
+  auto *parameterAction = pluginParameterWindow.findChild<QAction *>(
+      "configureSelectedPluginParameters");
+  if (!parameterTable || !parameterTable->itemAt(1) || !parameterAction) {
+    std::cerr << "plugin parameter editor action or target row is missing\n";
+    return 1;
+  }
+  parameterTable->setSelection(parameterTable->itemAt(1));
+  bool parameterDialogWasAccepted = false;
+  QTimer::singleShot(250, &pluginParameterWindow, [&] {
+    for (auto *candidate : pluginParameterWindow.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginParameterEditor")
+        continue;
+      auto *gain =
+          candidate->findChild<QDoubleSpinBox *>("pluginParameter_gain");
+      auto *notice = candidate->findChild<QLabel *>();
+      auto *buttons =
+          candidate->findChild<QDialogButtonBox *>("pluginParameterButtons");
+      if (gain && notice &&
+          notice->text().contains("not live plugin", Qt::CaseInsensitive) &&
+          buttons) {
+        gain->setValue(0.75);
+        buttons->button(QDialogButtonBox::Ok)->click();
+        parameterDialogWasAccepted = true;
+      }
+      break;
+    }
+  });
+  parameterAction->trigger();
+  QElapsedTimer parameterWait;
+  parameterWait.start();
+  while (parameterWait.elapsed() < 2000 && !parameterDialogWasAccepted) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  bool savedParameterConfig = false;
+  for (auto *button : pluginParameterWindow.findChildren<QPushButton *>()) {
+    if (button->text() == "Save") {
+      button->click();
+      savedParameterConfig = true;
+      break;
+    }
+  }
+  QFile savedPluginParameterConfig(pluginParameterConfigPath);
+  const QByteArray expectedPluginParameterConfig =
+      "; preserve this header\r\n"
+      "Plugin: LV2 https://example.test/plugins/gain   gain=0.75 # keep "
+      "note\r\n";
+  if (!parameterDialogWasAccepted || !savedParameterConfig ||
+      !savedPluginParameterConfig.open(QIODevice::ReadOnly) ||
+      savedPluginParameterConfig.readAll() != expectedPluginParameterConfig) {
+    std::cerr << "plugin parameter editor failed to preserve config comments, "
+                 "spacing, or CRLF while applying a value\n";
+    return 1;
+  }
+  const auto verifyPluginParameterFormat = [&](const QString &filename,
+                                               const QByteArray &source,
+                                               const QString &symbol,
+                                               const QByteArray &expected) {
+    const QString path = temporary.filePath(filename);
+    QFile input(path);
+    if (!input.open(QIODevice::WriteOnly) ||
+        input.write(source) != source.size())
+      return false;
+    input.close();
+    MainWindow formatWindow(path, QString::fromLocal8Bit(argv[1]));
+    auto *formatTable = formatWindow.findChild<FilterTable *>();
+    auto *formatAction =
+        formatWindow.findChild<QAction *>("configureSelectedPluginParameters");
+    if (!formatTable || !formatTable->itemAt(0) || !formatAction)
+      return false;
+    formatTable->setSelection(formatTable->itemAt(0));
+    bool accepted = false;
+    QTimer::singleShot(250, &formatWindow, [&] {
+      for (auto *candidate : formatWindow.findChildren<QDialog *>()) {
+        if (candidate->objectName() != "pluginParameterEditor")
+          continue;
+        auto *spin =
+            candidate->findChild<QDoubleSpinBox *>("pluginParameter_" + symbol);
+        auto *buttons =
+            candidate->findChild<QDialogButtonBox *>("pluginParameterButtons");
+        if (spin && buttons) {
+          spin->setValue(0.75);
+          buttons->button(QDialogButtonBox::Ok)->click();
+          accepted = true;
+        }
+        break;
+      }
+    });
+    formatAction->trigger();
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 2000 && !accepted) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    bool saved = false;
+    for (auto *button : formatWindow.findChildren<QPushButton *>()) {
+      if (button->text() == "Save") {
+        button->click();
+        saved = true;
+        break;
+      }
+    }
+    QFile result(path);
+    return accepted && saved && result.open(QIODevice::ReadOnly) &&
+           result.readAll() == expected;
+  };
+  if (!verifyPluginParameterFormat(QStringLiteral("plugin-clap-parameters.txt"),
+                                   "Plugin: CLAP test.clap.gain Gain=0.25\n",
+                                   QStringLiteral("7"),
+                                   "Plugin: CLAP test.clap.gain Gain=0.75\n")) {
+    std::cerr << "CLAP name-based parameter configuration was not preserved\n";
+    return 1;
+  }
+  if (!verifyPluginParameterFormat(QStringLiteral("plugin-vst3-parameters.txt"),
+                                   "Plugin: VST3 test.vst3.uid 42=0.25\n",
+                                   QStringLiteral("42"),
+                                   "Plugin: VST3 test.vst3.uid 42=0.75\n")) {
+    std::cerr << "VST3 numeric-ID parameter configuration was not preserved\n";
+    return 1;
+  }
+
   MainWindow stalledCliWindow(configPath, QString::fromLocal8Bit(argv[1]));
   auto cliTimeouts = stalledCliWindow.findChildren<QTimer *>("cliTimeout");
   if (cliTimeouts.isEmpty()) {
@@ -1472,8 +1808,7 @@ int main(int argc, char **argv) {
   }
   for (auto *timeout : cliTimeouts)
     timeout->setInterval(20);
-  auto *stalledStatus =
-      stalledCliWindow.findChild<QLabel *>("daemonStatus");
+  auto *stalledStatus = stalledCliWindow.findChild<QLabel *>("daemonStatus");
   QElapsedTimer timeoutWait;
   timeoutWait.start();
   while (timeoutWait.elapsed() < 1500 &&
@@ -1836,6 +2171,29 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cerr << "workflow-reload-failure\n";
+
+  const QString stageConfigPath = temporary.filePath("stage-config.txt");
+  QFile stageConfig(stageConfigPath);
+  if (!stageConfig.open(QIODevice::WriteOnly) ||
+      stageConfig.write("Stage: pre-mix capture\n") < 0) {
+    std::cerr << "could not create Stage editor UI fixture\n";
+    return 1;
+  }
+  stageConfig.close();
+  MainWindow stageWindow(stageConfigPath, QString::fromLocal8Bit(argv[1]));
+  auto *stagePreMix = stageWindow.findChild<QCheckBox *>("preMixCheckBox");
+  auto *stagePostMix = stageWindow.findChild<QCheckBox *>("postMixCheckBox");
+  auto *stageCapture = stageWindow.findChild<QCheckBox *>("captureCheckBox");
+  if (!stagePreMix || !stagePostMix || !stageCapture ||
+      stagePreMix->isEnabled() || stagePostMix->isEnabled() ||
+      !stageCapture->isEnabled() ||
+      !stagePreMix->toolTip().contains("does not process") ||
+      !stagePostMix->toolTip().contains("does not process")) {
+    std::cerr
+        << "Stage editor did not distinguish unsupported playback stages\n";
+    return 1;
+  }
+
   modalCapture.stop();
   workflowPulse.stop();
   qunsetenv("SKYAPO_UI_TEST_CONFIG_LOG");

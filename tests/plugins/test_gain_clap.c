@@ -8,6 +8,7 @@
 typedef struct gain_data {
   const clap_host_t *host;
   double gain;
+  atomic_bool bypassed;
   uint32_t latency_samples;
   uint32_t latency_cursor;
   float latency_history[2][64];
@@ -19,8 +20,12 @@ typedef struct gain_data {
   atomic_bool processing;
 } gain_data;
 static atomic_uint destroyed_plugin_count;
+static atomic_bool last_process_bypass;
 CLAP_EXPORT uint32_t skyapo_test_clap_destroyed_plugin_count(void) {
   return atomic_load(&destroyed_plugin_count);
+}
+CLAP_EXPORT bool skyapo_test_clap_last_process_bypass(void) {
+  return atomic_load(&last_process_bypass);
 }
 
 static bool CLAP_ABI plugin_init(const clap_plugin_t *plugin) {
@@ -28,6 +33,8 @@ static bool CLAP_ABI plugin_init(const clap_plugin_t *plugin) {
     return false;
   gain_data *data = plugin->plugin_data;
   atomic_store(&data->processing, false);
+  atomic_store(&data->bypassed, false);
+  atomic_store(&last_process_bypass, false);
   const clap_host_thread_check_t *thread_check =
       data->host->get_extension(data->host, CLAP_EXT_THREAD_CHECK);
   return thread_check && thread_check->is_main_thread(data->host);
@@ -95,18 +102,25 @@ plugin_process(const clap_plugin_t *plugin, const clap_process_t *process) {
           (const clap_event_param_value_t *)header;
       if (event->param_id == 7)
         data->gain = event->value;
+      else if (event->param_id == 8) {
+        atomic_store(&data->bypassed, event->value >= 0.5);
+        atomic_store(&last_process_bypass, atomic_load(&data->bypassed));
+      }
     }
   }
+  const bool bypassed = atomic_load(&data->bypassed);
   if (!data->latency_samples) {
     for (uint32_t c = 0; c < 2; ++c)
       for (uint32_t i = 0; i < process->frames_count; ++i)
         process->audio_outputs[0].data32[c][i] =
-            (float)(process->audio_inputs[0].data32[c][i] * data->gain);
+            (float)(process->audio_inputs[0].data32[c][i] *
+                    (bypassed ? 1.0 : data->gain));
   } else {
     for (uint32_t i = 0; i < process->frames_count; ++i) {
       for (uint32_t c = 0; c < 2; ++c) {
         process->audio_outputs[0].data32[c][i] =
-            data->latency_history[c][data->latency_cursor] * data->gain;
+            data->latency_history[c][data->latency_cursor] *
+            (bypassed ? 1.0 : data->gain);
         data->latency_history[c][data->latency_cursor] =
             process->audio_inputs[0].data32[c][i];
       }
@@ -144,14 +158,23 @@ static bool CLAP_ABI port_get(const clap_plugin_t *plugin, uint32_t index,
 static const clap_plugin_audio_ports_t audio_ports = {port_count, port_get};
 static uint32_t CLAP_ABI param_count(const clap_plugin_t *plugin) {
   (void)plugin;
-  return 1;
+  return 2;
 }
 static bool CLAP_ABI param_info(const clap_plugin_t *plugin, uint32_t index,
                                 clap_param_info_t *info) {
   (void)plugin;
-  if (index || !info)
+  if (index > 1 || !info)
     return false;
   memset(info, 0, sizeof(*info));
+  if (index == 1) {
+    info->id = 8;
+    info->flags = CLAP_PARAM_IS_BYPASS | CLAP_PARAM_IS_STEPPED;
+    strcpy(info->name, "Bypass");
+    info->min_value = 0.0;
+    info->max_value = 1.0;
+    info->default_value = 0.0;
+    return true;
+  }
   info->id = 7;
   info->flags = CLAP_PARAM_IS_AUTOMATABLE;
   strcpy(info->name, "Gain");
@@ -162,16 +185,22 @@ static bool CLAP_ABI param_info(const clap_plugin_t *plugin, uint32_t index,
 }
 static bool CLAP_ABI param_value(const clap_plugin_t *plugin, clap_id id,
                                   double *value) {
-  if (id != 7 || !value)
+  if (!value)
     return false;
-  *value = ((const gain_data *)plugin->plugin_data)->gain;
+  const gain_data *data = plugin->plugin_data;
+  if (id == 7)
+    *value = data->gain;
+  else if (id == 8)
+    *value = atomic_load(&data->bypassed) ? 1.0 : 0.0;
+  else
+    return false;
   return true;
 }
 static bool CLAP_ABI param_value_to_text(const clap_plugin_t *plugin, clap_id id,
                                          double value, char *buffer,
                                          uint32_t capacity) {
   (void)plugin;
-  if (id != 7 || !buffer || capacity == 0)
+  if ((id != 7 && id != 8) || !buffer || capacity == 0)
     return false;
   snprintf(buffer, capacity, "%.3f", value);
   return true;
@@ -179,7 +208,7 @@ static bool CLAP_ABI param_value_to_text(const clap_plugin_t *plugin, clap_id id
 static bool CLAP_ABI param_text_to_value(const clap_plugin_t *plugin, clap_id id,
                                          const char *text, double *value) {
   (void)plugin;
-  if (id != 7 || !text || !value)
+  if ((id != 7 && id != 8) || !text || !value)
     return false;
   char *end = NULL;
   *value = strtod(text, &end);
@@ -198,6 +227,8 @@ static void CLAP_ABI param_flush(const clap_plugin_t *plugin,
           (const clap_event_param_value_t *)header;
       if (event->param_id == 7)
         data->gain = event->value;
+      else if (event->param_id == 8)
+        atomic_store(&data->bypassed, event->value >= 0.5);
     }
   }
 }
@@ -244,7 +275,7 @@ static bool CLAP_ABI state_save(const clap_plugin_t *plugin,
   unsigned char state[20] = {0};
   memcpy(state, "SKYGAIN1", 8);
   memcpy(state + 8, &data->gain, sizeof(data->gain));
-  state[16] = 0x53;
+  state[16] = atomic_load(&data->bypassed) ? 1 : 0;
   state[17] = 0x4b;
   state[18] = 0x59;
   state[19] = 0x31;
@@ -261,14 +292,15 @@ static bool CLAP_ABI state_load(const clap_plugin_t *plugin,
     return false;
   unsigned char state[20];
   if (read_all(stream, state, sizeof(state)) != (int64_t)sizeof(state) ||
-      memcmp(state, "SKYGAIN1", 8) != 0 || state[16] != 0x53 ||
-      state[17] != 0x4b || state[18] != 0x59 || state[19] != 0x31)
+      memcmp(state, "SKYGAIN1", 8) != 0 || state[16] > 1 || state[17] != 0x4b ||
+      state[18] != 0x59 || state[19] != 0x31)
     return false;
   double gain = 0.0;
   memcpy(&gain, state + 8, sizeof(gain));
   if (!isfinite(gain) || gain < 0.0 || gain > 2.0)
     return false;
   data->gain = gain;
+  atomic_store(&data->bypassed, state[16] != 0);
   return true;
 }
 static const clap_plugin_state_t plugin_state = {state_save, state_load};

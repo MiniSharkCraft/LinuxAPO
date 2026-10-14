@@ -13,6 +13,32 @@ int main(int argc, char **argv) {
                  "LV2\thttps://example.test/plugins/gain\tTest Gain\n";
     return 0;
   }
+  if (argc == 4 && std::string(argv[1]) == "plugin" &&
+      std::string(argv[2]) == "info" &&
+      std::string(argv[3]) == "https://example.test/plugins/gain") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    std::cout << "Test Gain\nFormat: LV2\n"
+                 "URI: https://example.test/plugins/gain\n"
+                 "gain\tGain\tdefault=0.5\trange=[0, 1]\n";
+    return 0;
+  }
+  if (argc == 4 && std::string(argv[1]) == "plugin" &&
+      std::string(argv[2]) == "info" &&
+      std::string(argv[3]) == "test.clap.gain") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    std::cout << "Test CLAP Gain\nFormat: CLAP\nID: test.clap.gain\n"
+                 "7\tGain\tdefault=0.5\trange=[0, 1]\n";
+    return 0;
+  }
+  if (argc == 4 && std::string(argv[1]) == "plugin" &&
+      std::string(argv[2]) == "info" &&
+      std::string(argv[3]) == "test.vst3.uid") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    std::cout << "Test VST3 Gain\nFormat: VST3\n"
+                 "Class UID: test.vst3.uid\n"
+                 "42\tGain\tdefault=0.5\trange=[0, 1]\tvalue=0.5\n";
+    return 0;
+  }
   if (argc == 5 && std::string(argv[1]) == "config" &&
       std::string(argv[2]) == "check" && std::string(argv[3]) == "--json") {
     std::this_thread::sleep_for(std::chrono::milliseconds(250));

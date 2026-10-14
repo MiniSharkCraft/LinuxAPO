@@ -4,10 +4,12 @@
 #include "../platform/RealtimeAudit.h"
 #include "../platform/Settings.h"
 #include "DeviceManager.h"
+#include "DeviceSelection.h"
 #include "DefaultSinkVolumeMonitor.h"
 #include "Engine.h"
 #include "LoudnessVolumeProvider.h"
 #include "../platform/ConfigWatcher.h"
+#include "helpers/StringHelper.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -295,9 +297,10 @@ struct Runtime {
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
     const auto createEngine = [&] {
-      auto candidate =
-          std::make_unique<Engine>(hz, channels, blockFrames, names, true, true,
-                                   deviceMatchText(device));
+      auto candidate = std::make_unique<Engine>(
+          hz, channels, blockFrames, names, true, true, deviceMatchText(device),
+          StringHelper::toWString(device.description, 65001),
+          StringHelper::toWString(device.name, 65001));
       candidate->loadConfig(config);
       return candidate;
     };
@@ -430,11 +433,13 @@ struct Runtime {
     for (auto &p : ports)
       names.push_back(eapoChannel(p.channel));
     if (!hz || !blockFrames)
-      throw std::runtime_error("cannot reload before PipeWire format negotiation");
+      throw std::runtime_error(
+          "cannot reload before PipeWire format negotiation");
     const auto createEngine = [&] {
-      auto candidate =
-          std::make_unique<Engine>(hz, channels, blockFrames, names, true, true,
-                                   deviceMatchText(device));
+      auto candidate = std::make_unique<Engine>(
+          hz, channels, blockFrames, names, true, true, deviceMatchText(device),
+          StringHelper::toWString(device.description, 65001),
+          StringHelper::toWString(device.name, 65001));
       candidate->loadConfig(config);
       return candidate;
     };
@@ -685,7 +690,8 @@ struct Runtime {
     auto &r = *static_cast<Runtime *>(data);
     refreshPluginLatency(r);
     try {
-      if (settings::device() != r.device.name)
+      const auto selection = settings::deviceSelection();
+      if (!isSelectedDevice(r.device, selection.name, selection.stableProperty))
         r.fail("device selection changed");
     } catch (const std::exception &e) {
       r.fail(e.what());
@@ -1027,14 +1033,18 @@ struct Runtime {
       }
     }
   }
-  void init(const std::string &selected, const std::string &cfg) {
+  void init(const std::string &selected, const std::string &stableProperty,
+            const std::string &cfg) {
     config = cfg;
     auto all = enumerateDevices();
-    auto it = std::find_if(all.sources.begin(), all.sources.end(),
-                           [&](auto &d) { return d.name == selected; });
-    if (it == all.sources.end())
-      throw std::runtime_error("selected device unavailable: " + selected);
-    device = *it;
+    const auto *selectedDevice =
+        findSelectedDevice(all, selected, stableProperty);
+    if (!selectedDevice)
+      throw std::runtime_error(stableProperty.empty()
+                                   ? "selected device unavailable: " + selected
+                                   : "selected device identity unavailable: " +
+                                         stableProperty);
+    device = *selectedDevice;
     for (auto &p : all.ports)
       if (p.node == device.id && p.direction == "out")
         ports.push_back(p);
@@ -1225,10 +1235,10 @@ struct Runtime {
   }
 };
 } // namespace
-void runPipeWire(const std::string &device, const std::string &config,
-                 volatile sig_atomic_t &stopping) {
+void runPipeWire(const std::string &device, const std::string &stableProperty,
+                 const std::string &config, volatile sig_atomic_t &stopping) {
   Runtime r(stopping);
-  r.init(device, config);
+  r.init(device, stableProperty, config);
   pw_main_loop_run(r.main);
   r.shutdownAudio();
   if (!r.error.empty())

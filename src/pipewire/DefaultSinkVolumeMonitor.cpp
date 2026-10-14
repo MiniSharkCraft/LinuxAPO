@@ -5,6 +5,7 @@
 #include <pipewire/permission.h>
 #include <spa/param/props.h>
 #include <spa/pod/iter.h>
+#include <spa/pod/pod.h>
 #include <spa/utils/json.h>
 
 #include <algorithm>
@@ -278,12 +279,36 @@ bool DefaultSinkVolumeMonitor::parseDefaultSinkMetadata(
   if (!value)
     return false;
   char name[1024]{};
-  if (spa_json_str_object_find(value, std::strlen(value), "name", name,
-                               sizeof(name)) <= 0 ||
-      name[0] == '\0')
+  spa_json object;
+  spa_json_init(&object, value, std::strlen(value));
+  const char *token = nullptr;
+  const int objectLength = spa_json_next(&object, &token);
+  if (objectLength <= 0 || !spa_json_is_object(token, objectLength))
     return false;
-  stableName.assign(name);
-  return true;
+  spa_json members;
+  spa_json_enter(&object, &members);
+  char key[256]{};
+  while (const int keyLength = spa_json_next(&members, &token)) {
+    if (keyLength < 0 ||
+        spa_json_parse_stringn(token, keyLength, key, sizeof(key)) <= 0)
+      return false;
+    const char *encodedValue = nullptr;
+    const int valueLength = spa_json_next(&members, &encodedValue);
+    if (valueLength <= 0)
+      return false;
+    if (std::strcmp(key, "name") == 0) {
+      if (spa_json_parse_stringn(encodedValue, valueLength, name,
+                                 sizeof(name)) <= 0 ||
+          name[0] == '\0')
+        return false;
+      stableName.assign(name);
+      return true;
+    }
+    if (spa_json_is_container(encodedValue, valueLength) &&
+        spa_json_container_len(&members, encodedValue, valueLength) <= 0)
+      return false;
+  }
+  return false;
 }
 
 bool DefaultSinkVolumeMonitor::parseProps(
@@ -298,9 +323,13 @@ bool DefaultSinkVolumeMonitor::parseProps(
   bool muted = false;
   if (muteProp && spa_pod_get_bool(&muteProp->value, &muted) < 0)
     return false;
-  uint32_t count = 0, size = 0, type = 0;
-  const auto *values = static_cast<const uint8_t *>(
-      spa_pod_get_array_full(&volProp->value, &count, &size, &type));
+  if (SPA_POD_TYPE(&volProp->value) != SPA_TYPE_Array)
+    return false;
+  const uint32_t count = SPA_POD_ARRAY_N_VALUES(&volProp->value);
+  const uint32_t size = SPA_POD_ARRAY_VALUE_SIZE(&volProp->value);
+  const uint32_t type = SPA_POD_ARRAY_VALUE_TYPE(&volProp->value);
+  const auto *values =
+      static_cast<const uint8_t *>(SPA_POD_ARRAY_VALUES(&volProp->value));
   if (!values || count == 0 || type != SPA_TYPE_Float || size != sizeof(float))
     return false;
   double power = 0.0;

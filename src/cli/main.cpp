@@ -12,6 +12,7 @@
 #endif
 #ifdef SKYAPO_HAVE_PIPEWIRE
 #include "../pipewire/DeviceManager.h"
+#include "../pipewire/DeviceSelection.h"
 #include <pipewire/version.h>
 #endif
 #include <algorithm>
@@ -204,8 +205,9 @@ void printUsage(std::ostream &out) {
          "  config check --json <file>     Validate and emit JSON diagnostics\n"
          "  config reload                  Reload the active configuration\n"
          "  filters                        Show active filters\n"
-         "  plugin list                    List discovered plugins\n"
-         "  plugin set <PLUGIN-ID> <param> <value>  Set a live plugin parameter\n"
+         "  plugin list|scan               List discovered plugins\n"
+         "  plugin set <PLUGIN-ID> <param> <value>  Set a live plugin "
+         "parameter\n"
          "  plugin bypass <PLUGIN-ID> on|off        Set host-level bypass\n"
          "  plugin info <URI>              Show plugin metadata\n"
          "  help                           Show this help\n"
@@ -622,11 +624,10 @@ void stopDaemon() {
 } // namespace
 int main(int argc, char **argv) {
   try {
-    if (argc < 2)
-      throw std::runtime_error("usage: skyapo status | diagnostics [--json] | start | stop | restart "
-                               "| device list/set/current | config show/reload "
-                               "| config check [--json] <file> | plugin list/scan "
-                               "| plugin info <URI>");
+    if (argc < 2) {
+      printUsage(std::cerr);
+      return 2;
+    }
     std::string cmd = argv[1];
     if (argc == 2 && (cmd == "help" || cmd == "--help" || cmd == "-h")) {
       printUsage(std::cout);
@@ -827,34 +828,52 @@ int main(int argc, char **argv) {
     if (cmd == "device" && argc >= 3) {
       std::string action = argv[2];
       if (action == "current") {
-        auto d = settings::device();
-        std::cout << (d.empty() ? "No input selected" : d) << '\n';
+        const auto selection = settings::deviceSelection();
+        if (selection.name.empty()) {
+          std::cout << "No input selected\n";
+          return 0;
+        }
+#ifdef SKYAPO_HAVE_PIPEWIRE
+        const auto devices = enumerateDevices();
+        const auto *selected = findSelectedDevice(devices, selection.name,
+                                                  selection.stableProperty);
+        std::cout << (selected ? selected->name
+                               : selection.name + " (unavailable)")
+                  << '\n';
+#else
+        std::cout << selection.name << '\n';
+#endif
         return 0;
       }
 #ifdef SKYAPO_HAVE_PIPEWIRE
       auto ds = enumerateDevices();
       if (action == "list") {
+        const auto selection = settings::deviceSelection();
         std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\t"
                      "SAMPLE RATE\tSTABLE PROPERTY\tDEVICE BUS ID\t"
                      "ALSA CARD\tALSA PATH\n";
         for (auto &d : ds.sources)
           if (d.name != "skyapo.virtual_mic")
             std::cout << d.id << '\t' << d.name << '\t' << d.description << '\t'
-                      << (d.name == settings::device() ? "yes" : "") << '\t'
+                      << (isSelectedDevice(d, selection.name,
+                                           selection.stableProperty)
+                              ? "yes"
+                              : "")
+                      << '\t'
                       << (d.channels ? std::to_string(d.channels) : "unknown")
                       << '\t'
                       << (d.sampleRate ? std::to_string(d.sampleRate)
                                        : "unknown")
                       << '\t' << d.identity.stableProperty() << '\t'
-                      << d.identity.busId << '\t' << d.identity.alsaCard
-                      << '\t' << d.identity.alsaPath << '\n';
+                      << d.identity.busId << '\t' << d.identity.alsaCard << '\t'
+                      << d.identity.alsaPath << '\n';
         return 0;
       }
       if (action == "set" && argc == 4) {
         for (auto &d : ds.sources)
           if ((d.name == argv[3] || std::to_string(d.id) == argv[3]) &&
               d.name != "skyapo.virtual_mic") {
-            settings::select(d.name);
+            settings::select(d.name, d.identity.stableProperty());
             std::cout << "Selected " << d.name
                       << " (running daemon applies it shortly)\n";
             return 0;
@@ -903,6 +922,7 @@ int main(int argc, char **argv) {
       std::cout << "Valid config: " << e.filterCount() << " filters\n";
       return 0;
     }
+    printUsage(std::cerr);
     throw std::runtime_error("unknown command or invalid arguments");
   } catch (const std::exception &e) {
     std::cerr << "skyapo: " << e.what() << '\n';

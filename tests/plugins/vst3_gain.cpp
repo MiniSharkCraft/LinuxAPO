@@ -7,6 +7,7 @@
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 
@@ -14,6 +15,8 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 namespace {
+std::atomic<bool> lastProcessedBypass{false};
+
 class TestGain final : public SingleComponentEffect {
 public:
   explicit TestGain(bool failFirstProcess = false)
@@ -34,6 +37,9 @@ public:
     addAudioOutput(STR16("Output"), SpeakerArr::kStereo);
     parameters.addParameter(USTRING("Gain"), nullptr, kStepCountContinuous, 0.5,
                             ParameterInfo::kCanAutomate, 7);
+    parameters.addParameter(
+        USTRING("Bypass"), nullptr, 1, 0.0,
+        ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, 8);
     return kResultOk;
   }
 
@@ -88,21 +94,25 @@ public:
       for (int32 index = 0;
            index < data.inputParameterChanges->getParameterCount(); ++index) {
         auto *queue = data.inputParameterChanges->getParameterData(index);
-        if (!queue || queue->getParameterId() != 7 ||
-            queue->getPointCount() == 0)
+        if (!queue || queue->getPointCount() == 0)
           continue;
         int32 sampleOffset = 0;
-        ParamValue value = gain;
-        if (queue->getPoint(queue->getPointCount() - 1, sampleOffset, value) ==
+        ParamValue value = 0.0;
+        if (queue->getPoint(queue->getPointCount() - 1, sampleOffset, value) !=
             kResultTrue)
+          continue;
+        if (queue->getParameterId() == 7)
           gain = static_cast<float>(value);
+        else if (queue->getParameterId() == 8)
+          bypassed = value >= 0.5;
       }
     }
+    lastProcessedBypass.store(bypassed, std::memory_order_release);
     for (int32 channel = 0; channel < 2; ++channel) {
       const auto *input = data.inputs[0].channelBuffers32[channel];
       auto *output = data.outputs[0].channelBuffers32[channel];
       for (int32 frame = 0; frame < data.numSamples; ++frame)
-        output[frame] = input[frame] * gain;
+        output[frame] = input[frame] * (bypassed ? 1.0f : gain);
     }
     data.outputs[0].silenceFlags = 0;
     return kResultOk;
@@ -110,6 +120,7 @@ public:
 
 private:
   float gain = 0.5f;
+  bool bypassed{};
   bool failFirstProcess = false;
   bool failedOnce = false;
 };
@@ -232,6 +243,10 @@ private:
   bool changeLatencyOnNextActivation{};
 };
 } // namespace
+
+extern "C" bool skyapo_test_vst3_last_process_bypass() {
+  return lastProcessedBypass.load(std::memory_order_acquire);
+}
 
 BEGIN_FACTORY("SkyAPO Tests", "https://example.invalid/skyapo", "", 0)
 DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000001),

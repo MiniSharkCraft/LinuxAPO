@@ -24,6 +24,113 @@ def run(args, env, timeout=8, check=True):
     return result
 
 
+class SystemdManagedDaemon:
+    """Popen-like control for a transient per-user skyapod.service."""
+
+    def __init__(self, unit, systemctl):
+        self.unit = unit
+        self.systemctl = systemctl
+        self.returncode = None
+
+    def _show(self, properties):
+        result = subprocess.run(
+            [self.systemctl, "--user", "show", self.unit,
+             *(f"--property={item}" for item in properties)],
+            env=os.environ.copy(), text=True, capture_output=True, timeout=5)
+        if result.returncode:
+            return None
+        return dict(line.split("=", 1) for line in result.stdout.splitlines()
+                    if "=" in line)
+
+    def main_pid(self):
+        values = self._show(("MainPID",))
+        return int(values.get("MainPID", "0")) if values else 0
+
+    def restart_count(self):
+        values = self._show(("NRestarts",))
+        return int(values.get("NRestarts", "0")) if values else 0
+
+    def poll(self):
+        values = self._show(("ActiveState", "ExecMainStatus"))
+        if not values:
+            return None
+        if values.get("ActiveState") in (
+                "active", "activating", "reloading", "deactivating"):
+            return None
+        self.returncode = int(values.get("ExecMainStatus", "1"))
+        return self.returncode
+
+    def send_signal(self, sig):
+        if sig == signal.SIGTERM:
+            result = subprocess.run(
+                [self.systemctl, "--user", "stop", self.unit],
+                env=os.environ.copy(), text=True, capture_output=True,
+                timeout=25)
+        else:
+            result = subprocess.run(
+                [self.systemctl, "--user", "kill", f"--signal={sig}",
+                 "--kill-whom=main", self.unit],
+                env=os.environ.copy(), text=True, capture_output=True,
+                timeout=5)
+        if result.returncode:
+            raise RuntimeError(
+                f"systemctl could not signal {self.unit}: {result.stderr}")
+
+    def kill(self):
+        self.send_signal(signal.SIGKILL)
+
+    def wait(self, timeout=None):
+        deadline = time.monotonic() + (timeout if timeout is not None else 30)
+        while time.monotonic() < deadline:
+            result = self.poll()
+            if result is not None:
+                return result
+            time.sleep(0.05)
+        raise subprocess.TimeoutExpired(self.unit, timeout)
+
+    def journal(self):
+        result = subprocess.run(
+            ["journalctl", "--user", "-u", self.unit, "-n", "40",
+             "--no-pager", "-o", "cat"], env=os.environ.copy(),
+            text=True, capture_output=True, timeout=5)
+        return result.stdout or result.stderr
+
+
+def start_systemd_daemon(systemd_run, systemctl, daemon, config, env,
+                         unit_template):
+    template = pathlib.Path(unit_template).read_text()
+    properties = {}
+    for line in template.splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, value = line.strip().split("=", 1)
+            properties[key] = value
+    if properties.get("Restart") != "on-failure":
+        raise RuntimeError(
+            "installed skyapod user unit must set Restart=on-failure")
+    restart_sec = properties.get("RestartSec")
+    if not restart_sec:
+        raise RuntimeError("skyapod user unit must define RestartSec")
+    unit = f"skyapo-e2e-{os.getpid()}-{time.monotonic_ns()}"
+    command = [
+        str(systemd_run), "--user", f"--unit={unit}", "--no-block",
+        "--property=Type=exec",
+        f"--property=Restart={properties['Restart']}",
+        f"--property=RestartSec={restart_sec}",
+        "--property=StartLimitIntervalSec=0",
+    ]
+    for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+                "PIPEWIRE_RUNTIME_DIR"):
+        command.append(f"--setenv={key}={env[key]}")
+    command += [str(daemon), "--config", str(config)]
+    result = subprocess.run(command, env=os.environ.copy(), text=True,
+                            capture_output=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError(
+            f"systemd-run failed to launch isolated skyapod unit:\n"
+            f"{result.stdout}\n{result.stderr}")
+    return SystemdManagedDaemon(unit, str(systemctl))
+
+
 def stop(process, label):
     if process is None or process.poll() is not None:
         return
@@ -155,9 +262,14 @@ def make_rate_config(base_config, destination, sample_rate):
     return destination
 
 
-def start_test_source(source, mono, env, source_log):
+def start_test_source(source, mono, env, source_log, name=None, serial=None):
+    args = [str(source)] + (["--mono"] if mono else [])
+    if name is not None:
+        args += ["--name", name]
+    if serial is not None:
+        args += ["--serial", serial]
     return subprocess.Popen(
-        [str(source)] + (["--mono"] if mono else []), env=env,
+        args, env=env,
         stdout=source_log, stderr=subprocess.STDOUT)
 
 
@@ -166,11 +278,13 @@ def main():
         "mono", "stereo", "mono-44100", "stereo-44100",
         "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
         "latency", "include-reload", "source-replug",
+        "source-replug-stable-id",
         "server-restart", "plugin-live-param", "lv2-live-param",
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
+        "vst3-bypass", "lv2-bypass",
         "vst3-latency-change", "vst2-latency-change", "clap-latency-change",
         "lv2-latency-change", "lv2-pdc-final", "renegotiate",
-        "transition-format", "device-filter",
+        "transition-format", "device-filter", "systemd-crash-restart",
         "device-switch", "delay-pdc"
     ):
         raise RuntimeError(
@@ -178,11 +292,12 @@ def main():
             "SOURCE CONSUMER PIPEWIRE_CONFIG DSP_CONFIG "
             "mono|stereo|mono-44100|stereo-44100|mono-48000|stereo-48000|"
             "mono-96000|stereo-96000|latency|include-reload|source-replug|"
+            "source-replug-stable-id|"
             "plugin-live-param|lv2-live-param|vst3-live-param|"
-            "vst2-live-param|plugin-bypass|vst3-latency-change|"
+            "vst2-live-param|plugin-bypass|vst3-bypass|lv2-bypass|vst3-latency-change|"
             "vst2-latency-change|"
             "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
-            "renegotiate|transition-format|"
+            "renegotiate|transition-format|systemd-crash-restart|"
             "device-filter|device-switch|delay-pdc")
     (pipewire, pw_cli, pw_dump, daemon, cli, source, consumer, pw_config,
      dsp_config) = map(pathlib.Path, sys.argv[1:10])
@@ -193,7 +308,8 @@ def main():
     sample_rate = int(rate_case.group(2)) if rate_case else 48000
     latency_plugin = mode == "latency"
     include_reload = mode == "include-reload"
-    source_replug = mode == "source-replug"
+    stable_id_replug = mode == "source-replug-stable-id"
+    source_replug = mode == "source-replug" or stable_id_replug
     server_restart = mode == "server-restart"
     vst2_live = mode == "vst2-live-param"
     vst2_latency_change = mode == "vst2-latency-change"
@@ -204,11 +320,12 @@ def main():
     delay_pdc = mode == "delay-pdc"
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
-    plugin_bypass = mode == "plugin-bypass"
+    plugin_bypass = mode in ("plugin-bypass", "vst3-bypass", "lv2-bypass")
     renegotiate = mode == "renegotiate"
     transition_format = mode == "transition-format"
     device_filter = mode == "device-filter"
     device_switch = mode == "device-switch"
+    systemd_crash_restart = mode == "systemd-crash-restart"
     plugin_chain = (plugin_live or plugin_bypass or latency_plugin or
                     vst3_latency_change or vst2_latency_change or
                     clap_latency_change)
@@ -220,6 +337,12 @@ def main():
     elif mode == "vst3-live-param":
         live_plugin_id, live_parameter = (
             "534B5941504F00010000000000000001", "7")
+    elif mode == "vst3-bypass":
+        live_plugin_id = "534B5941504F00010000000000000001"
+        live_parameter = "7"
+    elif mode == "lv2-bypass":
+        live_plugin_id = "https://skyapo.example/plugins/test-gain"
+        live_parameter = "gain"
     elif vst2_live:
         live_plugin_id = os.environ["SKYAPO_TEST_VST2_PATH"]
         live_parameter = "Gain"
@@ -262,7 +385,11 @@ def main():
             device_config = root / "device-filter.txt"
             device_config.write_text(
                 f"Device: unmatched microphone; {device_name}\n"
-                "Preamp: -6 dB\n")
+                'If: deviceName == "SkyAPO Deterministic Test Input"\n'
+                'If: connectionName == "skyapo.test.input"\n'
+                'If: stage == "capture"\n'
+                "Preamp: -6 dB\n"
+                "EndIf:\nEndIf:\nEndIf:\n")
             dsp_config = device_config
         env = os.environ.copy()
         env.update({
@@ -281,7 +408,9 @@ def main():
             server = start_private_pipewire(
                 pipewire, rate_config, env, logs, runtime)
 
-            source_process = start_test_source(source, mono, env, source_log)
+            source_process = start_test_source(
+                source, mono, env, source_log,
+                serial="SKYAPO-TEST-SERIAL-42" if stable_id_replug else None)
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 if source_process.poll() is not None:
@@ -296,13 +425,40 @@ def main():
             selected = run([str(cli), "device", "set", device_name], env)
             if device_name not in selected.stdout:
                 raise RuntimeError(f"device selection did not persist: {selected.stdout}")
+            if stable_id_replug:
+                device_list = run([str(cli), "device", "list"], env).stdout
+                pipewire_objects = json.loads(
+                    run([str(pw_dump)], env).stdout)
+                source_props = next((
+                    item.get("info", {}).get("props", item.get("props", {}))
+                    for item in pipewire_objects
+                    if item.get("type", "").endswith(":Node") and
+                    item.get("info", {}).get("props", item.get("props", {}))
+                    .get("node.name") == device_name), {})
+                if ("device.serial=SKYAPO-TEST-SERIAL-42" not in device_list or
+                        not re.search(r"(?m)^\d+\t" + re.escape(device_name) +
+                                      r"\t[^\n]*\tyes\t", device_list)):
+                    raise RuntimeError(
+                        "stable test identity was not advertised and persisted "
+                        f"by device selection:\n{device_list}\n"
+                        f"PipeWire test source properties: {source_props}")
             current = run([str(cli), "device", "current"], env)
             if device_name not in current.stdout:
                 raise RuntimeError(f"selected source mismatch: {current.stdout}")
 
-            daemon_process = subprocess.Popen(
-                [str(daemon), "--config", str(dsp_config)], env=env,
-                stdout=daemon_log, stderr=subprocess.STDOUT)
+            if systemd_crash_restart:
+                systemd_run = shutil.which("systemd-run")
+                systemctl = shutil.which("systemctl")
+                if not systemd_run or not systemctl:
+                    raise RuntimeError(
+                        "systemd-crash-restart requires systemd-run and systemctl")
+                daemon_process = start_systemd_daemon(
+                    systemd_run, systemctl, daemon, dsp_config, env,
+                    os.environ.get("SKYAPO_SYSTEMD_UNIT_TEMPLATE", ""))
+            else:
+                daemon_process = subprocess.Popen(
+                    [str(daemon), "--config", str(dsp_config)], env=env,
+                    stdout=daemon_log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 15
             status = ""
             while time.monotonic() < deadline:
@@ -397,6 +553,47 @@ def main():
             if not old_capture_id:
                 raise RuntimeError("daemon status lacks initial capture node ID")
             assert_virtual_source(pw_dump, env, old_virtual_id)
+
+            if systemd_crash_restart:
+                old_pid = daemon_process.main_pid()
+                restart_count = daemon_process.restart_count()
+                if old_pid <= 0:
+                    raise RuntimeError(
+                        "systemd did not publish the supervised skyapod PID")
+                daemon_process.send_signal(signal.SIGKILL)
+                deadline = time.monotonic() + 15
+                restarted_status = ""
+                new_pid = 0
+                while time.monotonic() < deadline:
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "systemd left the daemon stopped instead of restarting it")
+                    new_pid = daemon_process.main_pid()
+                    restarts = daemon_process.restart_count()
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    restarted_status = result.stdout
+                    if (new_pid > 0 and new_pid != old_pid and
+                            restarts > restart_count and result.returncode == 0 and
+                            "Daemon: streaming" in restarted_status and
+                            "Active capture links: " +
+                            f"{channel_count}/{channel_count}" in
+                            restarted_status):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "systemd did not restart skyapod after SIGKILL with a "
+                        f"streaming graph:\n{restarted_status}\n"
+                        f"--- {daemon_process.unit} journal ---\n"
+                        f"{daemon_process.journal()}")
+                status = restarted_status
+                new_virtual_id = virtual_source_id(status)
+                assert_virtual_source(pw_dump, env, new_virtual_id)
+                print(f"User-systemd crash recovery passed: skyapod PID "
+                      f"{old_pid} -> {new_pid}; restart count "
+                      f"{daemon_process.restart_count()}; virtual source "
+                      f"node {old_virtual_id} -> {new_virtual_id}.")
 
             if device_switch:
                 second_name = "skyapo.test.alternate"
@@ -621,10 +818,15 @@ def main():
                     server = start_private_pipewire(
                         pipewire, pw_config, env, logs, runtime)
 
-                print("Daemon detected removal; publishing the same stable "
-                      "source name again…", flush=True)
+                replacement_name = ("skyapo.test.renamed"
+                                    if stable_id_replug else device_name)
+                replacement_serial = ("SKYAPO-TEST-SERIAL-42"
+                                      if stable_id_replug else None)
+                print("Daemon detected removal; publishing replacement "
+                      f"source {replacement_name}…", flush=True)
                 source_process = start_test_source(
-                    source, mono, env, source_log)
+                    source, mono, env, source_log, name=replacement_name,
+                    serial=replacement_serial)
                 deadline = time.monotonic() + 15
                 relinked_status = ""
                 while time.monotonic() < deadline:
@@ -640,6 +842,8 @@ def main():
                     if (result.returncode == 0 and
                             "Daemon: streaming" in relinked_status and
                             "SkyAPO Virtual Mic" in relinked_status and
+                            f"Selected device: {replacement_name}" in
+                            relinked_status and
                             expected_links in relinked_status):
                         break
                     time.sleep(0.1)
@@ -653,6 +857,12 @@ def main():
                         "virtual source node ID did not change after source "
                         "recovery; expected a recreated PipeWire node")
                 assert_virtual_source(pw_dump, env, new_virtual_id)
+                current_after_replug = run(
+                    [str(cli), "device", "current"], env).stdout
+                if replacement_name not in current_after_replug:
+                    raise RuntimeError(
+                        "stable selection did not resolve the renamed node: "
+                        f"{current_after_replug}")
                 print(f"Selected source/server recovery ({mode}) returned "
                       f"SkyAPO Virtual Mic at node {new_virtual_id} "
                       f"(previous graph ID {old_virtual_id}; IDs may be reused "
@@ -694,8 +904,8 @@ def main():
                                 f"expectation {expected!r}:\n{reloaded_status}")
             if plugin_bypass:
                 changed = run([str(cli), "plugin", "bypass",
-                               "org.skyapo.test.gain", "on"], env)
-                if changed.stdout != "Bypassed org.skyapo.test.gain\n":
+                               live_plugin_id, "on"], env)
+                if changed.stdout != f"Bypassed {live_plugin_id}\n":
                     raise RuntimeError(
                         f"plugin bypass was not acknowledged: {changed.stdout}")
                 # The fixture normally halves samples; bypass must leave only
