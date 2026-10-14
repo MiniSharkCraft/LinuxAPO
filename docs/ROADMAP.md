@@ -1,87 +1,293 @@
-# LinuxAPO release roadmap
+# LinuxAPO incremental release roadmap
 
-This roadmap follows the source-level comparison in [PORT_GAP_AUDIT.md](PORT_GAP_AUDIT.md). LinuxAPO is currently version **0.9.0 beta**; the published 0.9.0 release/tag is immutable. Based on the substantial user-visible capability growth since that baseline, the recommended next release is **0.10.0** after its gates pass. A 0.9.1 remains an optional bug-fix-only release if an urgent supported-path regression needs shipping first. Neither version is approved or released. Versions below are planning targets, not claims that their acceptance criteria have passed.
+LinuxAPO's published baseline is **v0.9.0 Beta**. Its tag and release are
+immutable. This file is the canonical release sequence; the root
+[`ROADMAP.md`](../ROADMAP.md) retains the detailed historical acceptance and
+test-evidence log. Milestones below are planned gates, not claims of completion
+or release dates. Releases in the 0.x series are GitHub prereleases.
 
-## Current baseline — 0.9.0 beta
+## Release metadata and automation
 
-The baseline provides a PipeWire capture → upstream-backed EAPO DSP → virtual microphone path; a daemon, CLI and Qt config editor; offline rendering; a tested subset of EAPO directives; and native LV2, CLAP and single-bus VST3 hosting. FST-based VST2 is opt-in and experimental. It is not full Equalizer APO parity, not production-final and not a guarantee for arbitrary devices or plugins. See the audit and [REALTIME.md](REALTIME.md) for evidence and limits.
+For each release, prepare a distinct `docs/releases/vX.Y.Z.md` from the
+verified changes and test evidence; update `CHANGELOG.md`, the README's
+released-version links, `CMakeLists.txt`, and affected user/developer docs in
+the same final release-preparation commit. Annotated tags use that release
+file's exact first-level title followed by a concise tag summary. Do not create
+the notes from a tag workflow or tag an unfinished worktree.
 
-## Conditional patch — 0.9.1 (only if urgent fixes need shipping first)
+`.github/workflows/release.yml` is the single tag-triggered publisher. It
+requires an annotated `v0.x.y` tag matching CMake, a matching changelog entry,
+committed version-specific notes, and verified build/test/package jobs. It
+creates a draft prerelease only after all jobs pass, downloads the uploaded
+assets back, verifies `SHA256SUMS`, and only then makes the prerelease public.
+The workflow rejects an existing release and does not run for v1.0.0. The
+publish job alone has `contents: write`; development commits continue through
+ordinary CI without producing releases.
 
-Priority: P0 only if a confirmed release-blocking defect warrants an interim release; otherwise skip this patch. Estimate: **5–10 engineering days**, assuming one Linux/PipeWire development host, existing fixtures and no new public API. This estimate excludes external review and hardware diversity.
+## Baseline and current checkpoint
 
-Deliverables:
+The 0.9.0 baseline provides an upstream-backed EAPO DSP path from PipeWire
+capture to the `SkyAPO Virtual Mic`, offline rendering, CLI/daemon and a Qt
+editor. LinuxAPO also contains native LV2, CLAP and single-audio-bus VST3
+hosts; FST-based VST2 compatibility is optional and experimental. This is not
+full EAPO parity, system-wide playback processing, or production-final.
 
-- Fix only confirmed regressions in the supported capture/DSP/virtual-source path, config checking/reload, supported plugin hosts and packaging.
-- Resolve the observed editor-versus-daemon config/status discrepancy if reproducible; make the loaded config identity and active processing diagnostics unambiguous.
-- Retain bounded memory behavior for filter scratch, convolution, delay, PDC and plugin bypass; fix any incorrect reconfiguration/accounting discovered by tests.
-- Correct actionable error reporting for unsupported stages, invalid convolution inputs, unavailable devices and plugin failures. Do not silently claim pre/post-mix playback processing.
-- Preserve package install/upgrade/removal behavior and current 0.9.0 compatibility; no version bump until separately approved.
+The active unpublished checkpoint is **post-0.9.0 runtime hardening**. The
+worktree currently contains uncommitted runtime, DSP, UI, packaging, test and
+documentation changes; none is treated as released. New focused PipeWire E2E
+tests for LV2 and VST3 state persistence across a fresh daemon restart passed
+1/1 each in Release and ASan/UBSan; subsequent full suites passed **76/76**
+Release CTest and **77/77** ASan/UBSan CTest (42 private PipeWire E2Es in the
+latter). Current-source DEB, RPM and generic `.tar.zst` extracted-payload
+smokes and `-6 dB` renderer checks also passed. These are local dirty-worktree
+results, not hosted CI on a clean commit or hardware diversity validation; CI
+must retest the exact checkpoint commit before a release.
 
-Dependencies: reproduce each alleged defect; supported-format fixtures; existing private PipeWire graph and package CI.
+### Next candidate — v0.9.1 Beta: supported-path correctness and release hygiene
 
-Acceptance and tests:
+**Purpose:** ship only the accumulated compatible hardening that can pass the
+release gates, without implying playback or broad EAPO/plugin parity.
 
-- Full normal CTest and ASan/UBSan suites pass from a clean configured build; test counts/results are recorded with the exact source revision.
-- Offline renderer and config-check tests cover saved, included, invalid and unsupported directives; Preamp and filter numerical references remain within their established tolerances.
-- PipeWire independent-consumer E2E verifies actual processed samples, reload rollback, switching/reconnect/restart, mono/stereo and supported sample rates; callback allocation audit remains zero.
-- Plugin fixture tests cover supported formats, state/control/bypass/latency paths; clearly mark arbitrary third-party plugin behavior unverified.
-- Arch package build/install/remove smoke passes. Other package formats receive focused smoke tests when their builders are available.
-- No unresolved P0 crash, hang, unbounded allocation or data-loss regression in supported daily-use paths.
+**Scope:** bounded memory and transactional PDC/reconfiguration; actionable
+fail-closed behavior for runtime/plugin errors; DSP/config boundary checks;
+repeatable callback, latency and state-restart tests; disk-backed temporary
+staging; package/install smoke corrections. Optional experimental hosts stay
+disabled in default packages. The unverified application artwork currently in
+the worktree is excluded from public commit/package/release until its
+redistribution rights are confirmed; the rest of the candidate must not depend
+on shipping it.
 
-Difficulty: medium/high because lifecycle, graph reconfiguration and plugin timing defects require deterministic reproduction. Release blocker: any failed supported-path regression or unreviewed dirty source.
+**Acceptance criteria:**
 
-Explicitly deferred: playback processing, full EAPO language parity, new plugin formats, native plugin GUI, complete response/phase/latency analysis, plugin process isolation, universal hardware certification and legal clearance for experimental VST2 distribution.
+- Full Release CTest and ASan/UBSan suites pass on the exact candidate commit;
+  no current supported-path P0/P1 defect remains.
+- PipeWire independent-consumer E2Es verify processed audio, config rollback,
+  source/server recovery, supported channel/rate transitions, and plugin
+  state/reload paths. Runtime callback allocation/deallocation counters remain
+  zero in steady state.
+- Renderer/config numerical tests verify Preamp, filter, convolution, delay,
+  channel routing and invalid-config rollback wherever implemented.
+- Package smoke covers every artifact being published, with install paths,
+  desktop metadata, service files and notices verified. Unsupported package
+  families are not advertised as validated.
+- `git status` is clean at the release commit; source, submodules and licenses
+  are audited; no unlicensed artwork, generated binaries, cache or secrets are
+  included.
 
-## Recommended next release — 0.10.0 (feature and compatibility milestone)
+**Required tests:** full CTest; ASan/UBSan; PipeWire producer→daemon→independent
+consumer; renderer/config; plugin fixtures and state restart; callback
+allocation invariants; PDC/latency tests; package install/remove smoke; Nix
+checks if its derivation changes. Hosted CI must pass on the release commit.
 
-Priority: P0 for the next planned release, after the focused correctness/release blockers below are closed. Estimate: **20–40 engineering days**, dependent on UX decisions and backend boundaries; this is a planning range, not a calendar commitment.
+**Hardware/external validation:** physical capture-to-virtual-mic smoke on the
+available desktop is required if the device/server is accessible. Broader
+device diversity and independent third-party plugin compatibility remain
+unproven and are not advertised as covered by fixture tests.
 
-The version step is justified by the post-0.9.0 feature delta already present on the current development branch: expanded device/editor workflows, plugin control/state/PDC, response analysis and broader PipeWire regression coverage. It does not imply full EAPO parity. Deliverables, ordered by functional value:
+**Known limitations:** playback is not processed system-wide; arbitrary
+third-party plugin crashes/hangs are not isolated; hardware diversity, total
+ADC-to-application latency and several distribution install matrices are not
+proven. FST/VST2 remains experimental and subject to legal review.
 
-1. Decide and implement the supported playback/sink-processing graph if it is required; retain capture-to-virtual-mic as a separately reliable route.
-2. Improve editor usability for channel routing, GraphicEQ and convolution; add clear diagnostics for active versus unsupported EAPO stages and config commands.
-3. Provide usable plugin parameter/state workflows for supported hosts, and expose only capabilities verified by each format. Native plugin GUI embedding is a separate scoped decision.
-4. Expand response analysis (documented channel semantics and useful magnitude/phase/latency views) without presenting theoretical analysis as measured hardware latency.
-5. Improve endpoint selection/troubleshooting and device identity behavior across more PipeWire implementations.
+**Release readiness:** publish/tag v0.9.1 only after all applicable criteria
+pass on one reviewed, clean commit. If the icon-rights dependency cannot be
+removed from the candidate or clarified, publishing is blocked; preserve the
+assets locally without redistributing them.
 
-Dependencies: 0.9.1 regression baseline; user workflows ranked from the parity audit; licensing review before enabling FST/VST2 by default.
+### v0.10.0 Beta: PipeWire playback processing
 
-Acceptance and tests: each user workflow has UI and backend integration coverage; tests assert the saved config actually changes Engine output; response plots have numeric fixtures; playback, if included, has independent PipeWire producer/consumer tests; no desktop-only feature may bypass the daemon's validation/runtime path.
+**Scope:** add a native PipeWire playback graph for selected application audio,
+process it with the same EAPO-backed engine, and deliver it to a selected
+physical sink. Keep capture-to-virtual-microphone as an independent supported
+route. Specify graph ownership, default/fallback behavior and loop/feedback
+prevention before implementation.
 
-Difficulty: high. Release blockers: feature scope must be explicit, each feature must be wired end-to-end, and unsupported formats/stages must remain visibly unsupported.
+**Acceptance criteria:**
 
-Deferred here unless separately prioritized: Windows COM/Registry/installer behavior, plugin crash sandboxing, broad yabridge certification and cosmetic replication of the upstream editor.
+- A native PipeWire test producer's known signal passes through LinuxAPO DSP
+  and is captured by an independent consumer attached to the intended physical
+  sink/monitor path; numeric gain/filter output matches reference tolerances.
+- UI/CLI/status report selected sink, graph state, negotiated format and
+  unavailable/unsupported playback states without fabricated values.
+- Capture mode remains regression-clean; selecting playback cannot create a
+  capture/playback feedback loop or silently redirect unrelated streams.
+- Graph teardown, daemon restart, PipeWire restart, device removal and config
+  reload fail safely and recover when the endpoint returns.
+- No recurring realtime heap allocation; bounded buffers and measured graph
+  latency are reported honestly.
 
-## Stability milestone — 1.0.0
+**Required tests:** private PipeWire producer→LinuxAPO→sink/monitor→independent
+consumer E2E; unity and non-unity DSP numeric checks; routing/feedback,
+format/quantum changes, daemon and server restart, capture regression,
+allocation, sanitizer and latency tests.
 
-Priority: P0 release gate after the feature scope is frozen. Estimate: **10–20 engineering days after 0.10 scope stabilizes**, plus external hardware, legal and clean-install validation that cannot be estimated as local coding time.
+**Hardware/external validation:** verify audible playback on at least one real
+physical output and capture a loopback/monitor recording. Verify no feedback
+under ordinary desktop playback. Other audio servers and device diversity are
+not implied.
 
-Required deliverables:
+**Known limitations:** initial support may be limited to one selected sink and
+PipeWire-managed application streams; per-application routing, simultaneous
+multi-sink graphs and JACK/PulseAudio-specific behavior are out of scope unless
+the tested design requires them.
 
-- Freeze a documented supported config, device, plugin and package matrix; identify intentional Linux behavior differences.
-- No known critical correctness, crash, deadlock, unbounded memory or config-loss issue in supported workflows.
-- Transactional config reload and recovery verified under daemon, PipeWire, device and plugin lifecycle faults.
-- Supported plugin formats meet published state, latency/PDC and failure-reporting requirements; VST2 remains excluded or experimental unless licensing/distribution and compatibility gates are resolved.
-- Reproducible release artifacts, checksums, install/upgrade/uninstall verification and complete license/attribution inventory.
-- Clean install and upgrade validation on each declared distribution; real hardware tests across representative input devices and channel layouts.
-- User documentation, diagnostics and known limitations match the release binaries.
+**Release readiness:** publish only after real playback and independent
+recording evidence exists and capture/virtual-mic acceptance remains green.
 
-Acceptance and tests:
+### v0.11.0 Beta: endpoint selection and lifecycle reliability
 
-- Full CTest, ASan/UBSan, PipeWire E2E, renderer/config, plugin fixture, daemon restart/recovery, allocation, PDC/latency and package smoke suites pass on the tagged source.
-- Independent audio recording proves capture → DSP → virtual source on each claimed hardware class. Synthetic PipeWire tests do not substitute for this gate.
-- Test at least one clean install, upgrade and uninstall per declared package family; Nix flake check/build on a clean supported evaluator.
-- Independent license review for all bundled/linked components and enabled plugin formats.
-- Tag only a clean, reviewed commit after all declared gates pass; retain exact evidence/artifact hashes.
+**Scope:** close user-facing gaps in input/output device identity, switching,
+hotplug, default-device changes and PipeWire reconnect/recovery across capture
+and playback routes.
 
-Difficulty: high. External blockers include hardware diversity, distribution-specific transaction tests, third-party plugin behavior and qualified licensing review.
+**Acceptance criteria:** stable identifiers survive runtime numeric-ID churn;
+selection changes are transactional; removed endpoints fail visibly and
+recover without stale links, hangs or silent routing to a different device.
+UI/CLI and daemon status agree on current endpoint and graph state.
 
-## Longer-term optional work
+**Required tests:** private PipeWire endpoint add/remove/rename/default-change,
+same-name reappearance, server restart, selected-device switch during audio,
+capture and playback independent-consumer checks, UI/CLI persistence and
+sanitizer tests.
 
-- Plugin subprocess isolation and recovery; automation and richer plugin state UI.
-- Additional plugin formats only when they can be supported and tested without compromising realtime safety.
-- More complete response, phase and measured-latency diagnostics.
-- Additional distributions and installation channels after the 1.0 package matrix is stable.
+**Hardware/external validation:** real microphone and speaker unplug/replug or
+equivalent device disable/enable on available hardware. Synthetic hotplug is
+not a substitute for physical validation.
 
-These items are not prerequisites for 1.0 unless promoted into the explicitly supported product scope. Windows-only APO registration, COM activation, Registry installation and Windows service management are not LinuxAPO goals; PipeWire-native equivalents are evaluated by behavior, not by literal API similarity.
+**Known limitations:** device-specific APO installation/registry behavior has
+no literal Linux analogue; LinuxAPO follows PipeWire routing and permissions.
+
+**Release readiness:** no unresolved route-loss/reconnect regression; publish
+only with at least one documented physical endpoint-switch recovery run.
+
+### v0.12.0 Beta: supported plugin workflow and compatibility
+
+**Scope:** define and test the supported native plugin matrix (LV2, CLAP,
+VST3); improve state, parameter, bypass, failure and latency/PDC UX. Decide
+separately whether a native plugin GUI is required; do not claim one until it
+actually loads and safely controls plugins. Keep FST/VST2 opt-in/experimental
+unless compatibility and legal gates are met.
+
+**Acceptance criteria:** per-format discover/load/parameter/state/bypass/reload
+and latency behavior is documented; unsupported buses/features fail
+actionably; saved state survives clean daemon restart; malformed state rolls
+back to last valid graph; no host callback allocation; plugin failure does not
+silently corrupt audio/config state.
+
+**Required tests:** native fixture and selected real third-party plugins for
+each claimed format, offline numeric output, PipeWire independent-consumer
+E2E, restart/corrupt-state, dynamic PDC, block-size changes, callback
+allocation and ASan/UBSan. Third-party coverage must name plugin/version.
+
+**Hardware/external validation:** monitor/record at least one native plugin
+chain through capture and playback on hardware. Wine/yabridge wrappers are
+separately identified and never treated as native-plugin evidence.
+
+**Known limitations:** plugin crashes/hangs remain in-process unless an
+isolation milestone is explicitly implemented; automation curves, auxiliary
+buses and GUI embedding may remain unsupported.
+
+**Release readiness:** publish only the formats that meet the per-format gate;
+exclude experimental VST2 from default packages and marketing claims.
+
+### v0.13.0 Beta: EAPO config compatibility and analysis
+
+**Scope:** prioritize high-value missing EAPO commands and semantics from
+[`PORT_GAP_AUDIT.md`](PORT_GAP_AUDIT.md), particularly stages/device matching,
+expressions/runtime variables, nested includes and channel/mix behavior; finish
+useful magnitude/phase/latency response analysis. No Windows COM/Registry
+replica.
+
+**Acceptance criteria:** each claimed parser command has syntax/units/alias,
+source-location diagnostics, runtime wiring and numerical or routing tests;
+unsupported commands fail visibly; editor writes valid semantics and
+round-trips untouched directives; response analysis has independent reference
+fixtures and distinguishes modeled response from measured realtime latency.
+
+**Required tests:** upstream-config corpus comparison; parser/error/Include
+matrix; mono/stereo/multichannel numeric DSP and routing tests; UI
+round-trips; response magnitude/phase fixtures; PipeWire consumer tests for
+commands that affect routing/audio; renderer regression and sanitizers.
+
+**Hardware/external validation:** sample-rate and channel-layout checks on
+available physical devices. External configs/plugins require a documented,
+permission-safe fixture corpus.
+
+**Known limitations:** full Windows EAPO parity is neither assumed nor
+required; unsupported Windows-specific commands remain explicitly listed.
+
+**Release readiness:** no command may be called supported based only on parse
+success; runtime effect and tests must be shown. Publish with an updated parity
+audit and no silent command loss.
+
+### v0.14.0 Beta: packaging, diagnostics and cross-distro hardening
+
+**Scope:** stabilize supported package formats and upgrade/removal behavior,
+systemd user lifecycle, diagnostics, docs, reproducible artifacts and
+checksums; close reliability issues found across prior milestones.
+
+**Acceptance criteria:** fresh install/upgrade/remove for every declared
+package family; service start/restart/disable/remove semantics verified;
+installed UI/CLI/docs/notices match source; packages build from a clean pinned
+checkout; no generated/user plugin/cache material is bundled.
+
+**Required tests:** clean build; CTest and sanitizer suites; package smoke and
+transaction tests per declared distro; Nix flake check/build; artifact
+checksums; startup/recovery and uninstall-no-leftover tests; hosted CI on exact
+candidate commit.
+
+**Hardware/external validation:** repeat capture and playback smoke after
+install on the supported desktop. Other distros are only supported if their
+package transaction was actually exercised.
+
+**Known limitations:** distro versions beyond the tested matrix, unsupported
+init systems, secure-boot/sandbox integration and third-party plugin sandboxing
+are not implied.
+
+**Release readiness:** package and repository state are clean, provenance and
+licenses are documented, and all advertised artifacts pass their own smoke
+tests.
+
+### v1.0.0: stable release gate
+
+**Scope:** freeze the supported hardware, PipeWire, config, plugin and
+distribution matrix; resolve or explicitly exclude every mandatory gap; make
+no new feature additions during the release candidate phase.
+
+**Acceptance criteria:**
+
+- System-wide playback and capture-to-virtual-mic meet their separate E2E and
+  physical-device gates; switching/recovery is validated on real hardware.
+- Supported EAPO syntax and plugin formats are explicitly defined; no
+  supported command parses but is disconnected from realtime/offline output.
+- No known critical crash, hang, data loss, unbounded memory or realtime
+  allocation issue in supported use; last-valid-config rollback works.
+- Full Release, ASan/UBSan, PipeWire, renderer/config, plugin, restart/recovery,
+  PDC/latency, allocation and package suites pass on the final source commit.
+- Clean install/upgrade/uninstall works for each declared distro/package;
+  Nix check/build passes on the pinned source.
+- GPL/upstream notices, plugin/SDK licensing and all redistributed artwork
+  have release-specific clearance; no user-provided third-party plugin or
+  yabridge/Wine payload is bundled.
+- Independent user-facing documentation and final artifact hashes match the
+  tagged commit.
+
+**Hardware/external validation:** representative real capture and playback
+devices, at least one physical switch/reconnect, third-party plugins for every
+claimed plugin format, declared distro transaction matrix, and qualified
+license review. Unavailable mandatory gates mean stop at the latest beta.
+
+**Known limitations:** only the frozen support matrix is promised; literal
+Windows APO/COM/Registry/service behavior is not a goal. Peace Equalizer
+compatibility is not claimed without a dedicated integration test.
+
+**Release readiness:** tag v1.0.0 only from a clean reviewed commit after every
+mandatory criterion has attached evidence. Do not waive blockers by relabeling
+them optional.
+
+## Beyond 1.0 (optional)
+
+Plugin subprocess isolation, automation curves, auxiliary plugin buses, wider
+response/impulse analysis, additional package channels, broader hardware
+certification and a potential Peace Equalizer backend integration are optional
+until explicitly promoted into the stable support contract.

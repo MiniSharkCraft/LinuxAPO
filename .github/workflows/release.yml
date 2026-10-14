@@ -1,0 +1,303 @@
+name: Verified 0.x prerelease
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_title: ${{ steps.metadata.outputs.release_title }}
+    steps:
+      - name: Check out the exact tag and pinned upstreams
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Validate version, release policy and legal asset gate
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v0\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Automatic releases are limited to v0.x.y prereleases; refusing %s\n' "$tag" >&2
+            exit 1
+          fi
+          project_version=$(sed -n 's/^project(SkyAPO VERSION \([^ ]*\) LANGUAGES.*/\1/p' CMakeLists.txt)
+          if [[ "v$project_version" != "$tag" ]]; then
+            printf 'Tag %s does not match CMake project version %s\n' "$tag" "$project_version" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$GITHUB_REF^{commit}")" != "$GITHUB_SHA" ]]; then
+            printf 'Checked-out tag does not resolve to the triggering commit %s\n' "$GITHUB_SHA" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            printf 'Release tag %s must point to a commit already on origin/main.\n' "$tag" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$GITHUB_REF")" != tag ]]; then
+            printf 'Release tags must be annotated Git tags: %s\n' "$tag" >&2
+            exit 1
+          fi
+          notes="docs/releases/$tag.md"
+          if [[ ! -s "$notes" ]]; then
+            printf 'Missing committed version-specific release notes: %s\n' "$notes" >&2
+            exit 1
+          fi
+          title=$(sed -n 's/^# //p' "$notes" | head -n 1)
+          if [[ "$title" != "LinuxAPO $tag Beta | "* ]]; then
+            printf 'Release title must be unique and start with "LinuxAPO %s Beta | ": %s\n' \
+              "$tag" "$title" >&2
+            exit 1
+          fi
+          python3 - "$tag" "$notes" "$title" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          tag, notes_path, title = sys.argv[1:]
+          version = tag.removeprefix("v")
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if not re.search(rf"^##\s+v?{re.escape(version)}(?:\s|$)", changelog, re.M):
+              raise SystemExit(f"CHANGELOG.md has no version entry for {tag}")
+          notes = pathlib.Path(notes_path).read_text(encoding="utf-8")
+          body = notes.split("\n", 1)[1].strip() if "\n" in notes else ""
+          if len(body) < 120 or not re.search(r"^##\s+", body, re.M):
+              raise SystemExit(f"Release notes for {tag} are missing substantive sections")
+          if re.search(r"\b(TODO|TBD|PLACEHOLDER)\b", notes, re.I):
+              raise SystemExit(f"Release notes for {tag} contain placeholder text")
+          description = title.partition("|")[2].strip().casefold()
+          for previous in pathlib.Path("docs/releases").glob("v*.md"):
+              if previous == pathlib.Path(notes_path):
+                  continue
+              previous_title = next(
+                  (line[2:].strip() for line in previous.read_text(encoding="utf-8").splitlines()
+                   if line.startswith("# ")), ""
+              )
+              if previous_title.partition("|")[2].strip().casefold() == description:
+                  raise SystemExit(
+                      f"Release title description is reused from {previous}: {description}"
+                  )
+          PY
+          tag_message=$(git for-each-ref --format='%(contents)' "$GITHUB_REF")
+          tag_title=${tag_message%%$'\n'*}
+          if [[ "$tag_title" != "$title" ]]; then
+            printf 'Annotated tag title does not match %s: %s\n' "$notes" "$tag_title" >&2
+            exit 1
+          fi
+          if [[ "$tag_message" != *$'\n'* ]]; then
+            printf 'Annotated tag must include a short release summary after its title.\n' >&2
+            exit 1
+          fi
+          tag_summary=${tag_message#*$'\n'}
+          if [[ -z "${tag_summary//[[:space:]]/}" ]]; then
+            printf 'Annotated tag must include a short release summary after its title.\n' >&2
+            exit 1
+          fi
+          if ! rg -q '^Release artwork redistribution status: CLEARED$' \
+            docs/UI_LICENSE_AUDIT.md; then
+            printf 'Release blocked: docs/UI_LICENSE_AUDIT.md lacks the explicit artwork-rights clearance marker.\n' >&2
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'A GitHub release already exists for %s; refusing to overwrite or duplicate it.\n' "$tag" >&2
+            exit 1
+          fi
+          printf 'release_title=%s\n' "$title" >> "$GITHUB_OUTPUT"
+
+  linux-build-test-packages:
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact tag and pinned upstreams
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+
+      - name: Install build and package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake g++ pkg-config zstd rpm cpio \
+            libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
+
+      - name: Configure release build
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INSTALL_PREFIX=/usr
+          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Run mandatory CTest suite
+        run: ctest --test-dir build --output-on-failure --parallel 1
+
+      - name: Configure ASan/UBSan release gate
+        run: >-
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
+          -DSKYAPO_SANITIZERS=ON -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
+
+      - name: Build ASan/UBSan
+        run: cmake --build build-asan --parallel 2
+
+      - name: Run ASan/UBSan CTest suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build-asan --output-on-failure --parallel 1
+
+      - name: Build DEB, RPM and generic tar.zst
+        run: |
+          packaging/create-packages.sh build release-artifacts
+          packaging/create-generic-tarball.sh build release-artifacts
+          shopt -s nullglob
+          deb=(release-artifacts/*.deb)
+          rpm=(release-artifacts/*.rpm)
+          tarball=(release-artifacts/*.tar.zst)
+          [[ ${#deb[@]} -eq 1 && ${#rpm[@]} -eq 1 && ${#tarball[@]} -eq 1 ]]
+
+      - name: Smoke-test extracted DEB, RPM and generic payloads
+        run: |
+          set -euo pipefail
+          mkdir -p extracted/deb extracted/rpm extracted/tar
+          dpkg-deb --extract release-artifacts/*.deb extracted/deb
+          rpm2cpio release-artifacts/*.rpm | cpio --quiet -idm -D extracted/rpm
+          tar --zstd -xf release-artifacts/*.tar.zst -C extracted/tar
+          python3 packaging/package_smoke_test.py extracted/deb
+          python3 packaging/package_smoke_test.py extracted/rpm
+          payload=(extracted/tar/skyapo-*-linux-x86_64)
+          [[ ${#payload[@]} -eq 1 ]]
+          python3 packaging/package_smoke_test.py "${payload[0]}"
+
+      - name: Upload DEB, RPM and generic archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-packages
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 5
+
+  arch-package:
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Bootstrap Git
+        run: pacman -Syu --noconfirm --needed git
+
+      - name: Check out the exact tag and pinned upstreams
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            cmake git libsndfile pipewire fftw lilv muparser lv2 \
+            qt6-base pkgconf hicolor-icon-theme wireplumber namcap
+
+      - name: Build, test and smoke-test Arch package
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/packaging"
+          su builder -s /bin/bash -c 'makepkg --noconfirm --check'
+          package=(./skyapo-[0-9]*.pkg.tar.zst)
+          [[ ${#package[@]} -eq 1 && -f "${package[0]}" ]]
+          namcap PKGBUILD
+          namcap "${package[0]}"
+          render_test="$GITHUB_WORKSPACE/packaging/src/skyapo-build/skyapo-render-tests"
+          [[ -x "$render_test" ]]
+          SKYAPO_ALLOW_DISPOSABLE_PACMAN_TEST=1 \
+            python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
+            --render-test-binary "$render_test" "${package[0]}"
+          mkdir -p "$GITHUB_WORKSPACE/release-artifacts"
+          cp "${package[0]}" "$GITHUB_WORKSPACE/release-artifacts/"
+
+      - name: Upload Arch package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: arch-package
+          path: release-artifacts/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 5
+
+  publish-prerelease:
+    needs: [validate-tag, linux-build-test-packages, arch-package]
+    if: needs.validate-tag.result == 'success' && needs.linux-build-test-packages.result == 'success' && needs.arch-package.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact tagged commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Download all verified package artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: '*-package*'
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Verify artifact set and generate checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          deb=(release-artifacts/*.deb)
+          rpm=(release-artifacts/*.rpm)
+          generic=(release-artifacts/*.tar.zst)
+          arch=(release-artifacts/*.pkg.tar.zst)
+          [[ ${#deb[@]} -eq 1 && ${#rpm[@]} -eq 1 && ${#generic[@]} -eq 1 && ${#arch[@]} -eq 1 ]]
+          (cd release-artifacts && sha256sum -- * > SHA256SUMS)
+          (cd release-artifacts && sha256sum --check SHA256SUMS)
+
+      - name: Create draft prerelease, verify uploaded assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE: ${{ needs.validate-tag.outputs.release_title }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'A GitHub release already exists for %s; refusing to overwrite or duplicate it.\n' "$tag" >&2
+            exit 1
+          fi
+          cleanup_draft() {
+            status=$?
+            if (( status != 0 )); then
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+            exit "$status"
+          }
+          trap cleanup_draft EXIT
+          gh release create "$tag" release-artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TITLE" \
+            --notes-file "docs/releases/$tag.md" --draft --prerelease --verify-tag
+          mkdir -p uploaded
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir uploaded
+          (cd uploaded && sha256sum --check SHA256SUMS)
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
+          trap - EXIT
