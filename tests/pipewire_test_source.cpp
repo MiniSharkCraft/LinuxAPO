@@ -80,11 +80,10 @@ struct Source {
           const uint32_t timestampUs = static_cast<uint32_t>(
               callbackUs + static_cast<uint64_t>(i * 1000000.0 / rate));
           buffers[0][i] =
-              0.25f + 0.25f * static_cast<float>(timestampUs & 0xffffu) /
-                          65536.0f;
+              0.25f +
+              0.25f * static_cast<float>(timestampUs & 0xffffu) / 65536.0f;
           buffers[1][i] =
-              0.25f + 0.25f * static_cast<float>(timestampUs >> 16) /
-                          65536.0f;
+              0.25f + 0.25f * static_cast<float>(timestampUs >> 16) / 65536.0f;
         } else {
           buffers[0][i] = 0.0f;
           buffers[1][i] = 0.0f;
@@ -101,8 +100,7 @@ struct Source {
   }
 
   explicit Source(unsigned channelCount, std::string name, std::string serial,
-                  std::array<const char *, MaxChannels> positions,
-                  bool probe)
+                  std::array<const char *, MaxChannels> positions, bool probe)
       : channels(channelCount), nodeName(std::move(name)),
         deviceSerial(std::move(serial)), channelNames(positions),
         latencyProbe(probe) {}

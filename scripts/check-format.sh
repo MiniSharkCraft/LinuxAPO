@@ -73,22 +73,33 @@ fi
 
 printf 'Checking changed lines in %d SkyAPO C++ file(s) with %s\n' \
   "${#files[@]}" "$formatter"
-diff_output=""
-formatter_status=0
-if diff_output=$(git diff --no-color --unified=0 "$merge_base" HEAD -- src tests |
-  "$formatter_python" "$formatter_diff" -p1 -style=file -fallback-style=none \
-    -binary "$formatter"); then
-  :
-else
-  formatter_status=$?
-fi
-if [[ -n "$diff_output" ]]; then
-  printf '%s\n' "$diff_output"
-  printf 'clang-format check failed; format the changed lines above.\n' >&2
+format_violations=0
+formatter_errors=0
+for file in "${files[@]}"; do
+  file_diff=""
+  formatter_status=0
+  if file_diff=$(git diff --no-color --unified=0 "$merge_base" HEAD -- "$file" |
+    "$formatter_python" "$formatter_diff" -p1 -style=file \
+      -fallback-style=none -binary "$formatter"); then
+    :
+  else
+    formatter_status=$?
+  fi
+
+  if [[ -n "$file_diff" ]]; then
+    printf '%s\n' "$file_diff"
+    format_violations=1
+  elif ((formatter_status != 0)); then
+    printf 'clang-format-diff failed for %s with exit code %d and no diff.\n' \
+      "$file" "$formatter_status" >&2
+    formatter_errors=1
+  fi
+done
+
+if ((format_violations)); then
+  printf 'clang-format check failed; format the changed lines shown above.\n' >&2
   exit 1
 fi
-if ((formatter_status != 0)); then
-  printf 'clang-format-diff failed with exit code %d without producing a diff.\n' \
-    "$formatter_status" >&2
-  exit "$formatter_status"
+if ((formatter_errors)); then
+  exit 2
 fi

@@ -217,25 +217,23 @@ struct Consumer {
     }
     if (c.measureSourceLag && c.channels == 2) {
       constexpr double preampGain = 0.5011872336272722;
-      for (uint32_t i = 0;
-           i < count && c.sourceConsumerLatencyCount <
-                            c.sourceConsumerLatencyUs.size();
+      for (uint32_t i = 0; i < count && c.sourceConsumerLatencyCount <
+                                            c.sourceConsumerLatencyUs.size();
            ++i) {
         if (channelData[0][i] < 0.1f || channelData[1][i] < 0.1f)
           continue;
         const auto low = static_cast<uint32_t>(std::clamp(
-            std::lround((channelData[0][i] / preampGain - 0.25) * 262144.0),
-            0l, 65535l));
+            std::lround((channelData[0][i] / preampGain - 0.25) * 262144.0), 0l,
+            65535l));
         const auto high = static_cast<uint32_t>(std::clamp(
-            std::lround((channelData[1][i] / preampGain - 0.25) * 262144.0),
-            0l, 65535l));
+            std::lround((channelData[1][i] / preampGain - 0.25) * 262144.0), 0l,
+            65535l));
         const uint32_t sourceUs = (high << 16) | low;
         const uint32_t consumerUs = static_cast<uint32_t>(
             callbackUs + static_cast<uint64_t>(i * 1000000.0 / rate));
         const uint32_t elapsedUs = consumerUs - sourceUs;
         if (elapsedUs < 1000000u)
-          c.sourceConsumerLatencyUs[c.sourceConsumerLatencyCount++] =
-              elapsedUs;
+          c.sourceConsumerLatencyUs[c.sourceConsumerLatencyCount++] = elapsedUs;
       }
     }
     if (c.expectIdenticalChannels) {
@@ -389,13 +387,14 @@ struct Consumer {
     auto sortedLatency = sourceConsumerLatencyUs;
     std::sort(sortedLatency.begin(),
               sortedLatency.begin() + sourceConsumerLatencyCount);
-    const auto medianLatency = sourceConsumerLatencyCount
-                                   ? sortedLatency[sourceConsumerLatencyCount / 2]
-                                   : 0u;
-    const auto p95Latency = sourceConsumerLatencyCount
-                                ? sortedLatency[(sourceConsumerLatencyCount - 1) *
-                                                95 / 100]
-                                : 0u;
+    const auto medianLatency =
+        sourceConsumerLatencyCount
+            ? sortedLatency[sourceConsumerLatencyCount / 2]
+            : 0u;
+    const auto p95Latency =
+        sourceConsumerLatencyCount
+            ? sortedLatency[(sourceConsumerLatencyCount - 1) * 95 / 100]
+            : 0u;
     const double channelDifferenceRatio =
         expectIdenticalChannels && energy.load() > 0.0
             ? std::sqrt(channelDifferenceEnergy.load() / energy.load())
@@ -479,8 +478,7 @@ struct Consumer {
     const bool channelsMatch =
         !expectIdenticalChannels || channelDifferenceRatio < 0.01;
     const bool latencyMatches =
-        !measureSourceLag ||
-        sourceConsumerLatencyCount >= 4;
+        !measureSourceLag || sourceConsumerLatencyCount >= 4;
     return !failed.load() && capturedFrames > 48000 && audioMatches &&
                    channelsMatch && latencyMatches
                ? 0

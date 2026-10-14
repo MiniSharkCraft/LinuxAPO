@@ -410,8 +410,8 @@ int main() {
       refreshedCompensationBytes >= initialCompensationBytes) {
     std::cerr << "shrinking 64-to-32 sample PDC retained historical ring "
                  "capacity (before="
-              << initialCompensationBytes << " B, after="
-              << refreshedCompensationBytes << " B)\n";
+              << initialCompensationBytes
+              << " B, after=" << refreshedCompensationBytes << " B)\n";
     return 1;
   }
   float refreshedBranchImpulse[192]{};
@@ -686,8 +686,8 @@ int main() {
 
   std::string excessiveScratchLanes;
   for (unsigned lane = 0; lane < 130; ++lane)
-    excessiveScratchLanes += "Copy: SKYAPO_SCRATCH_" +
-                             std::to_string(lane) + "=L\n";
+    excessiveScratchLanes +=
+        "Copy: SKYAPO_SCRATCH_" + std::to_string(lane) + "=L\n";
   if (!write(path, excessiveScratchLanes))
     return 1;
   bool excessiveScratchRejected = false;
@@ -1008,8 +1008,8 @@ int main() {
     std::cerr << "expected exactly one VST2 state sidecar\n";
     return 1;
   }
-  struct stat vst2StateDirStatus{};
-  struct stat vst2StateFileStatus{};
+  struct stat vst2StateDirStatus {};
+  struct stat vst2StateFileStatus {};
   if (stat(vst2StateDirectory.c_str(), &vst2StateDirStatus) < 0 ||
       (vst2StateDirStatus.st_mode & 0077) != 0 ||
       stat(vst2Sidecars.front().c_str(), &vst2StateFileStatus) < 0 ||
@@ -2277,8 +2277,7 @@ int main() {
   }
   fs::resize_file(oversizedIrPath, 44ULL + sparseIrDataBytes);
   auto oversizedConfig = dir / "oversized-convolution.txt";
-  if (!write(oversizedConfig,
-             "Convolution: oversized-sparse-impulse.wav\n"))
+  if (!write(oversizedConfig, "Convolution: oversized-sparse-impulse.wav\n"))
     return 1;
   bool oversizedConvolutionRejected = false;
   try {
@@ -2290,7 +2289,8 @@ int main() {
         std::string::npos;
   }
   if (!oversizedConvolutionRejected) {
-    std::cerr << "oversized sparse convolution IR did not fail before loading\n";
+    std::cerr
+        << "oversized sparse convolution IR did not fail before loading\n";
     return 1;
   }
 
