@@ -47,6 +47,15 @@ def man_page_paths(root, page):
     return [directory / f"{page}{suffix}" for suffix in MAN_PAGE_SUFFIXES]
 
 
+def package_man_page_paths(root, page, package_paths):
+    """Resolve the man page using paths recorded by the package manager."""
+    return [
+        pathlib.Path(root) / path.relative_to("/")
+        for path in package_paths
+        if path.name == page or path.name.startswith(f"{page}.")
+    ]
+
+
 def run(command, env=None, expected=0):
     result = subprocess.run(
         command, env=env, text=True, capture_output=True, timeout=60
@@ -92,7 +101,9 @@ def render_gain_test(root, env, render_test_binary):
     print(f"Installed offline WAV render verified: {result.stdout.strip()}")
 
 
-def validate_payload(root, env, verify_systemd, render_test_binary):
+def validate_payload(
+    root, env, verify_systemd, render_test_binary, package_paths=None
+):
     root = pathlib.Path(root)
     for relative in PACKAGE_FILES:
         path = root / relative
@@ -103,8 +114,17 @@ def validate_payload(root, env, verify_systemd, render_test_binary):
         if not os.access(path, os.X_OK):
             raise RuntimeError(f"installed binary is not executable: {path}")
     for page in MAN_PAGES:
-        if not any(path.is_file() for path in man_page_paths(root, page)):
-            raise RuntimeError(f"installed man page is missing: {page}")
+        if package_paths is None:
+            candidates = man_page_paths(root, page)
+        else:
+            candidates = package_man_page_paths(root, page, package_paths)
+        if not any(path.is_file() for path in candidates):
+            found = ", ".join(
+                f"{path} (exists={path.exists()})" for path in candidates
+            ) or "none in package file list"
+            raise RuntimeError(
+                f"installed man page is missing: {page}; package-owned candidates: {found}"
+            )
 
     unit_path = root / "usr/lib/systemd/user/skyapod.service"
     unit = unit_path.read_text(encoding="utf-8")
@@ -162,15 +182,15 @@ def pacman_install_test(package, render_test_binary):
         integrity = run(["pacman", "-Qk", "skyapo"])
         print(f"Installed package file integrity: {integrity.stdout.strip()}")
         files = run(["pacman", "-Qlq", "skyapo"])
+        package_paths = [pathlib.Path(line) for line in files.stdout.splitlines()]
         installed_files = [
-            pathlib.Path(line)
-            for line in files.stdout.splitlines()
-            if pathlib.Path(line).is_file()
+            path for path in package_paths if path.is_file()
         ]
         with tempfile.TemporaryDirectory(prefix="skyapo-installed-test-") as temp:
             validate_payload(
                 "/", isolated_env(temp), verify_systemd=True,
                 render_test_binary=render_test_binary,
+                package_paths=package_paths,
             )
     except Exception as error:
         primary_error = error
