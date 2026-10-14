@@ -78,7 +78,8 @@ namespace {
 constexpr uint64_t MaxPdcRingSamples = 4ULL * 1024ULL * 1024ULL;
 // Two FilterConfiguration work planes dominate known per-lane audio memory.
 // Keep a separate cap because these are block scratch buffers, not delay rings.
-constexpr uint64_t MaxFilterConfigurationScratchBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr uint64_t MaxFilterConfigurationScratchBytes =
+    64ULL * 1024ULL * 1024ULL;
 constexpr uint64_t MaxConvolutionMemoryBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr unsigned MaxEngineChannelLanes = 256;
 constexpr unsigned MaxEngineFrameCount = 65536;
@@ -88,15 +89,14 @@ uint64_t filterConfigurationScratchBytes(unsigned channelLanes,
   constexpr uint64_t bytesPerLaneFrame = 2ULL * sizeof(float);
   if (channelLanes > MaxEngineChannelLanes ||
       frameCount > MaxEngineFrameCount ||
-      (frameCount && channelLanes >
-                         std::numeric_limits<uint64_t>::max() /
-                             (static_cast<uint64_t>(frameCount) *
-                              bytesPerLaneFrame)))
+      (frameCount && channelLanes > std::numeric_limits<uint64_t>::max() /
+                                        (static_cast<uint64_t>(frameCount) *
+                                         bytesPerLaneFrame)))
     throw std::runtime_error(
         "FilterConfiguration scratch dimensions exceed SkyAPO's supported "
         "audio-buffer limits");
-  const uint64_t bytes = static_cast<uint64_t>(channelLanes) * frameCount *
-                         bytesPerLaneFrame;
+  const uint64_t bytes =
+      static_cast<uint64_t>(channelLanes) * frameCount * bytesPerLaneFrame;
   if (bytes > MaxFilterConfigurationScratchBytes)
     throw std::runtime_error(
         "FilterConfiguration scratch exceeds SkyAPO's 64 MiB per-graph "
@@ -534,11 +534,12 @@ Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
 #endif
 }
 
-Engine::KnownAudioBufferPayload Engine::knownAudioBufferPayload() const
-    noexcept {
+Engine::KnownAudioBufferPayload
+Engine::knownAudioBufferPayload() const noexcept {
   KnownAudioBufferPayload payload;
   payload.filterConfigurationScratchBytes =
-      static_cast<uint64_t>(allChannelCount) * maxFrameCount * 2U * sizeof(float);
+      static_cast<uint64_t>(allChannelCount) * maxFrameCount * 2U *
+      sizeof(float);
   uint64_t delaySamples = 0;
   uint64_t pdcCapacitySamples = 0;
   uint64_t pluginBypassCapacitySamples = 0;
@@ -661,7 +662,7 @@ void Engine::loadConfig(const std::string &path) {
 
   std::vector<FilterInfo *> infos;
   infos.reserve(newGraph.size());
-    unsigned allChannelCount = static_cast<unsigned>(channelNames.size());
+  unsigned allChannelCount = static_cast<unsigned>(channelNames.size());
   for (const auto &node : newGraph) {
     for (const unsigned channel : node.inputs)
       allChannelCount = std::max(allChannelCount, channel + 1);
@@ -816,8 +817,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
           static_cast<uint64_t>(std::floor(exactSamples + 0.5));
       try {
         accountDelayLine(delayBufferSamples, roundedSamples, inputNames.size());
-        accountPdcRing(baseRingSamples,
-                       roundedSamples * inputNames.size());
+        accountPdcRing(baseRingSamples, roundedSamples * inputNames.size());
       } catch (const std::exception &error) {
         throw std::runtime_error(location + error.what());
       }
@@ -1007,8 +1007,7 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
           "EAPO Delay buffers exceed SkyAPO's shared 16 MiB per-graph "
           "realtime ring-buffer budget");
     pdcRingSamples += node.fixedBufferSamples;
-    if (node.pluginBypassBufferSamples >
-        MaxPdcRingSamples - pdcRingSamples)
+    if (node.pluginBypassBufferSamples > MaxPdcRingSamples - pdcRingSamples)
       throw std::runtime_error(
           "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
           "per-graph realtime ring-buffer budget");
@@ -1518,8 +1517,7 @@ unsigned Engine::refreshPluginLatencies() {
       if (fixedDelaySamples > MaxPdcRingSamples ||
           updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
           node.pluginBypassBufferSamples >
-              MaxPdcRingSamples - fixedDelaySamples -
-                  updatedBypassSamples)
+              MaxPdcRingSamples - fixedDelaySamples - updatedBypassSamples)
         throw std::runtime_error(
             "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
             "per-graph realtime ring-buffer budget after latency refresh");

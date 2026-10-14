@@ -193,6 +193,8 @@ Bug reports should include the distribution, PipeWire version, daemon diagnostic
 
 Runtime/audio changes should be tested proportionally: CTest, sanitizers where appropriate and private PipeWire E2E. A “daemon running” message alone does not prove processed samples reached the virtual microphone; verify recorded output independently.
 
+Use the repository-pinned `clang-format 18.1.3` for C++ changes; see [formatting setup](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/FORMATTING.md).
+
 ## Attribution and license
 
 LinuxAPO reuses and adapts DSP/editor code from **Equalizer APO** by Jonas Thedering. The upstream source, Git history and copyright headers are preserved separately at `upstream/equalizerapo`. See the [official SourceForge repository](https://git.code.sf.net/p/equalizerapo/code), the [porting audit](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/PORTING.md) and [third-party notices](https://github.com/MiniSharkCraft/LinuxAPO/blob/main/docs/THIRD_PARTY_NOTICES.md).
