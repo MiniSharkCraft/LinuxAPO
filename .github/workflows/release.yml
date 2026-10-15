@@ -55,45 +55,8 @@ jobs:
             exit 1
           fi
           notes="docs/releases/$tag.md"
-          if [[ ! -s "$notes" ]]; then
-            printf 'Missing committed version-specific release notes: %s\n' "$notes" >&2
-            exit 1
-          fi
-          title=$(sed -n 's/^# //p' "$notes" | head -n 1)
-          if [[ "$title" != "LinuxAPO $tag Beta | "* ]]; then
-            printf 'Release title must be unique and start with "LinuxAPO %s Beta | ": %s\n' \
-              "$tag" "$title" >&2
-            exit 1
-          fi
-          python3 - "$tag" "$notes" "$title" <<'PY'
-          import pathlib
-          import re
-          import sys
-
-          tag, notes_path, title = sys.argv[1:]
-          version = tag.removeprefix("v")
-          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
-          if not re.search(rf"^##\s+v?{re.escape(version)}(?:\s|$)", changelog, re.M):
-              raise SystemExit(f"CHANGELOG.md has no version entry for {tag}")
-          notes = pathlib.Path(notes_path).read_text(encoding="utf-8")
-          body = notes.split("\n", 1)[1].strip() if "\n" in notes else ""
-          if len(body) < 120 or not re.search(r"^##\s+", body, re.M):
-              raise SystemExit(f"Release notes for {tag} are missing substantive sections")
-          if re.search(r"\b(TODO|TBD|PLACEHOLDER)\b", notes, re.I):
-              raise SystemExit(f"Release notes for {tag} contain placeholder text")
-          description = title.partition("|")[2].strip().casefold()
-          for previous in pathlib.Path("docs/releases").glob("v*.md"):
-              if previous == pathlib.Path(notes_path):
-                  continue
-              previous_title = next(
-                  (line[2:].strip() for line in previous.read_text(encoding="utf-8").splitlines()
-                   if line.startswith("# ")), ""
-              )
-              if previous_title.partition("|")[2].strip().casefold() == description:
-                  raise SystemExit(
-                      f"Release title description is reused from {previous}: {description}"
-                  )
-          PY
+          python3 -m unittest tests/release_metadata_test.py
+          title=$(python3 scripts/release_metadata.py validate "$tag")
           tag_message=$(git for-each-ref --format='%(contents)' "$GITHUB_REF")
           tag_title=${tag_message%%$'\n'*}
           if [[ "$tag_title" != "$title" ]]; then
@@ -284,20 +247,27 @@ jobs:
             printf 'A GitHub release already exists for %s; refusing to overwrite or duplicate it.\n' "$tag" >&2
             exit 1
           fi
+          draft_created=false
           cleanup_draft() {
             status=$?
-            if (( status != 0 )); then
+            if (( status != 0 )) && [[ "$draft_created" == true ]]; then
               gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes || true
             fi
             exit "$status"
           }
-          trap cleanup_draft EXIT
-          gh release create "$tag" release-artifacts/* \
+          gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_TITLE" \
             --notes-file "docs/releases/$tag.md" --draft --prerelease --verify-tag
+          draft_created=true
+          trap cleanup_draft EXIT
+          gh release upload "$tag" release-artifacts/* --repo "$GITHUB_REPOSITORY"
           mkdir -p uploaded
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir uploaded
+          diff -u \
+            <(cd release-artifacts && find . -maxdepth 1 -type f -printf '%f\n' | sort) \
+            <(cd uploaded && find . -maxdepth 1 -type f -printf '%f\n' | sort)
           (cd uploaded && sha256sum --check SHA256SUMS)
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
+          draft_created=false
           trap - EXIT
