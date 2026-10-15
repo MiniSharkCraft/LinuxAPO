@@ -127,6 +127,18 @@ def prepare_draft(root: pathlib.Path, version: str, topic: str, previous_tag: st
         previous_tag = git(root, "describe", "--tags", "--match", "v0.*", "--abbrev=0", "HEAD").strip()
     if not re.fullmatch(r"v0\.[0-9]+\.[0-9]+", previous_tag):
         raise MetadataError(f"previous release must be an existing v0.x.y tag, got {previous_tag!r}")
+    previous_version = tuple(int(part) for part in previous_tag[1:].split("."))
+    requested_version = tuple(int(part) for part in version.split("."))
+    if requested_version <= previous_version:
+        raise MetadataError(
+            f"draft version {version} must be newer than previous release {previous_tag}"
+        )
+    if git(root, "tag", "--list", f"v{version}").strip():
+        raise MetadataError(f"refusing to prepare metadata for an existing tag: v{version}")
+    try:
+        git(root, "rev-parse", "--verify", f"refs/tags/{previous_tag}")
+    except subprocess.CalledProcessError as exc:
+        raise MetadataError(f"previous release tag does not exist: {previous_tag}") from exc
     output = root / "docs" / "releases" / f"v{version}.md"
     if output.exists():
         raise MetadataError(f"refusing to overwrite existing release notes: {output}")

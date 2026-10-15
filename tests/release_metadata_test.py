@@ -89,6 +89,13 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(MetadataError, "refusing to overwrite"):
                 prepare_draft(root, "0.10.0", "Verified desktop routing", "v0.9.0")
 
+            with self.assertRaisesRegex(MetadataError, "must be newer"):
+                prepare_draft(root, "0.9.0", "Older release", "v0.9.0")
+
+            subprocess.run(["git", "tag", "-am", "already released", "v0.10.0"], cwd=root, check=True)
+            with self.assertRaisesRegex(MetadataError, "existing tag"):
+                prepare_draft(root, "0.10.0", "Verified desktop routing", "v0.9.0")
+
 
 if __name__ == "__main__":
     unittest.main()
