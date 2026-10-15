@@ -60,8 +60,20 @@ def validate_release(root: pathlib.Path, tag: str) -> str:
 
     changelog = changelog_path.read_text(encoding="utf-8")
     version = re.escape(tag[1:])
-    if not re.search(rf"^##\s+v?{version}(?:\s|$)", changelog, re.M):
+    changelog_heading = re.search(
+        rf"^##\s+v?{version}(?:\s|$)([^\n]*)\n(.*?)(?=^##\s|\Z)",
+        changelog,
+        re.M | re.S,
+    )
+    if changelog_heading is None:
         raise MetadataError(f"CHANGELOG.md has no version entry for {tag}")
+    changelog_entry = changelog_heading.group(2).strip()
+    if not changelog_entry or not re.search(r"^[-*+]\s+\S", changelog_entry, re.M):
+        raise MetadataError(
+            f"CHANGELOG.md entry for {tag} must contain at least one release change"
+        )
+    if PLACEHOLDER_RE.search(changelog_entry):
+        raise MetadataError(f"CHANGELOG.md entry for {tag} contains unfinished placeholder text")
 
     topic = title.partition("|")[2].strip().casefold()
     for previous in (root / "docs" / "releases").glob("v*.md"):

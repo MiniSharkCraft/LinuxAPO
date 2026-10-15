@@ -16,7 +16,10 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temp.name)
         (self.root / "docs/releases").mkdir(parents=True)
-        (self.root / "CHANGELOG.md").write_text("## 0.10.0 — Playback routing\n", encoding="utf-8")
+        (self.root / "CHANGELOG.md").write_text(
+            "## 0.10.0 — Playback routing\n\n- Add verified PipeWire playback routing.\n",
+            encoding="utf-8",
+        )
         (self.root / "docs/releases/v0.10.0.md").write_text(
             "# LinuxAPO v0.10.0 Beta | PipeWire playback routing\n\n"
             "## Purpose\n\nProcess application playback through PipeWire.\n\n"
@@ -35,6 +38,19 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_rejects_missing_notes(self):
         with self.assertRaisesRegex(MetadataError, "missing committed"):
             validate_release(self.root, "v0.10.1")
+
+    def test_rejects_empty_changelog_entry(self):
+        (self.root / "CHANGELOG.md").write_text("## 0.10.0 — Playback routing\n\n", encoding="utf-8")
+        with self.assertRaisesRegex(MetadataError, "at least one release change"):
+            validate_release(self.root, "v0.10.0")
+
+    def test_rejects_placeholder_changelog_entry(self):
+        (self.root / "CHANGELOG.md").write_text(
+            "## 0.10.0 — Playback routing\n\n- TODO: add release changes.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(MetadataError, "placeholder"):
+            validate_release(self.root, "v0.10.0")
 
     def test_rejects_reused_generic_title_topic(self):
         (self.root / "docs/releases/v0.9.9.md").write_text(
