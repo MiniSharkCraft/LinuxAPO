@@ -294,7 +294,7 @@ def main():
         "vst3-bypass", "lv2-bypass",
         "vst3-latency-change", "vst2-latency-change", "clap-latency-change",
         "lv2-latency-change", "lv2-pdc-final", "lv2-pdc-recovery",
-        "lv2-pdc-transition-fault", "renegotiate",
+        "lv2-pdc-transition-fault", "lv2-pdc-queued-format", "renegotiate",
         "transition-format", "device-filter", "stage-warning", "systemd-crash-restart",
         "device-switch", "delay-pdc", "source-consumer-latency"
     ):
@@ -333,6 +333,7 @@ def main():
     lv2_latency_change = mode == "lv2-latency-change"
     lv2_pdc_final = mode == "lv2-pdc-final"
     lv2_pdc_recovery = mode == "lv2-pdc-recovery"
+    lv2_pdc_queued_format = mode == "lv2-pdc-queued-format"
     lv2_pdc_transition_fault = mode == "lv2-pdc-transition-fault"
     delay_pdc = mode == "delay-pdc"
     plugin_live = mode in (
@@ -350,7 +351,8 @@ def main():
                     clap_latency_change)
     plugin_chain = plugin_chain or lv2_latency_change
     plugin_chain = plugin_chain or lv2_pdc_final
-    plugin_chain = plugin_chain or lv2_pdc_recovery or lv2_pdc_transition_fault
+    plugin_chain = (plugin_chain or lv2_pdc_recovery or
+                    lv2_pdc_queued_format or lv2_pdc_transition_fault)
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
             "https://skyapo.example/plugins/test-gain", "gain")
@@ -388,6 +390,7 @@ def main():
         rate_config = make_rate_config(
             pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
         if (renegotiate or transition_format or lv2_pdc_recovery or
+                lv2_pdc_queued_format or
                 lv2_pdc_transition_fault):
             text = rate_config.read_text()
             text = text.replace(
@@ -429,7 +432,7 @@ def main():
                 "Stage: post-mix\nPreamp: 48 dB\n"
                 "Stage: capture\nPreamp: -6 dB\n")
             dsp_config = staged_config
-        if lv2_pdc_recovery:
+        if lv2_pdc_recovery or lv2_pdc_queued_format:
             rejected_dynamic_pdc = (
                 "Channel: L\n"
                 "Plugin: LV2 https://skyapo.example/plugins/test-latency-increase\n"
@@ -452,6 +455,8 @@ def main():
         })
         if transition_format or lv2_pdc_transition_fault:
             env["SKYAPO_TEST_TRANSITION_MS"] = "500"
+        if lv2_pdc_queued_format:
+            env["SKYAPO_TEST_DEFER_PDC_EVENT"] = "1"
         logs = (root / "pipewire.log").open("w+")
         source_log = (root / "source.log").open("w+")
         daemon_log = (root / "daemon.log").open("w+")
@@ -540,7 +545,8 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
-            expected_filters = (4 if (delay_pdc or lv2_pdc_recovery) else
+            expected_filters = (4 if (delay_pdc or lv2_pdc_recovery or
+                                      lv2_pdc_queued_format) else
                                 (1 if lv2_pdc_transition_fault else
                                 (1 if vst2_live else
                                 (3 if lv2_pdc_final else
@@ -568,6 +574,115 @@ def main():
             for expected in expected_status:
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
+
+            if lv2_pdc_queued_format:
+                # This test mode deliberately withholds the already-queued
+                # control event. The format rebuild must observe that pending
+                # validation, latch silence, and only then let the event run.
+                deadline = time.monotonic() + 8
+                queued_status = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env,
+                                 timeout=5, check=False)
+                    queued_status = result.stdout
+                    if (result.returncode == 0 and
+                            "DSP state: quiescing" in queued_status and
+                            "Plugin latency validation queued: yes" in
+                            queued_status):
+                        break
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "daemon exited before the queued-PDC format test")
+                    time.sleep(0.02)
+                else:
+                    raise RuntimeError(
+                        "could not establish the queued-but-unhandled PDC "
+                        f"state before format rebuild:\n{queued_status}")
+
+                metadata = (os.environ.get("SKYAPO_PW_METADATA") or
+                            shutil.which("pw-metadata"))
+                if not metadata:
+                    raise RuntimeError(
+                        "pw-metadata is required for queued-PDC format test")
+                continuous_consumer = subprocess.Popen(
+                    [str(consumer), "--expect-silent", "--allow-rate-changes"],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                try:
+                    for key, value in (("clock.force-quantum", 512),
+                                       ("clock.force-rate", 44100)):
+                        run([metadata, "-n", "settings", "0", key,
+                             str(value), "Spa:Int"], env, timeout=5)
+
+                    deadline = time.monotonic() + 12
+                    rebuilt_status = ""
+                    expected_format = "DSP engine format: 44100 Hz, max block 512"
+                    while time.monotonic() < deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        rebuilt_status = result.stdout
+                        if (result.returncode == 0 and
+                                expected_format in rebuilt_status and
+                                "DSP state: paused (plugin latency refresh failed; "
+                                "output silence)" in rebuilt_status and
+                                "Plugin latency validation queued: no" in
+                                rebuilt_status and
+                                "Callback allocations: 0" in rebuilt_status and
+                                "Callback deallocations: 0" in rebuilt_status):
+                            break
+                        time.sleep(0.02)
+                    else:
+                        raise RuntimeError(
+                            "format rebuild did not process the delayed PDC "
+                            "event while remaining fail-closed:\n"
+                            f"{rebuilt_status}")
+
+                    continuous_stdout, continuous_stderr = (
+                        continuous_consumer.communicate(timeout=8))
+                    if continuous_consumer.returncode:
+                        raise RuntimeError(
+                            "consumer failed across queued-PDC format rebuild:\n"
+                            f"{continuous_stdout}{continuous_stderr}")
+                finally:
+                    if continuous_consumer.poll() is None:
+                        continuous_consumer.terminate()
+                        continuous_consumer.wait(timeout=3)
+
+                silence_rms = re.search(r"RMS: ([0-9.]+)", continuous_stdout)
+                final_rate = re.search(r"Sample rate: ([0-9]+) Hz",
+                                       continuous_stdout)
+                if (not silence_rms or float(silence_rms.group(1)) >= 1.0e-6 or
+                        not final_rate or int(final_rate.group(1)) != 44100):
+                    raise RuntimeError(
+                        "audio escaped or continuous client missed format "
+                        "change while delayed PDC event crossed rebuild:\n"
+                        f"{continuous_stdout}{continuous_stderr}")
+
+                recovered_config = config_home / "pdc-recovery.txt"
+                recovered_config.write_text("Preamp: -6 dB\n")
+                recovered = run([str(cli), "config", "reload"], env,
+                                timeout=10, check=False)
+                if (recovered.returncode != 0 or
+                        "Config reload succeeded" not in recovered.stdout):
+                    raise RuntimeError(
+                        "validated config failed to recover queued-PDC fault:\n"
+                        f"{recovered.stdout}{recovered.stderr}")
+                recovered_audio = run(
+                    [str(consumer), "--expected-rate", "44100",
+                     "--expected-db", "-6"], env, timeout=12)
+                ratio = re.search(r"RMS ratio to expected: ([0-9.]+)",
+                                  recovered_audio.stdout)
+                if not ratio or abs(float(ratio.group(1)) - 1.0) >= 0.03:
+                    raise RuntimeError(
+                        "validated recovery did not produce expected -6 dB "
+                        f"audio:\n{recovered_audio.stdout}")
+                print("Queued PDC validation survived a forced 44100 Hz / "
+                      "512-frame rebuild, its delayed handler stayed silent, "
+                      "and validated reload restored -6 dB output; "
+                      f"fault RMS {float(silence_rms.group(1)):.8f}, "
+                      f"recovery ratio {float(ratio.group(1)):.6f}.")
+                return 0
+
             if (not plugin_chain and not delay_pdc and
                     "DSP amplitude ratio: 0.501187" not in status):
                 raise RuntimeError(

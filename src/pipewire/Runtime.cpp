@@ -153,6 +153,9 @@ struct Runtime {
   // A queued completion event can outlive its graph; this prevents it from
   // resetting telemetry for a more recently installed graph.
   skyapo::pipewire::TransitionMetricsGeneration transitionMetrics;
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+  std::atomic<bool> testDeferPluginLatencyEvent{false};
+#endif
   unsigned transitionCounter{};
   unsigned transitionLength{};
   unsigned transitionDurationMs{10};
@@ -181,6 +184,12 @@ struct Runtime {
         throw std::runtime_error(
             "SKYAPO_TEST_TRANSITION_MS must be an integer from 10 to 5000");
       transitionDurationMs = static_cast<unsigned>(parsed);
+    }
+    if (const char *value = std::getenv("SKYAPO_TEST_DEFER_PDC_EVENT")) {
+      if (std::strcmp(value, "1") != 0)
+        throw std::runtime_error(
+            "SKYAPO_TEST_DEFER_PDC_EVENT must be exactly 1");
+      testDeferPluginLatencyEvent.store(true, std::memory_order_relaxed);
     }
 #endif
   }
@@ -388,6 +397,14 @@ struct Runtime {
       }
       installEngine(std::move(engine), true);
       audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      // E2E-only ordering control: deliver a deliberately withheld event only
+      // after the replacement graph has crossed the format-rebuild boundary.
+      if (pluginLatencyEventQueued.load(std::memory_order_seq_cst) &&
+          testDeferPluginLatencyEvent.exchange(false,
+                                               std::memory_order_seq_cst))
+        pw_loop_signal_event(pw_main_loop_get_loop(main), pluginLatencyEvent);
+#endif
     } else {
       installEngine(std::move(engine));
       resumeAudio();
@@ -614,7 +631,11 @@ struct Runtime {
         expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
     r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
     if (queued)
-      pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.pluginLatencyEvent);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      if (!r.testDeferPluginLatencyEvent.load(std::memory_order_seq_cst))
+#endif
+        pw_loop_signal_event(pw_main_loop_get_loop(r.main),
+                             r.pluginLatencyEvent);
   }
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
@@ -1034,6 +1055,9 @@ struct Runtime {
       << "\nFormat rebuilds during transition: "
       << formatRebuildsDuringTransition
       << "\nPlugin latency refreshes: " << pluginLatencyRefreshes
+      << "\nPlugin latency validation queued: "
+      << (pluginLatencyEventQueued.load(std::memory_order_seq_cst) ? "yes"
+                                                                   : "no")
       << "\nChannel positions:";
     for (auto &p : ports)
       s << ' ' << p.channel;
