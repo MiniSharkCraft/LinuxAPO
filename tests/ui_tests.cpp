@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 #else
-  if (!QIcon(QStringLiteral(":/icons/skyapo.png")).isNull()) {
+  if (QFile::exists(QStringLiteral(":/icons/skyapo.png"))) {
     std::cerr << "unlicensed branded application icon was embedded\n";
     return 1;
   }
