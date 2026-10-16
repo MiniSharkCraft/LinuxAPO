@@ -73,6 +73,14 @@
 namespace {
 const QString PluginPickerLine =
     QStringLiteral("__SKYAPO_PICK_INSTALLED_PLUGIN__");
+const QString Lv2PluginPickerLine =
+    QStringLiteral("__SKYAPO_PICK_LV2_PLUGIN__");
+const QString ClapPluginPickerLine =
+    QStringLiteral("__SKYAPO_PICK_CLAP_PLUGIN__");
+const QString LinuxVstPluginPickerLine =
+    QStringLiteral("__SKYAPO_PICK_LINUX_VST_PLUGIN__");
+const QString WindowsVstInfoLine =
+    QStringLiteral("__SKYAPO_WINDOWS_VST_INFO__");
 
 struct PluginParameterModel {
   QString symbol;
@@ -816,11 +824,10 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   rowTable->setHandlers(
       [this](QMenu *menu) { populateAddPopupMenu(menu); },
       [this](const QString &line, FilterTable::Item *before) {
-        if (line == PluginPickerLine) {
-          addPluginToConfiguration(
-              before ? std::optional<qsizetype>(before->index) : std::nullopt);
+        const auto insertionIndex =
+            before ? std::optional<qsizetype>(before->index) : std::nullopt;
+        if (handlePluginTemplate(line, insertionIndex))
           return;
-        }
         document.insert(before ? before->index : document.lineCount(), line);
         markModified();
       },
@@ -979,9 +986,7 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
     if (auto *action =
             menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height())))) {
       const auto line = action->data().value<FilterTemplate>().getLine();
-      if (line == PluginPickerLine)
-        addPluginToConfiguration();
-      else
+      if (!handlePluginTemplate(line, std::nullopt))
         addFilter(line);
     }
   });
@@ -1482,10 +1487,27 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
   menu->addSeparator();
   append(delay.createFilterTemplates());
   append(stage.createFilterTemplates());
-  menu->addSection(tr("Plugins"));
-  menu->addAction(tr("Installed plugin…"))
-      ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Installed plugin…"), PluginPickerLine, {tr("Plugins")})));
+  auto *pluginsMenu = menu->addMenu(tr("Plugins"));
+  pluginsMenu->setObjectName(QStringLiteral("pluginAddMenu"));
+  const auto addPluginChoice = [pluginsMenu](const QString &text,
+                                             const QString &line,
+                                             const QString &objectName) {
+    auto *action = pluginsMenu->addAction(text);
+    action->setObjectName(objectName);
+    action->setData(QVariant::fromValue(
+        FilterTemplate(text, line, {QObject::tr("Plugins")})));
+  };
+  addPluginChoice(tr("Installed plugin…"), PluginPickerLine,
+                  QStringLiteral("addAnyPlugin"));
+  pluginsMenu->addSeparator();
+  addPluginChoice(tr("LV2 plugin…"), Lv2PluginPickerLine,
+                  QStringLiteral("addLv2Plugin"));
+  addPluginChoice(tr("CLAP plugin…"), ClapPluginPickerLine,
+                  QStringLiteral("addClapPlugin"));
+  addPluginChoice(tr("VST plugin (Linux)…"), LinuxVstPluginPickerLine,
+                  QStringLiteral("addLinuxVstPlugin"));
+  addPluginChoice(tr("VST plugin (Windows)…"), WindowsVstInfoLine,
+                  QStringLiteral("addWindowsVstPlugin"));
   menu->addAction(tr("Convolution (impulse response)"))
       ->setData(QVariant::fromValue(FilterTemplate(
           tr("Convolution (impulse response)"),
@@ -1519,8 +1541,8 @@ void MainWindow::addFilter(const QString &line) {
   rebuildRows();
 }
 
-void MainWindow::addPluginToConfiguration(
-    std::optional<qsizetype> beforeIndex) {
+void MainWindow::addPluginToConfiguration(std::optional<qsizetype> beforeIndex,
+                                          const QString &formatFilter) {
   if (pluginRequestPending)
     return;
   pluginRequestPending = true;
@@ -1531,8 +1553,9 @@ void MainWindow::addPluginToConfiguration(
     insertAction->setEnabled(false);
 
   runCli({"plugin", "list"}, [this, insertAction, requestedRevision,
-                              requestedIndex](int result, QByteArray output,
-                                              QByteArray error) {
+                              requestedIndex,
+                              formatFilter](int result, QByteArray output,
+                                            QByteArray error) {
     pluginRequestPending = false;
     if (insertAction)
       insertAction->setEnabled(true);
@@ -1544,13 +1567,28 @@ void MainWindow::addPluginToConfiguration(
 
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("pluginPicker"));
-    dialog.setWindowTitle(tr("Add installed plugin"));
+    const QString pickerTitle =
+        formatFilter == QStringLiteral("VST3") ? tr("Add Linux VST plugin")
+        : formatFilter.isEmpty()               ? tr("Add installed plugin")
+                                 : tr("Add %1 plugin").arg(formatFilter);
+    dialog.setWindowTitle(pickerTitle);
     auto *layout = new QVBoxLayout(&dialog);
-    auto *description = new QLabel(
+    QString descriptionText =
         tr("Choose a discovered LV2, CLAP, or VST3 plugin. The editor "
            "inserts its config directive; edit parameters in the "
-           "configuration row."),
-        &dialog);
+           "configuration row.");
+    if (formatFilter == QStringLiteral("VST3"))
+      descriptionText =
+          tr("Choose a discovered Linux-loadable VST3 plugin. Windows VST "
+             "plugins must be bridged externally (for example with yabridge) "
+             "and then appear here as Linux VST3 wrappers.");
+    else if (formatFilter == QStringLiteral("LV2") ||
+             formatFilter == QStringLiteral("CLAP"))
+      descriptionText =
+          tr("Choose a discovered %1 plugin. The editor inserts its config "
+             "directive; edit parameters in the configuration row.")
+              .arg(formatFilter);
+    auto *description = new QLabel(descriptionText, &dialog);
     description->setWordWrap(true);
     layout->addWidget(description);
     auto *plugins = new QListWidget(&dialog);
@@ -1558,9 +1596,11 @@ void MainWindow::addPluginToConfiguration(
     for (const auto &line :
          QString::fromUtf8(output).split(QLatin1Char('\n'))) {
       const auto fields = line.split(QLatin1Char('\t'));
-      if (fields.size() != 3 || (fields[0] != QStringLiteral("LV2") &&
-                                 fields[0] != QStringLiteral("CLAP") &&
-                                 fields[0] != QStringLiteral("VST3")))
+      if (fields.size() != 3 ||
+          (fields[0] != QStringLiteral("LV2") &&
+           fields[0] != QStringLiteral("CLAP") &&
+           fields[0] != QStringLiteral("VST3")) ||
+          (!formatFilter.isEmpty() && fields[0] != formatFilter))
         continue;
       const QString id = fields[1].trimmed();
       if (id.isEmpty() || std::any_of(id.cbegin(), id.cend(),
@@ -1574,11 +1614,13 @@ void MainWindow::addPluginToConfiguration(
                     QStringLiteral("Plugin: %1 %2").arg(fields[0], id));
     }
     if (plugins->count() == 0) {
+      const QString supportedFormats =
+          formatFilter.isEmpty() ? tr("LV2, CLAP, or VST3") : formatFilter;
       QMessageBox::information(
-          this, tr("Add plugin"),
-          tr("No supported plugins were discovered. Check that a "
-             "native LV2, CLAP, or VST3 host was built and the plugin "
-             "is installed."));
+          this, pickerTitle,
+          tr("No %1 plugins were discovered. Check that the corresponding "
+             "host is available and the plugin is installed.")
+              .arg(supportedFormats));
       return;
     }
     plugins->setCurrentRow(0);
@@ -1613,6 +1655,39 @@ void MainWindow::addPluginToConfiguration(
     markModified();
     rebuildRows();
   });
+}
+
+bool MainWindow::handlePluginTemplate(const QString &line,
+                                      std::optional<qsizetype> beforeIndex) {
+  if (line == PluginPickerLine) {
+    addPluginToConfiguration(beforeIndex);
+    return true;
+  }
+  if (line == Lv2PluginPickerLine) {
+    addPluginToConfiguration(beforeIndex, QStringLiteral("LV2"));
+    return true;
+  }
+  if (line == ClapPluginPickerLine) {
+    addPluginToConfiguration(beforeIndex, QStringLiteral("CLAP"));
+    return true;
+  }
+  if (line == LinuxVstPluginPickerLine) {
+    addPluginToConfiguration(beforeIndex, QStringLiteral("VST3"));
+    return true;
+  }
+  if (line == WindowsVstInfoLine) {
+    QMessageBox dialog(QMessageBox::Information, tr("Windows VST plugins"),
+                       tr("LinuxAPO cannot load Windows .dll plugins directly. "
+                          "You can set up an external bridge such as yabridge; "
+                          "after its Linux VST3 wrapper is installed and "
+                          "synchronized with yabridgectl sync, add it through "
+                          "VST plugin (Linux). LinuxAPO does not manage Wine, "
+                          "yabridge, or the Windows plugin."),
+                       QMessageBox::Ok, this);
+    dialog.exec();
+    return true;
+  }
+  return false;
 }
 
 void MainWindow::configureSelectedPluginParameters() {

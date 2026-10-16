@@ -1350,15 +1350,16 @@ int main(int argc, char **argv) {
     }
     if (action->data().canConvert<FilterTemplate>() &&
         action->data().value<FilterTemplate>().getLine() ==
-            "__SKYAPO_PICK_INSTALLED_PLUGIN__") {
-      hasPluginPicker = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
             "Include: child.txt") {
       hasIncludeTemplate = true;
     }
   }
+  if (auto *pluginMenu = rowMenu->findChild<QMenu *>("pluginAddMenu"))
+    for (const auto *action : pluginMenu->actions())
+      if (action->data().canConvert<FilterTemplate>() &&
+          action->data().value<FilterTemplate>().getLine() ==
+              "__SKYAPO_PICK_INSTALLED_PLUGIN__")
+        hasPluginPicker = true;
   if (addActions.isEmpty() ||
       !addActions.first()->data().canConvert<FilterTemplate>() ||
       addActions.first()->data().value<FilterTemplate>().getLine() !=
@@ -1731,8 +1732,21 @@ int main(int argc, char **argv) {
         continue;
       auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
       auto *add = candidate->findChild<QPushButton *>("addPluginButton");
-      pickerWasValid = choices && choices->count() == 1 &&
-                       choices->item(0)->text().contains("Test Gain") && add;
+      pickerWasValid = choices && choices->count() == 3 && add;
+      if (pickerWasValid) {
+        bool hasLv2 = false;
+        bool hasClap = false;
+        bool hasVst3 = false;
+        for (int index = 0; index < choices->count(); ++index) {
+          const auto directive =
+              choices->item(index)->data(Qt::UserRole).toString();
+          hasLv2 = hasLv2 ||
+                   directive == "Plugin: LV2 https://example.test/plugins/gain";
+          hasClap = hasClap || directive == "Plugin: CLAP test.clap.gain";
+          hasVst3 = hasVst3 || directive == "Plugin: VST3 test.vst3.uid";
+        }
+        pickerWasValid = hasLv2 && hasClap && hasVst3;
+      }
       if (pickerWasValid) {
         add->click();
         pickerWasAccepted = true;
@@ -1760,6 +1774,116 @@ int main(int argc, char **argv) {
   if (!insertedPluginDirective) {
     std::cerr
         << "choosing a discovered plugin did not insert its config line\n";
+    return 1;
+  }
+
+  auto *filterAddMenu = table->createAddPopupMenu();
+  auto *pluginsMenu = filterAddMenu->findChild<QMenu *>("pluginAddMenu");
+  auto *lv2PluginAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addLv2Plugin") : nullptr;
+  auto *clapPluginAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addClapPlugin")
+                  : nullptr;
+  auto *linuxVstAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addLinuxVstPlugin")
+                  : nullptr;
+  auto *windowsVstAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addWindowsVstPlugin")
+                  : nullptr;
+  if (!pluginsMenu || pluginsMenu->title() != "Plugins" || !lv2PluginAction ||
+      lv2PluginAction->text() != "LV2 plugin…" || !clapPluginAction ||
+      clapPluginAction->text() != "CLAP plugin…" || !linuxVstAction ||
+      linuxVstAction->text() != "VST plugin (Linux)…" || !windowsVstAction ||
+      windowsVstAction->text() != "VST plugin (Windows)…") {
+    std::cerr << "plugin menu does not distinguish Linux and Windows VST\n";
+    return 1;
+  }
+
+  bool linuxVstPickerWasValid = false;
+  bool linuxVstPickerWasAccepted = false;
+  QString linuxVstPickerDetails = QStringLiteral("picker was not shown");
+  QTimer::singleShot(200, &window, [&] {
+    for (auto *candidate : window.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginPicker")
+        continue;
+      auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+      auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+      linuxVstPickerDetails =
+          candidate->windowTitle() + QStringLiteral("; ") +
+          (choices ? QStringLiteral("rows=%1").arg(choices->count())
+                   : QStringLiteral("list missing"));
+      if (choices)
+        for (int index = 0; index < choices->count(); ++index)
+          linuxVstPickerDetails += QStringLiteral("; %1").arg(
+              choices->item(index)->data(Qt::UserRole).toString());
+      linuxVstPickerWasValid =
+          choices && choices->count() == 1 &&
+          choices->item(0)->text().contains("Test VST3 Gain") &&
+          choices->item(0)->data(Qt::UserRole).toString() ==
+              "Plugin: VST3 test.vst3.uid" &&
+          candidate->windowTitle() == "Add Linux VST plugin" && add;
+      if (linuxVstPickerWasValid) {
+        add->click();
+        linuxVstPickerWasAccepted = true;
+      }
+      break;
+    }
+  });
+  table->addLine(linuxVstAction->data().value<FilterTemplate>().getLine());
+  QElapsedTimer linuxVstWait;
+  linuxVstWait.start();
+  while (linuxVstWait.elapsed() < 2000 && !linuxVstPickerWasAccepted) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!linuxVstPickerWasValid || !linuxVstPickerWasAccepted) {
+    std::cerr << "Linux VST picker did not limit insertion to native VST3: "
+              << linuxVstPickerDetails.toStdString() << '\n';
+    return 1;
+  }
+  bool insertedVst3Directive = false;
+  for (int index = 0; table->itemAt(index); ++index)
+    insertedVst3Directive =
+        insertedVst3Directive ||
+        table->itemAt(index)->text == "Plugin: VST3 test.vst3.uid";
+  if (!insertedVst3Directive) {
+    std::cerr << "Linux VST selection did not insert the VST3 directive\n";
+    return 1;
+  }
+
+  const int rowCountBeforeWindowsVst = [&] {
+    int count = 0;
+    while (table->itemAt(count))
+      ++count;
+    return count;
+  }();
+  bool windowsVstHelpWasShown = false;
+  QString windowsVstDialogDetails;
+  QTimer::singleShot(100, &window, [&] {
+    auto *message =
+        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+    if (message) {
+      windowsVstDialogDetails =
+          message->windowTitle() + QStringLiteral(": ") + message->text();
+      windowsVstHelpWasShown =
+          message->windowTitle() == "Windows VST plugins" &&
+          message->text().contains("cannot load Windows .dll",
+                                   Qt::CaseInsensitive) &&
+          message->text().contains("yabridge", Qt::CaseInsensitive);
+      message->accept();
+    }
+  });
+  table->addLine(windowsVstAction->data().value<FilterTemplate>().getLine());
+  int rowCountAfterWindowsVst = 0;
+  while (table->itemAt(rowCountAfterWindowsVst))
+    ++rowCountAfterWindowsVst;
+  if (!windowsVstHelpWasShown ||
+      rowCountAfterWindowsVst != rowCountBeforeWindowsVst) {
+    std::cerr << "unsupported Windows VST choice created an inert filter row; "
+              << "help=" << windowsVstHelpWasShown
+              << ", rows=" << rowCountBeforeWindowsVst << "->"
+              << rowCountAfterWindowsVst
+              << ", dialog=" << windowsVstDialogDetails.toStdString() << '\n';
     return 1;
   }
 
