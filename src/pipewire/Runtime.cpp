@@ -365,18 +365,32 @@ struct Runtime {
         engine = createEngine();
     }
     configWatcher->update(engine->configFiles());
-    if (recoveringFaultedLatency) {
-      // A format change is not proof that the plugin state which faulted the
-      // current graph is safe. Rebuild the Engine for the negotiated format,
-      // but keep the runtime latched in silence until an explicit, validated
-      // configuration reload crosses the recovery boundary.
-      if (!quiesceAndDrain())
-        throw std::runtime_error(
-            "timed out draining callbacks for faulted PipeWire format rebuild");
+    // Drain callbacks before sampling the latency state. A callback that was
+    // already processing when PipeWire renegotiated may queue PDC validation
+    // while this replacement is being built; after the drain, no callback can
+    // create a new request until the audio gate is reopened.
+    if (!quiesceAndDrain())
+      throw std::runtime_error(
+          "timed out draining callbacks for PipeWire format rebuild");
+    const bool pdcValidationUnresolved =
+        skyapo::pipewire::pdcFormatRebuildMustRemainFaulted(
+            pluginLatencyFaulted.load(std::memory_order_seq_cst),
+            pluginLatencyEventQueued.load(std::memory_order_seq_cst));
+    if (pdcValidationUnresolved) {
+      // Neither a known fault nor an event whose PDC validation has not run is
+      // cleared by format negotiation. Keep the replacement silent until an
+      // explicit config reload validates a fresh Engine and its plugin state.
+      if (!pluginLatencyFaulted.load(std::memory_order_seq_cst)) {
+        pluginLatencyError =
+            "PipeWire format changed while plugin latency validation was "
+            "pending; reload configuration to validate PDC recovery";
+        pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
+      }
       installEngine(std::move(engine), true);
       audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
     } else {
       installEngine(std::move(engine));
+      resumeAudio();
     }
     auto *pointer = active.load(std::memory_order_acquire);
     std::cerr << "skyapod: DSP ready at " << hz << " Hz, " << channels

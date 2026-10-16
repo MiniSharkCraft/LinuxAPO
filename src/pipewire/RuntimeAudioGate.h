@@ -4,6 +4,11 @@ namespace skyapo::pipewire {
 
 enum class AudioGateMode : unsigned { Running, Quiescing, Faulted, Stopping };
 
+constexpr bool pdcFormatRebuildMustRemainFaulted(bool faulted,
+                                                 bool refreshQueued) noexcept {
+  return faulted || refreshQueued;
+}
+
 // A queued latency refresh is an unresolved PDC validation, not permission to
 // resume. Keep output quiesced until the control thread validates the live
 // engine(s), or retain the stronger fault/stop state.

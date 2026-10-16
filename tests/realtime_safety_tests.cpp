@@ -17,11 +17,20 @@ int main() {
   {
     using skyapo::pipewire::AudioGateMode;
     using skyapo::pipewire::audioOutputMustBeSilent;
+    using skyapo::pipewire::pdcFormatRebuildMustRemainFaulted;
     using skyapo::pipewire::resumeAudioGate;
+    const bool queuedRefreshMustLatchFault =
+        pdcFormatRebuildMustRemainFaulted(false, true);
+    const auto afterQueuedRefreshCompletes = resumeAudioGate(
+        AudioGateMode::Quiescing, queuedRefreshMustLatchFault, false);
     if (resumeAudioGate(AudioGateMode::Quiescing, false, true) !=
             AudioGateMode::Quiescing ||
         resumeAudioGate(AudioGateMode::Running, false, true) !=
             AudioGateMode::Quiescing ||
+        !queuedRefreshMustLatchFault ||
+        afterQueuedRefreshCompletes != AudioGateMode::Faulted ||
+        !audioOutputMustBeSilent(afterQueuedRefreshCompletes, false) ||
+        pdcFormatRebuildMustRemainFaulted(false, false) ||
         resumeAudioGate(AudioGateMode::Running, true, false) !=
             AudioGateMode::Faulted ||
         resumeAudioGate(AudioGateMode::Stopping, false, true) !=
