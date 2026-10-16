@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
+option(SKYAPO_BUNDLE_BRANDED_APP_ICON
+  "Bundle supplied app artwork only after redistribution rights are confirmed" OFF)
 option(SKYAPO_ENABLE_FFTW3F "Enable upstream GraphicEQ and convolution through FFTW3f" ON)
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
 option(SKYAPO_ENABLE_MUPARSERX "Fetch and use Equalizer APO's legacy MuParserX 3.0.1 parser" ON)
@@ -22,6 +24,37 @@ option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
 option(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS
   "Enable opt-in recovery tests using the current user's systemd manager" OFF)
 option(SKYAPO_ENABLE_CPACK "Enable DEB and RPM generators for CPack" ON)
+set(SKYAPO_TEST_TEMP_DIRECTORY "${CMAKE_BINARY_DIR}/tmp" CACHE PATH
+  "Disk-backed temporary directory used by CTest subprocesses")
+file(MAKE_DIRECTORY "${SKYAPO_TEST_TEMP_DIRECTORY}")
+
+if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/docs/UI_LICENSE_AUDIT.md"
+    _skyapo_icon_rights_marker
+    REGEX "^Release artwork redistribution status: CLEARED$")
+  if(NOT _skyapo_icon_rights_marker)
+    message(FATAL_ERROR
+      "Branded app artwork can only be bundled after redistribution rights "
+      "are documented as CLEARED in docs/UI_LICENSE_AUDIT.md")
+  endif()
+  foreach(_skyapo_icon_size 16 24 32 48 64 128 256 512)
+    if(NOT EXISTS
+       "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps/skyapo.png")
+      message(FATAL_ERROR
+        "Branded app icon size ${_skyapo_icon_size} is missing; the opt-in "
+        "requires all source PNGs to be present")
+    endif()
+  endforeach()
+  set(SKYAPO_DESKTOP_ICON_LINE "Icon=skyapo")
+  set(SKYAPO_DESKTOP_ICON_TEST_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/256x256/apps/skyapo.png")
+else()
+  set(SKYAPO_DESKTOP_ICON_LINE "")
+  set(SKYAPO_DESKTOP_ICON_TEST_PATH "")
+endif()
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/packaging")
+configure_file(packaging/skyapo.desktop.in
+  "${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop" @ONLY)
 
 if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS AND NOT SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   message(FATAL_ERROR
@@ -321,11 +354,17 @@ target_link_options(skyapod PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=reall
 enable_testing()
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-app-icon-rights-gate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/app_icon_license_gate_test.py
+      ${CMAKE_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(skyapo-app-icon-rights-gate PROPERTIES
+    ENVIRONMENT "SKYAPO_TEST_TEMP_DIRECTORY=${SKYAPO_TEST_TEMP_DIRECTORY}")
   add_test(NAME skyapo-desktop-metadata
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop_metadata_test.py
-      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.desktop
-      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.svg
+      ${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop
+      "${SKYAPO_DESKTOP_ICON_TEST_PATH}"
       ${CMAKE_CURRENT_SOURCE_DIR}/packaging/org.skyapo.SkyAPO.metainfo.xml)
   add_test(NAME skyapo-diagnostics-json
     COMMAND ${Python3_EXECUTABLE}
@@ -503,7 +542,12 @@ if(SKYAPO_BUILD_UI)
       src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h
       src/ui/IIRFilterEditor.cpp src/ui/IIRFilterEditor.h
       src/ui/ResponseAnalysis.h)
-    set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      target_sources(skyapo-ui PRIVATE src/ui/resources/skyapo_app_icon.qrc)
+      target_compile_definitions(skyapo-ui PRIVATE
+        SKYAPO_HAVE_BRANDED_APP_ICON=1)
+    endif()
+    set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON AUTORCC ON)
     target_include_directories(skyapo-ui PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-ui PRIVATE skyapo-eapo-editor)
@@ -516,7 +560,13 @@ if(SKYAPO_BUILD_UI)
       src/ui/ConvolutionEditor.h src/ui/ChannelCopyEditor.cpp
       src/ui/ChannelCopyEditor.h src/ui/IIRFilterEditor.cpp
       src/ui/IIRFilterEditor.h src/ui/ResponseAnalysis.h)
-    set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      target_sources(skyapo-ui-tests PRIVATE
+        src/ui/resources/skyapo_app_icon.qrc)
+      target_compile_definitions(skyapo-ui-tests PRIVATE
+        SKYAPO_HAVE_BRANDED_APP_ICON=1)
+    endif()
+    set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON AUTORCC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui-tests PRIVATE __forceinline=inline)
@@ -537,10 +587,16 @@ if(SKYAPO_BUILD_UI)
       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     install(TARGETS skyapo-ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(FILES packaging/skyapo.desktop
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop"
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
-    install(FILES packaging/skyapo.svg
-      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      foreach(_skyapo_icon_size 16 24 32 48 64 128 256 512)
+        install(FILES
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps/skyapo.png"
+          DESTINATION
+            "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps")
+      endforeach()
+    endif()
     install(FILES packaging/org.skyapo.SkyAPO.metainfo.xml
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo)
   else()

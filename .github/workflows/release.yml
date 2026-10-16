@@ -72,9 +72,36 @@ jobs:
             printf 'Annotated tag must include a short release summary after its title.\n' >&2
             exit 1
           fi
-          if ! rg -q '^Release artwork redistribution status: CLEARED$' \
+          if rg -q '^Release artwork redistribution status: CLEARED$' \
             docs/UI_LICENSE_AUDIT.md; then
-            printf 'Release blocked: docs/UI_LICENSE_AUDIT.md lacks the explicit artwork-rights clearance marker.\n' >&2
+            : # The release documentation records the verified permission.
+          elif rg -q '^Release artwork redistribution status: EXCLUDED$' \
+            docs/UI_LICENSE_AUDIT.md; then
+            python3 - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          cmake = Path("CMakeLists.txt").read_text(encoding="utf-8")
+          option = re.search(
+              r'option\s*\(\s*SKYAPO_BUNDLE_BRANDED_APP_ICON\s+"[^"]+"\s+(ON|OFF)\s*\)',
+              cmake,
+              re.DOTALL,
+          )
+          tracked_icons = subprocess.run(
+              ["git", "ls-files", "src/ui/resources/icons/hicolor"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+          if option is None or option.group(1) != "OFF" or tracked_icons:
+              raise SystemExit(
+                  "EXCLUDED artwork status requires the branded icon option "
+                  "to default OFF and no branded icon assets in the source tree"
+              )
+          PY
+          else
+            printf 'Release blocked: artwork must be explicitly CLEARED or safely EXCLUDED in docs/UI_LICENSE_AUDIT.md.\n' >&2
             exit 1
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

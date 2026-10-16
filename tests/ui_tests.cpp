@@ -38,6 +38,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QIcon>
 #include <QProcess>
 #include <QPlainTextEdit>
 #include <QPalette>
@@ -228,6 +229,18 @@ bool waitForValidation(QLabel *label, const QString &prefix,
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+#ifdef SKYAPO_HAVE_BRANDED_APP_ICON
+  const QIcon applicationIcon(QStringLiteral(":/icons/skyapo.png"));
+  if (applicationIcon.isNull() || applicationIcon.availableSizes().isEmpty()) {
+    std::cerr << "application icon resource is missing or unreadable\n";
+    return 1;
+  }
+#else
+  if (!QIcon(QStringLiteral(":/icons/skyapo.png")).isNull()) {
+    std::cerr << "unlicensed branded application icon was embedded\n";
+    return 1;
+  }
+#endif
   application.setQuitOnLastWindowClosed(false);
   const QPalette initialPalette = application.palette();
   QPalette forcedPalette = initialPalette;

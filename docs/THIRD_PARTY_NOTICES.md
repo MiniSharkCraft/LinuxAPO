@@ -49,6 +49,12 @@ does not provide per-icon license metadata; its icon artwork is not included in
 these resources. The Qt/distribution license configuration still needs
 release-specific review.
 
+The separate LinuxAPO application/desktop icon is WebP artwork supplied by
+the project owner. Its authorship, license, and redistribution grant are
+unconfirmed. It is excluded from Git, package payloads, and release artifacts
+by default. `SKYAPO_BUNDLE_BRANDED_APP_ICON` must remain disabled unless rights
+are documented as CLEARED; this notice does not grant a license.
+
 Other libraries (including PipeWire, libsndfile, FFTW, Lilv and muParser) are
 discovered from and linked to the host distribution; this project does not
 redistribute their binaries. Their corresponding source packages and license

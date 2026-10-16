@@ -28,7 +28,6 @@ FIXED_FILES = (
     "usr/lib/systemd/user/skyapod.service",
     "usr/share/applications/skyapo.desktop",
     "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
-    "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
     "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
     "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt",
     "usr/share/licenses/skyapo/CLAP-License.txt",
@@ -141,6 +140,26 @@ def validate_payload(
         path = root / relative
         if not path.is_file():
             raise RuntimeError(f"installed package is missing {relative}")
+    desktop_entry = (root / "usr/share/applications/skyapo.desktop").read_text(
+        encoding="utf-8"
+    )
+    branded_icons = list(
+        (root / "usr/share/icons/hicolor").glob("*/apps/skyapo.png")
+    )
+    desktop_icon = next(
+        (line.partition("=")[2].strip() for line in desktop_entry.splitlines()
+         if line.startswith("Icon=")),
+        None,
+    )
+    if desktop_icon == "skyapo":
+        if not branded_icons:
+            raise RuntimeError("desktop entry references a missing branded icon")
+    elif desktop_icon is not None:
+        raise RuntimeError(f"package has an unexpected desktop icon: {desktop_icon!r}")
+    elif branded_icons:
+        raise RuntimeError(
+            "package contains unlicensed branded icons without a desktop reference"
+        )
     for binary in EXECUTABLES:
         path = root / "usr/bin" / binary
         if not os.access(path, os.X_OK):
