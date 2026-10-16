@@ -297,12 +297,13 @@ target_compile_definitions(skyapo PRIVATE
   SKYAPO_UPSTREAM_REVISION="${SKYAPO_UPSTREAM_REVISION}")
 target_link_libraries(skyapo PRIVATE skyapo-core)
 if(PIPEWIRE_FOUND)
-  add_library(skyapo-pipewire STATIC
+  set(SKYAPO_PIPEWIRE_SOURCES
     src/pipewire/DeviceManager.cpp
     src/pipewire/DefaultSinkVolumeMonitor.cpp
     src/pipewire/Runtime.cpp
     src/platform/ConfigWatcher.cpp
     src/platform/RealtimeAudit.cpp)
+  add_library(skyapo-pipewire STATIC ${SKYAPO_PIPEWIRE_SOURCES})
   target_link_libraries(skyapo-pipewire PUBLIC skyapo-core PkgConfig::PIPEWIRE)
   target_include_directories(skyapo-pipewire PRIVATE src/platform/linux)
   target_link_libraries(skyapo PRIVATE skyapo-pipewire)
@@ -839,8 +840,19 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     find_program(SKYAPO_SYSTEMD_RUN_EXECUTABLE systemd-run REQUIRED)
     find_program(SKYAPO_SYSTEMCTL_EXECUTABLE systemctl REQUIRED)
   endif()
-  target_compile_definitions(skyapo-pipewire PRIVATE
+  # Compile test-only runtime hooks into a separate daemon/library pair. The
+  # regular skyapod target remains identical to what packaging installs, even
+  # when release CI enables PipeWire E2E tests in the same build directory.
+  add_library(skyapo-pipewire-e2e STATIC ${SKYAPO_PIPEWIRE_SOURCES})
+  target_link_libraries(skyapo-pipewire-e2e PUBLIC skyapo-core PkgConfig::PIPEWIRE)
+  target_include_directories(skyapo-pipewire-e2e PRIVATE src/platform/linux)
+  target_compile_definitions(skyapo-pipewire-e2e PRIVATE
     SKYAPO_PIPEWIRE_E2E_TESTING=1)
+  add_executable(skyapod-pipewire-e2e src/daemon/main.cpp)
+  target_link_libraries(skyapod-pipewire-e2e PRIVATE skyapo-pipewire-e2e)
+  target_link_options(skyapod-pipewire-e2e PRIVATE
+    -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
+
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
     PATHS /usr/share/pipewire /usr/local/share/pipewire REQUIRED)
   foreach(channel_mode IN ITEMS stereo mono)
@@ -852,7 +864,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
           ${SKYAPO_PIPEWIRE_EXECUTABLE}
           ${SKYAPO_PW_CLI_EXECUTABLE}
           ${SKYAPO_PW_DUMP_EXECUTABLE}
-          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapod-pipewire-e2e>
           $<TARGET_FILE:skyapo>
           $<TARGET_FILE:skyapo-pipewire-test-source>
           $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -869,7 +881,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -884,7 +896,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -899,7 +911,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -914,7 +926,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -929,7 +941,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -944,7 +956,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -959,7 +971,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -974,7 +986,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -989,7 +1001,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1004,7 +1016,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1019,7 +1031,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1034,7 +1046,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1050,7 +1062,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       ${SKYAPO_PIPEWIRE_EXECUTABLE}
       ${SKYAPO_PW_CLI_EXECUTABLE}
       ${SKYAPO_PW_DUMP_EXECUTABLE}
-      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapod-pipewire-e2e>
       $<TARGET_FILE:skyapo>
       $<TARGET_FILE:skyapo-pipewire-test-source>
       $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1067,7 +1079,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1084,7 +1096,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1101,7 +1113,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1118,7 +1130,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1137,7 +1149,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1153,7 +1165,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1169,7 +1181,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1185,7 +1197,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1201,7 +1213,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1219,7 +1231,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1237,7 +1249,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1256,7 +1268,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1273,7 +1285,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1290,7 +1302,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1314,7 +1326,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1335,7 +1347,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
@@ -1354,7 +1366,7 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         ${SKYAPO_PIPEWIRE_EXECUTABLE}
         ${SKYAPO_PW_CLI_EXECUTABLE}
         ${SKYAPO_PW_DUMP_EXECUTABLE}
-        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapod-pipewire-e2e>
         $<TARGET_FILE:skyapo>
         $<TARGET_FILE:skyapo-pipewire-test-source>
         $<TARGET_FILE:skyapo-pipewire-test-consumer>
