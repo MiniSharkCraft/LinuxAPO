@@ -14,6 +14,7 @@ typedef struct {
   int invalid;
   int oversize;
   int large;
+  int increase;
 } TestLatency;
 
 static LV2_Handle instantiate(const LV2_Descriptor *descriptor, double rate,
@@ -29,7 +30,9 @@ static LV2_Handle instantiate(const LV2_Descriptor *descriptor, double rate,
         (!strcmp(descriptor->URI,
                  "https://skyapo.example/plugins/test-latency-mono") ||
          !strcmp(descriptor->URI,
-                 "https://skyapo.example/plugins/test-latency-large"))
+                 "https://skyapo.example/plugins/test-latency-large") ||
+         !strcmp(descriptor->URI,
+                 "https://skyapo.example/plugins/test-latency-increase"))
             ? 1
             : 2;
     state->invalid =
@@ -41,8 +44,13 @@ static LV2_Handle instantiate(const LV2_Descriptor *descriptor, double rate,
     state->large =
         !strcmp(descriptor->URI,
                 "https://skyapo.example/plugins/test-latency-large");
+    state->increase =
+        !strcmp(descriptor->URI,
+                "https://skyapo.example/plugins/test-latency-increase");
     if (state->large)
       state->delay = 9999;
+    else if (state->increase)
+      state->delay = 32;
   }
   return state;
 }
@@ -59,6 +67,16 @@ static void connect_port(LV2_Handle instance, uint32_t port, void *data) {
 
 static void run(LV2_Handle instance, uint32_t frames) {
   TestLatency *state = (TestLatency *)instance;
+  if (state->increase) {
+    for (unsigned channel = 0; channel < state->channels; ++channel)
+      for (uint32_t i = 0; i < frames; ++i)
+        state->output[channel][i] = state->input[channel][i];
+    if (frames)
+      state->delay = 9999;
+    if (state->latency)
+      *state->latency = (float)state->delay;
+    return;
+  }
   for (uint32_t i = 0; i < frames; ++i) {
     for (unsigned channel = 0; channel < state->channels; ++channel) {
       state->output[channel][i] = state->ring[channel][state->cursor];
@@ -98,13 +116,23 @@ static const LV2_Descriptor oversize = {
 static const LV2_Descriptor large = {
     "https://skyapo.example/plugins/test-latency-large", instantiate,
     connect_port, NULL, run, NULL, cleanup, NULL};
+static const LV2_Descriptor increase = {
+    "https://skyapo.example/plugins/test-latency-increase",
+    instantiate,
+    connect_port,
+    NULL,
+    run,
+    NULL,
+    cleanup,
+    NULL};
 
 LV2_SYMBOL_EXPORT const LV2_Descriptor *lv2_descriptor(uint32_t index) {
-  return index == 0 ? &legacy
+  return index == 0   ? &legacy
          : index == 1 ? &designated
          : index == 2 ? &invalid
          : index == 3 ? &mono
          : index == 4 ? &oversize
          : index == 5 ? &large
+         : index == 6 ? &increase
                       : NULL;
 }

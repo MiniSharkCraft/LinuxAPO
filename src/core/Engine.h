@@ -166,6 +166,10 @@ private:
   std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
+  // A failed dynamic-latency refresh may have changed plugin internals even
+  // though the PDC schedule itself is transactional. Do not process that graph
+  // again; a successfully loaded configuration creates the recovery boundary.
+  bool latencyPlanValid{true};
   unsigned allChannelCount{};
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
 };
