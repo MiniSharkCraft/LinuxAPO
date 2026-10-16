@@ -655,36 +655,53 @@ def main():
                 if not metadata:
                     raise RuntimeError(
                         "pw-metadata is required to test faulted format rebuild")
-                for key, value in (("clock.force-quantum", "512"),
-                                   ("clock.force-rate", str(sample_rate))):
-                    run([metadata, "-n", "settings", "0", key, value,
-                         "Spa:Int"], env, timeout=5)
-                deadline = time.monotonic() + 12
-                rebuilt_fault_status = ""
-                while time.monotonic() < deadline:
-                    result = run([str(cli), "status"], env, timeout=5,
-                                 check=False)
-                    rebuilt_fault_status = result.stdout
-                    if (result.returncode == 0 and
-                            "Quantum: 512" in rebuilt_fault_status and
-                            "DSP state: paused (plugin latency refresh failed; "
-                            "output silence)" in rebuilt_fault_status):
-                        break
-                    time.sleep(0.05)
-                else:
+                # Keep one independent consumer recording throughout the
+                # format transition. A second capture after the transition
+                # would miss a brief unmute/re-fault window.
+                continuous_consumer = subprocess.Popen(
+                    [str(consumer), "--expect-silent",
+                     "--expected-rate", str(sample_rate)],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                try:
+                    time.sleep(0.15)
+                    for key, value in (("clock.force-quantum", "512"),
+                                       ("clock.force-rate", str(sample_rate))):
+                        run([metadata, "-n", "settings", "0", key, value,
+                             "Spa:Int"], env, timeout=5)
+                    deadline = time.monotonic() + 12
+                    rebuilt_fault_status = ""
+                    while time.monotonic() < deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        rebuilt_fault_status = result.stdout
+                        if (result.returncode == 0 and
+                                "Quantum: 512" in rebuilt_fault_status and
+                                "DSP state: paused (plugin latency refresh failed; "
+                                "output silence)" in rebuilt_fault_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "PipeWire quantum change resumed or lost the "
+                            f"faulted DSP state:\n{rebuilt_fault_status}")
+                    continuous_stdout, continuous_stderr = (
+                        continuous_consumer.communicate(timeout=8))
+                    if continuous_consumer.returncode:
+                        raise RuntimeError(
+                            "continuous consumer failed across the faulted "
+                            f"format change:\n{continuous_stdout}"
+                            f"{continuous_stderr}")
+                finally:
+                    if continuous_consumer.poll() is None:
+                        continuous_consumer.terminate()
+                        continuous_consumer.wait(timeout=3)
+                silence_rms = re.search(r"RMS: ([0-9.]+)", continuous_stdout)
+                if (not silence_rms or float(silence_rms.group(1)) >= 1.0e-6):
                     raise RuntimeError(
-                        "PipeWire quantum rebuild resumed or lost the faulted "
-                        f"DSP state:\n{rebuilt_fault_status}")
-                still_silent = run([str(consumer), "--expect-silent",
-                                    "--expected-rate", str(sample_rate)],
-                                   env, timeout=12)
-                silence_rms = re.search(r"RMS: ([0-9.]+)",
-                                        still_silent.stdout)
-                if (not silence_rms or
-                        float(silence_rms.group(1)) >= 1.0e-6):
-                    raise RuntimeError(
-                        "faulted format rebuild resumed audio before a valid "
-                        f"config reload:\n{still_silent.stdout}")
+                        "faulted PipeWire format transition emitted non-silent "
+                        "audio during the continuous recording:\n"
+                        f"{continuous_stdout}{continuous_stderr}")
 
                 pdc_recovery_config.write_text("Preamp: -6 dB\n")
                 recovered = run([str(cli), "config", "reload"], env,

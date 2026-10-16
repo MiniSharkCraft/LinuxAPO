@@ -330,10 +330,19 @@ struct Runtime {
         engine = createEngine();
     }
     configWatcher->update(engine->configFiles());
-    if (recoveringFaultedLatency)
-      recoverFaultedLatency(std::move(engine));
-    else
+    if (recoveringFaultedLatency) {
+      // A format change is not proof that the plugin state which faulted the
+      // current graph is safe. Rebuild the Engine for the negotiated format,
+      // but keep the runtime latched in silence until an explicit, validated
+      // configuration reload crosses the recovery boundary.
+      if (!quiesceAndDrain())
+        throw std::runtime_error(
+            "timed out draining callbacks for faulted PipeWire format rebuild");
+      installEngine(std::move(engine), true);
+      audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+    } else {
       installEngine(std::move(engine));
+    }
     auto *pointer = active.load(std::memory_order_acquire);
     std::cerr << "skyapod: DSP ready at " << hz << " Hz, " << channels
               << " channels, " << pointer->filterCount() << " filters\n";
