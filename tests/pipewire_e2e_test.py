@@ -650,6 +650,54 @@ def main():
                         "invalid config incorrectly resumed the faulted "
                         f"engine:\n{still_faulted.stdout}")
 
+                # Recreating the same plugin config is not by itself a safe
+                # recovery boundary: this test plugin reports a harmless
+                # initial latency, then an excessive dynamic latency on its
+                # first non-empty run. The replacement must be exercised and
+                # have its PDC schedule validated before the daemon unmutes.
+                pdc_recovery_config.write_text(rejected_dynamic_pdc)
+                unsafe_recovery_consumer = subprocess.Popen(
+                    [str(consumer), "--expect-silent",
+                     "--expected-rate", str(sample_rate)],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                try:
+                    time.sleep(0.15)
+                    unsafe_recovery = run(
+                        [str(cli), "config", "reload"], env,
+                        timeout=10, check=False)
+                    if ("Config reload failed; keeping last valid graph" not in
+                            unsafe_recovery.stdout + unsafe_recovery.stderr):
+                        raise RuntimeError(
+                            "same dynamically unsafe plugin config was accepted "
+                            "as PDC fault recovery:\n"
+                            f"{unsafe_recovery.stdout}{unsafe_recovery.stderr}")
+                    unsafe_status = run([str(cli), "status"], env,
+                                        timeout=5, check=False)
+                    if (unsafe_status.returncode != 0 or
+                            "DSP state: paused (plugin latency refresh failed; "
+                            "output silence)" not in unsafe_status.stdout):
+                        raise RuntimeError(
+                            "unvalidated replacement engine cleared the PDC "
+                            f"fault latch:\n{unsafe_status.stdout}")
+                    unsafe_stdout, unsafe_stderr = (
+                        unsafe_recovery_consumer.communicate(timeout=8))
+                    if unsafe_recovery_consumer.returncode:
+                        raise RuntimeError(
+                            "continuous consumer failed during rejected unsafe "
+                            f"recovery:\n{unsafe_stdout}{unsafe_stderr}")
+                finally:
+                    if unsafe_recovery_consumer.poll() is None:
+                        unsafe_recovery_consumer.terminate()
+                        unsafe_recovery_consumer.wait(timeout=3)
+                unsafe_silence = re.search(r"RMS: ([0-9.]+)", unsafe_stdout)
+                if (not unsafe_silence or
+                        float(unsafe_silence.group(1)) >= 1.0e-6):
+                    raise RuntimeError(
+                        "unsafe plugin recovery emitted audio before being "
+                        "rejected:\n"
+                        f"{unsafe_stdout}{unsafe_stderr}")
+
                 metadata = (os.environ.get("SKYAPO_PW_METADATA") or
                             shutil.which("pw-metadata"))
                 if not metadata:

@@ -384,6 +384,10 @@ struct Runtime {
     reclaimRetired();
   }
   void recoverFaultedLatency(std::unique_ptr<Engine> replacement) {
+    // Validate the unpublished plugin/PDC state before crossing the recovery
+    // boundary. Any latency notification, unsafe budget or allocation failure
+    // leaves the currently published silence latch untouched.
+    replacement->validateForActivation();
     if (!quiesceAndDrain())
       throw std::runtime_error(
           "timed out draining callbacks before plugin-latency recovery");

@@ -1630,6 +1630,32 @@ unsigned Engine::refreshPluginLatencies() {
   }
 }
 
+void Engine::validateForActivation() {
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency plan is invalid; cannot activate this configuration");
+
+  // Some plugins publish their initial latency only after their first non-empty
+  // run. Prime the unpublished candidate off the realtime thread so recovery
+  // cannot briefly unmute a graph whose first block immediately invalidates
+  // its PDC schedule. The block is silence and is discarded.
+  if (pluginLatencyCompensationActive()) {
+    std::vector<float> silence(static_cast<size_t>(channelCount) * maxFrameCount,
+                               0.0f);
+    process(silence.data(), maxFrameCount);
+    if (pluginLatencyRefreshPending())
+      (void)refreshPluginLatencies();
+  }
+
+  if (!latencyPlanValid || pluginLatencyRefreshPending())
+    throw std::runtime_error(
+        "plugin latency/PDC state is not stable enough to activate");
+  const auto failures = failedPluginDescriptions();
+  if (!failures.empty())
+    throw std::runtime_error("plugin failed while validating replacement "
+                             "Engine: " + failures.front());
+}
+
 unsigned Engine::savePersistentPluginStates() {
   unsigned saved = 0;
   for (const auto &node : graph) {

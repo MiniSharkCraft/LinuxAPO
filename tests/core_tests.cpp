@@ -488,6 +488,40 @@ int main() {
     return 1;
   }
 
+  Engine activationAllocationFailureEngine(48000, 2, 128, {L"L", L"R"});
+  activationAllocationFailureEngine.loadConfig(path);
+  skyapo::testing::failPdcAllocationAfterForTesting(1);
+  bool activationRejectedAllocationFailure = false;
+  try {
+    activationAllocationFailureEngine.validateForActivation();
+  } catch (const std::bad_alloc &) {
+    activationRejectedAllocationFailure = true;
+  } catch (const std::exception &error) {
+    skyapo::testing::clearPdcAllocationFailureForTesting();
+    std::cerr << "unexpected recovery-candidate validation error: "
+              << error.what() << '\n';
+    return 1;
+  }
+  const auto activationPreparedPdcRings =
+      skyapo::testing::successfulPdcRingAllocationsForTesting();
+  skyapo::testing::clearPdcAllocationFailureForTesting();
+  bool activationCandidateStayedClosed = false;
+  float activationCandidateProbe[16]{};
+  try {
+    activationAllocationFailureEngine.process(activationCandidateProbe, 8);
+  } catch (const std::exception &error) {
+    activationCandidateStayedClosed =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!activationRejectedAllocationFailure || activationPreparedPdcRings == 0 ||
+      !activationCandidateStayedClosed) {
+    std::cerr << "recovery candidate passed activation after its PDC "
+                 "allocation failed (prepared="
+              << activationPreparedPdcRings << ")\n";
+    return 1;
+  }
+
   if (!write(path, "Copy: L2=L R2=R\n"
                    "Plugin: LV2 https://skyapo.example/plugins/"
                    "test-latency-designated\n"
