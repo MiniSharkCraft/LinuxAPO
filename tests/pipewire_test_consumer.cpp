@@ -67,8 +67,8 @@ struct Consumer {
   std::atomic<unsigned> zeroDurationCalls{0};
   std::atomic<unsigned> nullBufferCalls{0};
   std::atomic<int> filterState{PW_FILTER_STATE_UNCONNECTED};
-  std::array<uint64_t, MaxChannels> consecutiveSilentNanoseconds{};
-  std::array<uint64_t, MaxChannels> maximumSilentNanoseconds{};
+  std::array<std::atomic<uint64_t>, MaxChannels> consecutiveSilentNanoseconds{};
+  std::array<std::atomic<uint64_t>, MaxChannels> maximumSilentNanoseconds{};
   std::atomic<bool> silenceMeasurementArmed{false};
   std::vector<float> recordedLeft{};
   std::vector<float> recordedRight{};
@@ -225,6 +225,14 @@ struct Consumer {
     if (c.maxConsecutiveSilenceMs) {
       constexpr float SilenceThreshold = 1.0e-7f;
       const uint64_t frameDurationNanoseconds = 1000000000ull / rate;
+      std::array<uint64_t, MaxChannels> consecutiveSilent{};
+      std::array<uint64_t, MaxChannels> maximumSilent{};
+      for (unsigned ch = 0; ch < c.channels; ++ch) {
+        consecutiveSilent[ch] =
+            c.consecutiveSilentNanoseconds[ch].load(std::memory_order_relaxed);
+        maximumSilent[ch] =
+            c.maximumSilentNanoseconds[ch].load(std::memory_order_relaxed);
+      }
       auto silenceMeasurementArmed =
           c.silenceMeasurementArmed.load(std::memory_order_relaxed);
       for (uint32_t i = 0; i < count; ++i) {
@@ -238,14 +246,19 @@ struct Consumer {
         }
         for (unsigned ch = 0; ch < c.channels; ++ch) {
           if (std::abs(channelData[ch][i]) <= SilenceThreshold) {
-            c.consecutiveSilentNanoseconds[ch] += frameDurationNanoseconds;
+            consecutiveSilent[ch] += frameDurationNanoseconds;
           } else {
-            c.maximumSilentNanoseconds[ch] =
-                std::max(c.maximumSilentNanoseconds[ch],
-                         c.consecutiveSilentNanoseconds[ch]);
-            c.consecutiveSilentNanoseconds[ch] = 0;
+            maximumSilent[ch] =
+                std::max(maximumSilent[ch], consecutiveSilent[ch]);
+            consecutiveSilent[ch] = 0;
           }
         }
+      }
+      for (unsigned ch = 0; ch < c.channels; ++ch) {
+        c.consecutiveSilentNanoseconds[ch].store(consecutiveSilent[ch],
+                                                 std::memory_order_relaxed);
+        c.maximumSilentNanoseconds[ch].store(maximumSilent[ch],
+                                             std::memory_order_relaxed);
       }
       c.silenceMeasurementArmed.store(silenceMeasurementArmed,
                                       std::memory_order_relaxed);
@@ -403,9 +416,11 @@ struct Consumer {
     const auto capturedFrames = frames.load();
     uint64_t maximumSilenceNs = 0;
     for (unsigned ch = 0; ch < channels; ++ch)
-      maximumSilenceNs = std::max(maximumSilenceNs,
-                                  std::max(maximumSilentNanoseconds[ch],
-                                           consecutiveSilentNanoseconds[ch]));
+      maximumSilenceNs = std::max(
+          maximumSilenceNs,
+          std::max(maximumSilentNanoseconds[ch].load(std::memory_order_relaxed),
+                   consecutiveSilentNanoseconds[ch].load(
+                       std::memory_order_relaxed)));
     if (capturedFrames == 0) {
       std::fprintf(stderr,
                    "test consumer diagnostics: sourceNode=%u ownNode=%u "
