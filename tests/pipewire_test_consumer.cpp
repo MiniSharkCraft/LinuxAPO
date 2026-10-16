@@ -39,6 +39,7 @@ struct Consumer {
   unsigned channels{2};
   bool expectSilent{};
   bool acceptAnyAudio{};
+  bool allowRateChanges{};
   double expectedDb{-6.0};
   unsigned expectedRate{};
   std::array<const char *, MaxChannels> channelNames{};
@@ -185,7 +186,7 @@ struct Consumer {
                                                : 0;
     const auto previousRate = c.sampleRate.load(std::memory_order_relaxed);
     if (!rate || (c.expectedRate && rate != c.expectedRate) ||
-        (previousRate && previousRate != rate)) {
+        (!c.allowRateChanges && previousRate && previousRate != rate)) {
       c.invalidRateCalls.fetch_add(1, std::memory_order_relaxed);
       c.failed.store(true, std::memory_order_relaxed);
       return;
@@ -495,6 +496,7 @@ int main(int argc, char **argv) {
   bool acceptAnyAudio = false;
   bool expectIdenticalChannels = false;
   bool measureSourceLag = false;
+  bool allowRateChanges = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
   for (int arg = 1; arg < argc; ++arg) {
@@ -513,6 +515,8 @@ int main(int argc, char **argv) {
       expectIdenticalChannels = true;
     else if (option == "--measure-source-lag")
       measureSourceLag = true;
+    else if (option == "--allow-rate-changes")
+      allowRateChanges = true;
     else if (option == "--expected-db" && arg + 1 < argc) {
       char *end = nullptr;
       expectedDb = std::strtod(argv[++arg], &end);
@@ -533,7 +537,7 @@ int main(int argc, char **argv) {
                            "[--mono|--surround51|--surround71] "
                            "[--expect-silent] [--accept-any-audio] "
                            "[--expect-identical-channels] "
-                           "[--measure-source-lag] "
+                           "[--measure-source-lag] [--allow-rate-changes] "
                            "[--expected-db DB] [--expected-rate HZ]\n");
       return 2;
     }
@@ -547,6 +551,7 @@ int main(int argc, char **argv) {
     }
     Consumer consumer(mono, surround51, surround71, expectSilent,
                       acceptAnyAudio, expectedDb, expectedRate);
+    consumer.allowRateChanges = allowRateChanges;
     if (expectIdenticalChannels && mono) {
       std::fprintf(
           stderr,

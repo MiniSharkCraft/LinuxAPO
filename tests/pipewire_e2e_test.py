@@ -848,33 +848,38 @@ def main():
                 # would miss a brief unmute/re-fault window.
                 continuous_consumer = subprocess.Popen(
                     [str(consumer), "--expect-silent",
-                     "--expected-rate", str(sample_rate)],
+                     "--allow-rate-changes"],
                     env=env, text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE)
                 try:
                     time.sleep(0.15)
-                    for key, value in (("clock.force-quantum", "512"),
-                                       ("clock.force-rate", str(sample_rate))):
-                        run([metadata, "-n", "settings", "0", key, value,
-                             "Spa:Int"], env, timeout=5)
-                    deadline = time.monotonic() + 12
-                    rebuilt_fault_status = ""
-                    while time.monotonic() < deadline:
-                        result = run([str(cli), "status"], env, timeout=5,
-                                     check=False)
-                        rebuilt_fault_status = result.stdout
-                        if (result.returncode == 0 and
-                                "Quantum: 512" in rebuilt_fault_status and
-                                "DSP engine format: 48000 Hz, max block 512"
-                                in rebuilt_fault_status and
-                                "DSP state: paused (plugin latency refresh failed; "
-                                "output silence)" in rebuilt_fault_status):
-                            break
-                        time.sleep(0.05)
-                    else:
-                        raise RuntimeError(
-                            "PipeWire quantum change resumed or lost the "
-                            f"faulted DSP state:\n{rebuilt_fault_status}")
+                    for rate, quantum in ((sample_rate, 512), (44100, 512)):
+                        for key, value in (("clock.force-quantum", quantum),
+                                           ("clock.force-rate", rate)):
+                            run([metadata, "-n", "settings", "0", key,
+                                 str(value), "Spa:Int"], env, timeout=5)
+                        deadline = time.monotonic() + 12
+                        rebuilt_fault_status = ""
+                        while time.monotonic() < deadline:
+                            result = run([str(cli), "status"], env, timeout=5,
+                                         check=False)
+                            rebuilt_fault_status = result.stdout
+                            engine_format = (
+                                f"DSP engine format: {rate} Hz, max block "
+                                f"{quantum}")
+                            if (result.returncode == 0 and
+                                    f"Quantum: {quantum}" in
+                                    rebuilt_fault_status and
+                                    engine_format in rebuilt_fault_status and
+                                    "DSP state: paused (plugin latency refresh failed; "
+                                    "output silence)" in rebuilt_fault_status):
+                                break
+                            time.sleep(0.05)
+                        else:
+                            raise RuntimeError(
+                                "PipeWire format/quantum change resumed or "
+                                "lost the faulted DSP state:\n"
+                                f"{rebuilt_fault_status}")
                     continuous_stdout, continuous_stderr = (
                         continuous_consumer.communicate(timeout=8))
                     if continuous_consumer.returncode:
@@ -887,11 +892,18 @@ def main():
                         continuous_consumer.terminate()
                         continuous_consumer.wait(timeout=3)
                 silence_rms = re.search(r"RMS: ([0-9.]+)", continuous_stdout)
-                if (not silence_rms or float(silence_rms.group(1)) >= 1.0e-6):
+                final_consumer_rate = re.search(
+                    r"Sample rate: ([0-9]+) Hz", continuous_stdout)
+                if (not silence_rms or
+                        float(silence_rms.group(1)) >= 1.0e-6 or
+                        not final_consumer_rate or
+                        int(final_consumer_rate.group(1)) != 44100):
                     raise RuntimeError(
-                        "faulted PipeWire format transition emitted non-silent "
-                        "audio during the continuous recording:\n"
+                        "faulted PipeWire format/quantum transition emitted "
+                        "non-silent audio or the continuous client did not "
+                        "observe the 44100 Hz rate change:\n"
                         f"{continuous_stdout}{continuous_stderr}")
+                sample_rate = 44100
 
                 pdc_recovery_config.write_text("Preamp: -6 dB\n")
                 recovered = run([str(cli), "config", "reload"], env,
