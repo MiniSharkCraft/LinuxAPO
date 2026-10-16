@@ -444,6 +444,7 @@ def main():
         source_log = (root / "source.log").open("w+")
         daemon_log = (root / "daemon.log").open("w+")
         server = source_process = second_source_process = daemon_process = None
+        startup_fault_consumer = None
         try:
             server = start_private_pipewire(
                 pipewire, rate_config, env, logs, runtime)
@@ -487,6 +488,16 @@ def main():
             current = run([str(cli), "device", "current"], env)
             if device_name not in current.stdout:
                 raise RuntimeError(f"selected source mismatch: {current.stdout}")
+
+            # Observe the virtual source from its first available samples. The
+            # latency-fault test must catch audio emitted by the very callback
+            # that reports the changed plugin latency, not only later silence.
+            if lv2_pdc_recovery:
+                startup_fault_consumer = subprocess.Popen(
+                    [str(consumer), "--expect-silent",
+                     "--expected-rate", str(sample_rate)],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
 
             if systemd_crash_restart:
                 systemd_run = shutil.which("systemd-run")
@@ -621,6 +632,20 @@ def main():
                     raise RuntimeError(
                         "dynamic PDC budget failure did not leave the daemon "
                         f"in its recoverable silence state:\n{fault_status}")
+                startup_stdout, startup_stderr = (
+                    startup_fault_consumer.communicate(timeout=8))
+                if startup_fault_consumer.returncode:
+                    raise RuntimeError(
+                        "audio escaped before the first PDC fault was latched; "
+                        "the consumer was connected before daemon startup:\n"
+                        f"{startup_stdout}{startup_stderr}")
+                startup_silence = re.search(r"RMS: ([0-9.]+)", startup_stdout)
+                if (not startup_silence or
+                        float(startup_silence.group(1)) >= 1.0e-6):
+                    raise RuntimeError(
+                        "the callback that detected changed plugin latency "
+                        "published audio before fail-closed silence:\n"
+                        f"{startup_stdout}{startup_stderr}")
                 fault_node = virtual_source_id(fault_status)
                 assert_virtual_source(pw_dump, env, fault_node)
                 silent = run([str(consumer), "--expect-silent",
@@ -1511,6 +1536,7 @@ def main():
         finally:
             try:
                 shutdown(((daemon_process, "skyapod"),
+                          (startup_fault_consumer, "startup PDC observer"),
                           (source_process, "test source"),
                           (second_source_process, "alternate test source"),
                           (server, "PipeWire server")))

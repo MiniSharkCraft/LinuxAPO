@@ -557,6 +557,16 @@ struct Runtime {
       r.resetMetrics.store(true, std::memory_order_release);
     }
   }
+  static void requestPluginLatencyRefresh(Runtime &r) noexcept {
+    // Publish quiescing before waking the control loop so any overlapping
+    // callback also fails closed instead of processing another stale-PDC block.
+    r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    bool expected = false;
+    if (r.pluginLatencyEventQueued.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_relaxed))
+      pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.pluginLatencyEvent);
+  }
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
     auto &r = *static_cast<Runtime *>(data);
@@ -617,6 +627,7 @@ struct Runtime {
       return;
     }
     double raw = 0, processed = 0;
+    bool latencyRefreshPending = false;
     for (uint64_t offset = 0; offset < frames; offset += MaxFrames) {
       const unsigned n = std::min<uint64_t>(MaxFrames, frames - offset);
       for (unsigned f = 0; f < n; ++f)
@@ -643,6 +654,14 @@ struct Runtime {
       } else {
         engine->process(r.work.data(), n);
       }
+      // The plugin may have changed its intrinsic delay during this run().
+      // Do not publish even this quantum with the old PDC schedule: the
+      // control thread will validate/rebuild while callbacks stay quiesced.
+      if (!nextEngine && engine->pluginLatencyRefreshPending()) {
+        latencyRefreshPending = true;
+        requestPluginLatencyRefresh(r);
+        break;
+      }
       for (unsigned f = 0; f < n; ++f)
         for (unsigned c = 0; c < r.channels; ++c) {
           float s = r.work[f * r.channels + c];
@@ -650,6 +669,22 @@ struct Runtime {
             out[c][offset + f] = s;
           processed += double(s) * s;
         }
+    }
+    if (!latencyRefreshPending && !r.pending.load(std::memory_order_seq_cst)) {
+      Engine *processedEngine = r.active.load(std::memory_order_seq_cst);
+      if (processedEngine && processedEngine->pluginLatencyRefreshPending()) {
+        latencyRefreshPending = true;
+        requestPluginLatencyRefresh(r);
+      }
+    }
+    if (latencyRefreshPending) {
+      // Earlier chunks (if an oversized PipeWire block was split) may already
+      // have been copied. Clear the complete PipeWire output quantum before
+      // returning, so no stale-PDC samples escape at this boundary.
+      for (unsigned c = 0; c < r.channels; ++c)
+        if (out[c])
+          std::fill_n(out[c], frames, 0.0f);
+      processed = 0;
     }
     r.rawSum += raw;
     r.processedSum += processed;
@@ -663,25 +698,6 @@ struct Runtime {
       r.maxNs.store(elapsed, std::memory_order_relaxed);
     if (hz && elapsed > frames * 1000000000 / hz)
       r.overruns.fetch_add(1, std::memory_order_relaxed);
-
-    // A plugin may report a changed latency at the end of run(). Its new DSP
-    // delay applies to subsequent blocks, so stop processing at this block
-    // boundary and let the control loop rebuild the PDC schedule while audio
-    // callbacks are drained. The quiescing callback path writes silence; it
-    // does not allocate, inspect files, or wait for the control loop.
-    if (!r.pending.load(std::memory_order_seq_cst)) {
-      Engine *processed = r.active.load(std::memory_order_seq_cst);
-      if (processed && processed->pluginLatencyRefreshPending()) {
-        bool expected = false;
-        if (r.pluginLatencyEventQueued.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel,
-                std::memory_order_relaxed)) {
-          r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
-          pw_loop_signal_event(pw_main_loop_get_loop(r.main),
-                               r.pluginLatencyEvent);
-        }
-      }
-    }
   }
   static void stateChanged(void *data, pw_filter_state old,
                            pw_filter_state state, const char *error) {
