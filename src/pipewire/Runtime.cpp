@@ -1,4 +1,5 @@
 #include "Runtime.h"
+#include "RuntimeAudioGate.h"
 #include "TransitionMetricsGeneration.h"
 #include "../platform/PlatformChannels.h"
 #include "../platform/RealtimeAudit.h"
@@ -120,7 +121,7 @@ struct Runtime {
   bool ownsSocket = false;
   bool cleaning = false;
   bool initialized = false;
-  enum class AudioMode : unsigned { Running, Quiescing, Faulted, Stopping };
+  using AudioMode = skyapo::pipewire::AudioGateMode;
   std::array<void *, MaxChannels> inputs{}, outputs{};
   std::array<uint32_t, MaxChannels> ownInputs{};
   std::array<pw_proxy *, MaxChannels> links{};
@@ -293,12 +294,21 @@ struct Runtime {
   void resumeAudio() noexcept {
     auto mode = audioMode.load(std::memory_order_seq_cst);
     while (mode != AudioMode::Stopping) {
-      const auto next = pluginLatencyFaulted.load(std::memory_order_seq_cst)
-                            ? AudioMode::Faulted
-                            : AudioMode::Running;
+      const auto next = skyapo::pipewire::resumeAudioGate(
+          mode, pluginLatencyFaulted.load(std::memory_order_seq_cst),
+          pluginLatencyEventQueued.load(std::memory_order_seq_cst));
       if (audioMode.compare_exchange_weak(mode, next, std::memory_order_seq_cst,
-                                          std::memory_order_seq_cst))
+                                          std::memory_order_seq_cst)) {
+        // Close the race where a callback publishes Quiescing between our
+        // flag load and a same-value Quiescing->Running CAS.
+        if (next == AudioMode::Running &&
+            (pluginLatencyFaulted.load(std::memory_order_seq_cst) ||
+             pluginLatencyEventQueued.load(std::memory_order_seq_cst))) {
+          mode = AudioMode::Running;
+          continue;
+        }
         return;
+      }
     }
   }
   void buildEngine(unsigned hz, unsigned blockFrames) {
@@ -583,13 +593,13 @@ struct Runtime {
     }
   }
   static void requestPluginLatencyRefresh(Runtime &r) noexcept {
-    // Publish quiescing before waking the control loop so any overlapping
-    // callback also fails closed instead of processing another stale-PDC block.
-    r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    // Publish the unresolved gate before quiescing. A control-thread rebuild
+    // racing this callback must see the queued validation in resumeAudio().
     bool expected = false;
-    if (r.pluginLatencyEventQueued.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel,
-            std::memory_order_relaxed))
+    const bool queued = r.pluginLatencyEventQueued.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
+    r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    if (queued)
       pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.pluginLatencyEvent);
   }
   static void process(void *data, spa_io_position *position) {
@@ -634,7 +644,9 @@ struct Runtime {
     // Check quiescence before dereferencing any Engine pointer. A control
     // thread may have drained callbacks and replaced owners after publishing
     // Quiescing; later callbacks must only write silence until it resumes.
-    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
+    if (skyapo::pipewire::audioOutputMustBeSilent(
+            r.audioMode.load(std::memory_order_seq_cst),
+            r.pluginLatencyEventQueued.load(std::memory_order_seq_cst))) {
       const bool rateChanged = r.requestedRate.exchange(hz) != hz;
       const bool quantumChanged = r.requestedQuantum.exchange(frames) != frames;
       if (rateChanged || quantumChanged)
