@@ -1640,8 +1640,8 @@ void Engine::validateForActivation() {
   // cannot briefly unmute a graph whose first block immediately invalidates
   // its PDC schedule. The block is silence and is discarded.
   if (pluginLatencyCompensationActive()) {
-    std::vector<float> silence(static_cast<size_t>(channelCount) * maxFrameCount,
-                               0.0f);
+    std::vector<float> silence(
+        static_cast<size_t>(channelCount) * maxFrameCount, 0.0f);
     process(silence.data(), maxFrameCount);
     if (pluginLatencyRefreshPending())
       (void)refreshPluginLatencies();
@@ -1653,7 +1653,8 @@ void Engine::validateForActivation() {
   const auto failures = failedPluginDescriptions();
   if (!failures.empty())
     throw std::runtime_error("plugin failed while validating replacement "
-                             "Engine: " + failures.front());
+                             "Engine: " +
+                             failures.front());
 }
 
 unsigned Engine::savePersistentPluginStates() {
