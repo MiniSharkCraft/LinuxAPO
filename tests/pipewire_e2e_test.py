@@ -462,6 +462,7 @@ def main():
         daemon_log = (root / "daemon.log").open("w+")
         server = source_process = second_source_process = daemon_process = None
         startup_fault_consumer = None
+        continuous_renegotiate_consumer = None
         try:
             server = start_private_pipewire(
                 pipewire, rate_config, env, logs, runtime)
@@ -1222,6 +1223,17 @@ def main():
                 if not metadata:
                     raise RuntimeError("pw-metadata is required for renegotiate E2E")
 
+                # Keep one recorder attached across all format/quantum rebuilds.
+                # Per-format recordings below prove the settled gain, while
+                # this recorder detects a transient silence gap at a boundary.
+                continuous_renegotiate_consumer = subprocess.Popen(
+                    [str(consumer), "--expected-db", "-6",
+                     "--allow-rate-changes", "--duration-ms", "30000",
+                     "--max-consecutive-silence-ms", "150", "--name",
+                     "skyapo.test.consumer.renegotiate"],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+
                 def force_clock(rate, quantum):
                     for key, value in (("clock.force-quantum", quantum),
                                        ("clock.force-rate", rate)):
@@ -1248,6 +1260,10 @@ def main():
                 for new_rate, new_quantum in ((48000, 512),
                                               (44100, 512), (96000, 2048)):
                     changed_status = force_clock(new_rate, new_quantum)
+                    if continuous_renegotiate_consumer.poll() is not None:
+                        raise RuntimeError(
+                            "continuous consumer ended before observing the "
+                            f"{new_rate} Hz / {new_quantum} rebuild")
                     status = changed_status
                     output = run(
                         [str(consumer), "--expected-rate", str(new_rate),
@@ -1264,6 +1280,28 @@ def main():
                           f"{new_quantum}; independent capture ratio "
                           f"{float(ratio.group(1)):.6f}.")
                     sample_rate = new_rate
+                continuous_output, continuous_error = (
+                    continuous_renegotiate_consumer.communicate(timeout=27))
+                if continuous_renegotiate_consumer.returncode:
+                    raise RuntimeError(
+                        "continuous consumer failed across format/quantum "
+                        f"rebuilds:\n{continuous_output}{continuous_error}")
+                max_silence = re.search(
+                    r"Maximum consecutive silence: ([0-9.]+) ms",
+                    continuous_output)
+                continuous_ratio = re.search(
+                    r"RMS ratio to expected: ([0-9.]+)", continuous_output)
+                if (not max_silence or float(max_silence.group(1)) > 150.0 or
+                        not continuous_ratio or
+                        abs(float(continuous_ratio.group(1)) - 1.0) >= 0.03):
+                    raise RuntimeError(
+                        "continuous output was silent or outside the expected "
+                        "gain across format/quantum rebuilds:\n"
+                        f"{continuous_output}{continuous_error}")
+                continuous_renegotiate_consumer = None
+                print("One independent consumer recorded through all format "
+                      f"rebuilds; longest silence {max_silence.group(1)} ms, "
+                      f"RMS ratio {float(continuous_ratio.group(1)):.6f}.")
 
             if lv2_pdc_final:
                 # Keep the input graph steady while measuring channel phase:
@@ -1779,6 +1817,8 @@ def main():
             try:
                 shutdown(((daemon_process, "skyapod"),
                           (startup_fault_consumer, "startup PDC observer"),
+                          (continuous_renegotiate_consumer,
+                           "continuous format-rebuild consumer"),
                           (source_process, "test source"),
                           (second_source_process, "alternate test source"),
                           (server, "PipeWire server")))
