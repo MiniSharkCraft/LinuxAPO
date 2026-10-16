@@ -271,8 +271,7 @@ struct Runtime {
       const auto next = pluginLatencyFaulted.load(std::memory_order_seq_cst)
                             ? AudioMode::Faulted
                             : AudioMode::Running;
-      if (audioMode.compare_exchange_weak(mode, next,
-                                          std::memory_order_seq_cst,
+      if (audioMode.compare_exchange_weak(mode, next, std::memory_order_seq_cst,
                                           std::memory_order_seq_cst))
         return;
     }
@@ -908,11 +907,11 @@ struct Runtime {
     const auto n = samples.load(), b = blocks.load();
     auto *e = active.load();
     const auto dspMode = audioMode.load(std::memory_order_seq_cst);
-    s << "Daemon: " << pw_filter_state_as_string(state)
-      << "\nDSP state: "
+    s << "Daemon: " << pw_filter_state_as_string(state) << "\nDSP state: "
       << (dspMode == AudioMode::Faulted
               ? "paused (plugin latency refresh failed; output silence)"
-              : dspMode == AudioMode::Running ? "running" : "quiescing")
+          : dspMode == AudioMode::Running ? "running"
+                                          : "quiescing")
       << "\nSelected device: " << device.name << "\nCapture node: " << device.id
       << " (" << device.description
       << ")\nVirtual microphone: SkyAPO Virtual Mic\nVirtual node: "
