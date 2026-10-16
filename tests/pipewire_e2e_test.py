@@ -725,6 +725,8 @@ def main():
                         rebuilt_fault_status = result.stdout
                         if (result.returncode == 0 and
                                 "Quantum: 512" in rebuilt_fault_status and
+                                "DSP engine format: 48000 Hz, max block 512"
+                                in rebuilt_fault_status and
                                 "DSP state: paused (plugin latency refresh failed; "
                                 "output silence)" in rebuilt_fault_status):
                             break

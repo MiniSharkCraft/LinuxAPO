@@ -596,12 +596,6 @@ struct Runtime {
       out[c] =
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
-    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
-      for (unsigned c = 0; c < r.channels; ++c)
-        if (out[c])
-          std::fill_n(out[c], frames, 0.0f);
-      return;
-    }
     Engine *engine = r.active.load(std::memory_order_seq_cst);
     Engine *nextEngine = r.pending.load(std::memory_order_seq_cst);
     if (!engine || engine->sampleRate() != hz ||
@@ -614,6 +608,12 @@ struct Runtime {
       if (!engine || engine->sampleRate() != hz ||
           engine->maxFrames() != frames || rateChanged || quantumChanged)
         pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.rateEvent);
+      return;
+    }
+    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
+      for (unsigned c = 0; c < r.channels; ++c)
+        if (out[c])
+          std::fill_n(out[c], frames, 0.0f);
       return;
     }
     double raw = 0, processed = 0;
@@ -943,6 +943,11 @@ struct Runtime {
       s << rate.load() << " Hz";
     else
       s << "unknown (awaiting graph)";
+    s << "\nDSP engine format: ";
+    if (e)
+      s << e->sampleRate() << " Hz, max block " << e->maxFrames();
+    else
+      s << "uninitialized";
     s << "\nQuantum: ";
     if (quantum.load())
       s << quantum.load();
