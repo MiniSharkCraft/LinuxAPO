@@ -121,6 +121,13 @@ def main():
     if len(sys.argv) != 2:
         raise RuntimeError("usage: package_smoke_test.py PKGDIR")
     root = pathlib.Path(sys.argv[1])
+    daemon_path = root / "usr/bin/skyapod"
+    if daemon_path.is_file():
+        daemon = daemon_path.read_bytes()
+        if b"SKYAPO_TEST_" in daemon:
+            raise RuntimeError(
+                "production daemon contains a test-only runtime hook"
+            )
     required = [
         "usr/bin/skyapo",
         "usr/bin/skyapod",

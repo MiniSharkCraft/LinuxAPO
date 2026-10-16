@@ -104,6 +104,10 @@ public:
   bool pluginLatencyRefreshPending() const noexcept;
   // Control-thread only; realtime callbacks must be quiesced and drained.
   unsigned refreshPluginLatencies();
+  // Control-thread only. Prime a candidate plugin graph with one silent block,
+  // apply any resulting latency update, and reject it unless its PDC plan and
+  // plugin instances are safe to publish.
+  void validateForActivation();
   // Control-thread only: caller must quiesce the audio graph first.
   unsigned savePersistentPluginStates();
   void setPluginParameter(const std::string &pluginId,
@@ -166,6 +170,10 @@ private:
   std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
+  // A failed dynamic-latency refresh may have changed plugin internals even
+  // though the PDC schedule itself is transactional. Do not process that graph
+  // again; a successfully loaded configuration creates the recovery boundary.
+  bool latencyPlanValid{true};
   unsigned allChannelCount{};
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
 };

@@ -1,4 +1,5 @@
 #include "Runtime.h"
+#include "RuntimeAudioGate.h"
 #include "TransitionMetricsGeneration.h"
 #include "../platform/PlatformChannels.h"
 #include "../platform/RealtimeAudit.h"
@@ -120,7 +121,7 @@ struct Runtime {
   bool ownsSocket = false;
   bool cleaning = false;
   bool initialized = false;
-  enum class AudioMode : unsigned { Running, Quiescing, Stopping };
+  using AudioMode = skyapo::pipewire::AudioGateMode;
   std::array<void *, MaxChannels> inputs{}, outputs{};
   std::array<uint32_t, MaxChannels> ownInputs{};
   std::array<pw_proxy *, MaxChannels> links{};
@@ -143,11 +144,18 @@ struct Runtime {
   std::atomic<Engine *> pending{nullptr};
   std::atomic<unsigned> callbacksInFlight{0};
   std::atomic<AudioMode> audioMode{AudioMode::Running};
+  // A failed latency refresh can leave plugin-internal latency changed even
+  // though the PDC schedule stayed transactional. Keep the daemon alive but
+  // publish silence until a validated configuration installs a fresh Engine.
+  std::atomic<bool> pluginLatencyFaulted{false};
   std::atomic<bool> transitionComplete{false};
   std::atomic<bool> pluginLatencyEventQueued{false};
   // A queued completion event can outlive its graph; this prevents it from
   // resetting telemetry for a more recently installed graph.
   skyapo::pipewire::TransitionMetricsGeneration transitionMetrics;
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+  std::atomic<bool> testDeferPluginLatencyEvent{false};
+#endif
   unsigned transitionCounter{};
   unsigned transitionLength{};
   unsigned transitionDurationMs{10};
@@ -176,6 +184,12 @@ struct Runtime {
         throw std::runtime_error(
             "SKYAPO_TEST_TRANSITION_MS must be an integer from 10 to 5000");
       transitionDurationMs = static_cast<unsigned>(parsed);
+    }
+    if (const char *value = std::getenv("SKYAPO_TEST_DEFER_PDC_EVENT")) {
+      if (std::strcmp(value, "1") != 0)
+        throw std::runtime_error(
+            "SKYAPO_TEST_DEFER_PDC_EVENT must be exactly 1");
+      testDeferPluginLatencyEvent.store(true, std::memory_order_relaxed);
     }
 #endif
   }
@@ -237,6 +251,31 @@ struct Runtime {
     if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
       retiredEngines.clear();
   }
+  void publishValidatedTransition() {
+    Engine *next = pending.load(std::memory_order_seq_cst);
+    if (!next || !pendingEngine || pendingEngine.get() != next)
+      throw std::runtime_error(
+          "validated DSP transition no longer matches its pending Engine");
+    if (activeEngine)
+      retiredEngines.push_back(std::move(activeEngine));
+    activeEngine = std::move(pendingEngine);
+    active.store(activeEngine.get(), std::memory_order_seq_cst);
+    pending.store(nullptr, std::memory_order_seq_cst);
+    transitionCounter = 0;
+    transitionLength = 0;
+    transitionComplete.store(false, std::memory_order_seq_cst);
+    transitionMetrics.graphReplaced();
+    reclaimRetired();
+  }
+  void discardPendingTransitionAfterDrain() noexcept {
+    pending.store(nullptr, std::memory_order_seq_cst);
+    pendingEngine.reset();
+    transitionCounter = 0;
+    transitionLength = 0;
+    transitionComplete.store(false, std::memory_order_seq_cst);
+    transitionMetrics.graphReplaced();
+    reclaimRetired();
+  }
   void waitForTransition() {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
@@ -258,12 +297,28 @@ struct Runtime {
     audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
     if (waitForCallbacksToDrain())
       return true;
-    audioMode.store(AudioMode::Running, std::memory_order_seq_cst);
+    resumeAudio();
     return false;
   }
   void resumeAudio() noexcept {
-    if (audioMode.load(std::memory_order_seq_cst) != AudioMode::Stopping)
-      audioMode.store(AudioMode::Running, std::memory_order_seq_cst);
+    auto mode = audioMode.load(std::memory_order_seq_cst);
+    while (mode != AudioMode::Stopping) {
+      const auto next = skyapo::pipewire::resumeAudioGate(
+          mode, pluginLatencyFaulted.load(std::memory_order_seq_cst),
+          pluginLatencyEventQueued.load(std::memory_order_seq_cst));
+      if (audioMode.compare_exchange_weak(mode, next, std::memory_order_seq_cst,
+                                          std::memory_order_seq_cst)) {
+        // Close the race where a callback publishes Quiescing between our
+        // flag load and a same-value Quiescing->Running CAS.
+        if (next == AudioMode::Running &&
+            (pluginLatencyFaulted.load(std::memory_order_seq_cst) ||
+             pluginLatencyEventQueued.load(std::memory_order_seq_cst))) {
+          mode = AudioMode::Running;
+          continue;
+        }
+        return;
+      }
+    }
   }
   void buildEngine(unsigned hz, unsigned blockFrames) {
     if (hz < 8000 || hz > 384000)
@@ -308,19 +363,58 @@ struct Runtime {
     // overwrite them with a fresh snapshot. If corrupt state/plugin load is
     // rejected, this candidate fails and the active graph and bytes survive.
     auto engine = createEngine();
-    const auto saved = saveCurrentPluginStates();
-    if (saved)
-      std::cerr << "skyapod: saved state for " << saved
-                << " plugin instance(s) before graph rebuild\n";
-    if (saved)
-      engine = createEngine();
+    const bool recoveringFaultedLatency =
+        pluginLatencyFaulted.load(std::memory_order_seq_cst);
+    if (!recoveringFaultedLatency) {
+      const auto saved = saveCurrentPluginStates();
+      if (saved)
+        std::cerr << "skyapod: saved state for " << saved
+                  << " plugin instance(s) before graph rebuild\n";
+      if (saved)
+        engine = createEngine();
+    }
     configWatcher->update(engine->configFiles());
-    installEngine(std::move(engine));
+    // Drain callbacks before sampling the latency state. A callback that was
+    // already processing when PipeWire renegotiated may queue PDC validation
+    // while this replacement is being built; after the drain, no callback can
+    // create a new request until the audio gate is reopened.
+    if (!quiesceAndDrain())
+      throw std::runtime_error(
+          "timed out draining callbacks for PipeWire format rebuild");
+    const bool pdcValidationUnresolved =
+        skyapo::pipewire::pdcFormatRebuildMustRemainFaulted(
+            pluginLatencyFaulted.load(std::memory_order_seq_cst),
+            pluginLatencyEventQueued.load(std::memory_order_seq_cst));
+    if (pdcValidationUnresolved) {
+      // Neither a known fault nor an event whose PDC validation has not run is
+      // cleared by format negotiation. Keep the replacement silent until an
+      // explicit config reload validates a fresh Engine and its plugin state.
+      if (!pluginLatencyFaulted.load(std::memory_order_seq_cst)) {
+        pluginLatencyError =
+            "PipeWire format changed while plugin latency validation was "
+            "pending; reload configuration to validate PDC recovery";
+        pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
+      }
+      installEngine(std::move(engine), true);
+      audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      // E2E-only ordering control: deliver a deliberately withheld event only
+      // after the replacement graph has crossed the format-rebuild boundary.
+      if (pluginLatencyEventQueued.load(std::memory_order_seq_cst) &&
+          testDeferPluginLatencyEvent.exchange(false,
+                                               std::memory_order_seq_cst))
+        pw_loop_signal_event(pw_main_loop_get_loop(main), pluginLatencyEvent);
+#endif
+    } else {
+      installEngine(std::move(engine));
+      resumeAudio();
+    }
     auto *pointer = active.load(std::memory_order_acquire);
     std::cerr << "skyapod: DSP ready at " << hz << " Hz, " << channels
               << " channels, " << pointer->filterCount() << " filters\n";
   }
-  void installEngine(std::unique_ptr<Engine> replacement) {
+  void installEngine(std::unique_ptr<Engine> replacement,
+                     bool forceImmediate = false) {
     promoteCompletedTransition();
     if (pendingEngine || pending.load(std::memory_order_seq_cst))
       throw std::runtime_error("another DSP graph transition is still active");
@@ -331,7 +425,7 @@ struct Runtime {
     // including hard swaps after a PipeWire format change.
     const auto generation = transitionMetrics.graphReplaced();
     auto *current = active.load(std::memory_order_seq_cst);
-    if (current && sameFormat(*current, *replacement)) {
+    if (current && sameFormat(*current, *replacement) && !forceImmediate) {
       // Keep both owners on the control thread. The callback only reads the
       // published raw pointer and never destroys or mutates ownership.
       retiredEngines.reserve(retiredEngines.size() + 1);
@@ -354,6 +448,20 @@ struct Runtime {
     active.store(pointer, std::memory_order_seq_cst);
     activeEngine = std::move(replacement);
     reclaimRetired();
+  }
+  void recoverFaultedLatency(std::unique_ptr<Engine> replacement) {
+    // Validate the unpublished plugin/PDC state before crossing the recovery
+    // boundary. Any latency notification, unsafe budget or allocation failure
+    // leaves the currently published silence latch untouched.
+    replacement->validateForActivation();
+    if (!quiesceAndDrain())
+      throw std::runtime_error(
+          "timed out draining callbacks before plugin-latency recovery");
+    installEngine(std::move(replacement), true);
+    pluginLatencyError.clear();
+    pluginLatencyFaulted.store(false, std::memory_order_seq_cst);
+    resetMetrics.store(true, std::memory_order_release);
+    resumeAudio();
   }
   bool waitForCallbacksToDrain() {
     const auto deadline =
@@ -457,15 +565,22 @@ struct Runtime {
       configWatcher->extend(error.attemptedFiles());
       throw;
     }
-    const auto saved = saveCurrentPluginStates();
-    if (saved)
-      std::cerr << "skyapod: saved state for " << saved
-                << " plugin instance(s) before config reload\n";
-    if (saved)
-      replacement = createEngine();
+    const bool recoveringFaultedLatency =
+        pluginLatencyFaulted.load(std::memory_order_seq_cst);
+    if (!recoveringFaultedLatency) {
+      const auto saved = saveCurrentPluginStates();
+      if (saved)
+        std::cerr << "skyapod: saved state for " << saved
+                  << " plugin instance(s) before config reload\n";
+      if (saved)
+        replacement = createEngine();
+    }
     configWatcher->update(replacement->configFiles());
     const unsigned count = replacement->filterCount();
-    installEngine(std::move(replacement));
+    if (recoveringFaultedLatency)
+      recoverFaultedLatency(std::move(replacement));
+    else
+      installEngine(std::move(replacement));
     resetMetrics.store(true, std::memory_order_release);
     configError.clear();
     std::cerr << "skyapod: config reload succeeded (" << count << " filters)\n";
@@ -508,6 +623,20 @@ struct Runtime {
       r.resetMetrics.store(true, std::memory_order_release);
     }
   }
+  static void requestPluginLatencyRefresh(Runtime &r) noexcept {
+    // Publish the unresolved gate before quiescing. A control-thread rebuild
+    // racing this callback must see the queued validation in resumeAudio().
+    bool expected = false;
+    const bool queued = r.pluginLatencyEventQueued.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
+    r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    if (queued)
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      if (!r.testDeferPluginLatencyEvent.load(std::memory_order_seq_cst))
+#endif
+        pw_loop_signal_event(pw_main_loop_get_loop(r.main),
+                             r.pluginLatencyEvent);
+  }
   static void process(void *data, spa_io_position *position) {
     realtime::Scope audit;
     auto &r = *static_cast<Runtime *>(data);
@@ -547,7 +676,16 @@ struct Runtime {
       out[c] =
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
-    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
+    // Check quiescence before dereferencing any Engine pointer. A control
+    // thread may have drained callbacks and replaced owners after publishing
+    // Quiescing; later callbacks must only write silence until it resumes.
+    if (skyapo::pipewire::audioOutputMustBeSilent(
+            r.audioMode.load(std::memory_order_seq_cst),
+            r.pluginLatencyEventQueued.load(std::memory_order_seq_cst))) {
+      const bool rateChanged = r.requestedRate.exchange(hz) != hz;
+      const bool quantumChanged = r.requestedQuantum.exchange(frames) != frames;
+      if (rateChanged || quantumChanged)
+        pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.rateEvent);
       for (unsigned c = 0; c < r.channels; ++c)
         if (out[c])
           std::fill_n(out[c], frames, 0.0f);
@@ -568,6 +706,7 @@ struct Runtime {
       return;
     }
     double raw = 0, processed = 0;
+    bool latencyRefreshPending = false;
     for (uint64_t offset = 0; offset < frames; offset += MaxFrames) {
       const unsigned n = std::min<uint64_t>(MaxFrames, frames - offset);
       for (unsigned f = 0; f < n; ++f)
@@ -580,6 +719,14 @@ struct Runtime {
         r.transitionCounter = engine->processTransitionTo(
             *nextEngine, r.work.data(), n, r.transitionCounter,
             r.transitionLength);
+        // A transition executes both configurations. Neither blended output
+        // is safe to publish when either plugin reports a latency change.
+        if (engine->pluginLatencyRefreshPending() ||
+            nextEngine->pluginLatencyRefreshPending()) {
+          latencyRefreshPending = true;
+          requestPluginLatencyRefresh(r);
+          break;
+        }
         if (r.transitionCounter >= r.transitionLength) {
           engine = nextEngine;
           r.active.store(engine, std::memory_order_seq_cst);
@@ -593,6 +740,11 @@ struct Runtime {
         }
       } else {
         engine->process(r.work.data(), n);
+        if (engine->pluginLatencyRefreshPending()) {
+          latencyRefreshPending = true;
+          requestPluginLatencyRefresh(r);
+          break;
+        }
       }
       for (unsigned f = 0; f < n; ++f)
         for (unsigned c = 0; c < r.channels; ++c) {
@@ -601,6 +753,24 @@ struct Runtime {
             out[c][offset + f] = s;
           processed += double(s) * s;
         }
+    }
+    if (!latencyRefreshPending) {
+      Engine *processedEngine = r.active.load(std::memory_order_seq_cst);
+      Engine *pendingEngine = r.pending.load(std::memory_order_seq_cst);
+      if ((processedEngine && processedEngine->pluginLatencyRefreshPending()) ||
+          (pendingEngine && pendingEngine->pluginLatencyRefreshPending())) {
+        latencyRefreshPending = true;
+        requestPluginLatencyRefresh(r);
+      }
+    }
+    if (latencyRefreshPending) {
+      // Earlier chunks (if an oversized PipeWire block was split) may already
+      // have been copied. Clear the complete PipeWire output quantum before
+      // returning, so no stale-PDC samples escape at this boundary.
+      for (unsigned c = 0; c < r.channels; ++c)
+        if (out[c])
+          std::fill_n(out[c], frames, 0.0f);
+      processed = 0;
     }
     r.rawSum += raw;
     r.processedSum += processed;
@@ -614,25 +784,6 @@ struct Runtime {
       r.maxNs.store(elapsed, std::memory_order_relaxed);
     if (hz && elapsed > frames * 1000000000 / hz)
       r.overruns.fetch_add(1, std::memory_order_relaxed);
-
-    // A plugin may report a changed latency at the end of run(). Its new DSP
-    // delay applies to subsequent blocks, so stop processing at this block
-    // boundary and let the control loop rebuild the PDC schedule while audio
-    // callbacks are drained. The quiescing callback path writes silence; it
-    // does not allocate, inspect files, or wait for the control loop.
-    if (!r.pending.load(std::memory_order_seq_cst)) {
-      Engine *processed = r.active.load(std::memory_order_seq_cst);
-      if (processed && processed->pluginLatencyRefreshPending()) {
-        bool expected = false;
-        if (r.pluginLatencyEventQueued.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel,
-                std::memory_order_relaxed)) {
-          r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
-          pw_loop_signal_event(pw_main_loop_get_loop(r.main),
-                               r.pluginLatencyEvent);
-        }
-      }
-    }
   }
   static void stateChanged(void *data, pw_filter_state old,
                            pw_filter_state state, const char *error) {
@@ -648,12 +799,11 @@ struct Runtime {
   }
   static void refreshPluginLatency(Runtime &r) {
     r.reclaimRetired();
-    if (r.pending.load(std::memory_order_seq_cst)) {
-      r.resumeAudio();
-      return;
-    }
     auto *engine = r.active.load(std::memory_order_seq_cst);
-    if (!engine || !engine->pluginLatencyRefreshPending()) {
+    auto *nextEngine = r.pending.load(std::memory_order_seq_cst);
+    const bool transitionPending = nextEngine != nullptr;
+    if ((!engine || !engine->pluginLatencyRefreshPending()) &&
+        (!nextEngine || !nextEngine->pluginLatencyRefreshPending())) {
       r.resumeAudio();
       return;
     }
@@ -666,7 +816,22 @@ struct Runtime {
     try {
       r.reclaimRetired();
       engine = r.active.load(std::memory_order_seq_cst);
-      const unsigned count = engine ? engine->refreshPluginLatencies() : 0;
+      nextEngine = r.pending.load(std::memory_order_seq_cst);
+      unsigned count = 0;
+      if (nextEngine) {
+        // A crossfade has no safe partial outcome. Validate both graphs on
+        // the control thread while callbacks are drained, then publish the
+        // candidate at this synchronization boundary. Any validation failure
+        // leaves audio silenced and is handled by the fail-closed path below.
+        if (engine)
+          engine->validateForActivation();
+        nextEngine->validateForActivation();
+        r.publishValidatedTransition();
+        r.pluginLatencyError.clear();
+        r.resetMetrics.store(true, std::memory_order_release);
+      } else {
+        count = engine ? engine->refreshPluginLatencies() : 0;
+      }
       if (count) {
         r.pluginLatencyRefreshes += count;
         r.pluginLatencyError.clear();
@@ -678,10 +843,22 @@ struct Runtime {
       r.pluginLatencyError = e.what();
       std::cerr << "skyapod: plugin latency refresh failed: "
                 << r.pluginLatencyError << '\n';
-      // A failed PDC rebuild can leave part of the graph with its new delay
-      // while the remaining nodes still use the old schedule. Keep the audio
-      // path quiesced and stop rather than resume with channel misalignment.
-      r.fail(r.pluginLatencyError);
+      // Plugin-internal state cannot be portably rolled back, but the core
+      // leaves every live PDC ring untouched. Stay quiesced and preserve the
+      // daemon control socket so a valid config reload can install a fresh
+      // graph without processing misaligned audio.
+      if (transitionPending)
+        r.discardPendingTransitionAfterDrain();
+      r.pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
+      r.audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+      return;
+    } catch (...) {
+      r.pluginLatencyError =
+          "unknown non-standard exception during plugin latency refresh";
+      if (transitionPending)
+        r.discardPendingTransitionAfterDrain();
+      r.pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
+      r.audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
       return;
     }
     r.resumeAudio();
@@ -862,7 +1039,12 @@ struct Runtime {
     std::ostringstream s;
     const auto n = samples.load(), b = blocks.load();
     auto *e = active.load();
-    s << "Daemon: " << pw_filter_state_as_string(state)
+    const auto dspMode = audioMode.load(std::memory_order_seq_cst);
+    s << "Daemon: " << pw_filter_state_as_string(state) << "\nDSP state: "
+      << (dspMode == AudioMode::Faulted
+              ? "paused (plugin latency refresh failed; output silence)"
+          : dspMode == AudioMode::Running ? "running"
+                                          : "quiescing")
       << "\nSelected device: " << device.name << "\nCapture node: " << device.id
       << " (" << device.description
       << ")\nVirtual microphone: SkyAPO Virtual Mic\nVirtual node: "
@@ -873,6 +1055,9 @@ struct Runtime {
       << "\nFormat rebuilds during transition: "
       << formatRebuildsDuringTransition
       << "\nPlugin latency refreshes: " << pluginLatencyRefreshes
+      << "\nPlugin latency validation queued: "
+      << (pluginLatencyEventQueued.load(std::memory_order_seq_cst) ? "yes"
+                                                                   : "no")
       << "\nChannel positions:";
     for (auto &p : ports)
       s << ' ' << p.channel;
@@ -881,6 +1066,11 @@ struct Runtime {
       s << rate.load() << " Hz";
     else
       s << "unknown (awaiting graph)";
+    s << "\nDSP engine format: ";
+    if (e)
+      s << e->sampleRate() << " Hz, max block " << e->maxFrames();
+    else
+      s << "uninitialized";
     s << "\nQuantum: ";
     if (quantum.load())
       s << quantum.load();

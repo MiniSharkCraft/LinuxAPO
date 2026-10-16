@@ -2,6 +2,7 @@
 #include "../src/platform/RealtimeAudit.h"
 #include "Engine.h"
 #include "../src/pipewire/TransitionMetricsGeneration.h"
+#include "../src/pipewire/RuntimeAudioGate.h"
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -13,6 +14,36 @@
 extern "C" void *__wrap_malloc(size_t);
 extern "C" void __wrap_free(void *);
 int main() {
+  {
+    using skyapo::pipewire::AudioGateMode;
+    using skyapo::pipewire::audioOutputMustBeSilent;
+    using skyapo::pipewire::pdcFormatRebuildMustRemainFaulted;
+    using skyapo::pipewire::resumeAudioGate;
+    const bool queuedRefreshMustLatchFault =
+        pdcFormatRebuildMustRemainFaulted(false, true);
+    const auto afterQueuedRefreshCompletes = resumeAudioGate(
+        AudioGateMode::Quiescing, queuedRefreshMustLatchFault, false);
+    if (resumeAudioGate(AudioGateMode::Quiescing, false, true) !=
+            AudioGateMode::Quiescing ||
+        resumeAudioGate(AudioGateMode::Running, false, true) !=
+            AudioGateMode::Quiescing ||
+        !queuedRefreshMustLatchFault ||
+        afterQueuedRefreshCompletes != AudioGateMode::Faulted ||
+        !audioOutputMustBeSilent(afterQueuedRefreshCompletes, false) ||
+        pdcFormatRebuildMustRemainFaulted(false, false) ||
+        resumeAudioGate(AudioGateMode::Running, true, false) !=
+            AudioGateMode::Faulted ||
+        resumeAudioGate(AudioGateMode::Stopping, false, true) !=
+            AudioGateMode::Stopping ||
+        resumeAudioGate(AudioGateMode::Quiescing, false, false) !=
+            AudioGateMode::Running ||
+        !audioOutputMustBeSilent(AudioGateMode::Running, true) ||
+        audioOutputMustBeSilent(AudioGateMode::Running, false) ||
+        !audioOutputMustBeSilent(AudioGateMode::Faulted, false)) {
+      std::cerr << "audio resume policy reopened a queued PDC refresh\n";
+      return 1;
+    }
+  }
   {
     skyapo::pipewire::TransitionMetricsGeneration generations;
     const auto first = generations.graphReplaced();

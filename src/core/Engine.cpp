@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "PdcAllocationTestHook.h"
 #include "DevicePatternMatcher.h"
 #include "../plugin/IPluginFailureState.h"
 #include "../plugin/IPluginBypassControl.h"
@@ -62,6 +63,8 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
+#include <variant>
 #ifdef SKYAPO_HAVE_MUPARSERX
 #include <mpPackageCommon.h>
 #include <mpPackageNonCmplx.h>
@@ -146,6 +149,12 @@ private:
 
 class PdcAlignmentFilter final : public IFilter {
 public:
+  struct Prepared {
+    PdcAlignmentFilter *filter{};
+    std::vector<uint32_t> delays;
+    std::vector<std::vector<float>> replacementRings;
+  };
+
   explicit PdcAlignmentFilter(std::vector<unsigned> channels)
       : channels_(std::move(channels)) {}
 
@@ -159,8 +168,8 @@ public:
     cursors_.assign(names.size(), 0);
     return names;
   }
-  void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
+  Prepared prepare(const std::vector<uint64_t> &arrival,
+                   std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     uint64_t latest = 0;
     for (const unsigned channel : channels_)
       if (channel < arrival.size())
@@ -171,14 +180,34 @@ public:
         continue;
       accountPdcRing(plannedRingSamples, latest - arrival[channel]);
     }
+    Prepared prepared;
+    prepared.filter = this;
+    prepared.delays = delays_;
+    prepared.replacementRings.resize(delays_.size());
     for (const unsigned channel : channels_) {
       if (channel >= delays_.size() || channel >= arrival.size())
         continue;
       const auto difference = static_cast<uint32_t>(latest - arrival[channel]);
-      setDelay(channel, static_cast<uint32_t>(difference));
+      if (delays_[channel] != difference) {
+        prepared.delays[channel] = difference;
+        skyapo::testing::beforePdcRingAllocationForTesting();
+        prepared.replacementRings[channel].assign(difference, 0.0f);
+        skyapo::testing::recordPdcRingAllocationForTesting(difference);
+      }
       updated[channel] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+    return prepared;
+  }
+  static void commit(Prepared &&prepared) noexcept {
+    auto &filter = *prepared.filter;
+    for (size_t channel = 0; channel < prepared.delays.size(); ++channel) {
+      if (filter.delays_[channel] == prepared.delays[channel])
+        continue;
+      filter.rings_[channel].swap(prepared.replacementRings[channel]);
+      filter.delays_[channel] = prepared.delays[channel];
+      filter.cursors_[channel] = 0;
+    }
   }
   uint64_t ringCapacitySamples() const noexcept {
     uint64_t samples = 0;
@@ -206,18 +235,6 @@ public:
   }
 
 private:
-  void setDelay(unsigned channel, uint32_t delay) {
-    if (delays_[channel] == delay)
-      return;
-    // Latency refresh runs on the control thread while callbacks are quiesced.
-    // Replace rather than assign so shrinking compensation releases the old
-    // allocation instead of retaining an unbudgeted historical capacity.
-    std::vector<float> replacement(delay, 0.0f);
-    rings_[channel].swap(replacement);
-    delays_[channel] = delay;
-    cursors_[channel] = 0;
-  }
-
   std::vector<unsigned> channels_;
   std::vector<uint32_t> delays_;
   std::vector<std::vector<float>> rings_;
@@ -226,6 +243,18 @@ private:
 
 class PdcCopyFilter final : public CopyFilter {
 public:
+  struct PreparedTerm {
+    uint32_t delay{};
+    std::vector<float> replacementRing;
+  };
+  struct PreparedTarget {
+    std::vector<PreparedTerm> terms;
+  };
+  struct Prepared {
+    PdcCopyFilter *filter{};
+    std::vector<PreparedTarget> targets;
+  };
+
   explicit PdcCopyFilter(const std::vector<Assignment> &assignments)
       : CopyFilter(assignments) {}
 
@@ -260,8 +289,8 @@ public:
     return outputs;
   }
 
-  void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
+  Prepared prepare(const std::vector<uint64_t> &arrival,
+                   std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     // Validate all fan-in delay lengths before changing any ring in this
     // filter. A rejected graph/latency update must not leave half the fan-in
     // scheduled with its previous compensation.
@@ -279,7 +308,11 @@ public:
         accountPdcRing(plannedRingSamples, latest - arrival[term.channel]);
       }
     }
-    for (auto &target : targets_) {
+    Prepared prepared;
+    prepared.filter = this;
+    prepared.targets.resize(targets_.size());
+    for (size_t targetIndex = 0; targetIndex < targets_.size(); ++targetIndex) {
+      const auto &target = targets_[targetIndex];
       uint64_t latest = 0;
       for (const auto &term : target.terms)
         if (!term.constant &&
@@ -288,25 +321,46 @@ public:
       if (target.output < 0 ||
           static_cast<size_t>(target.output) >= updated.size())
         continue;
-      for (auto &term : target.terms) {
+      auto &preparedTarget = prepared.targets[targetIndex];
+      preparedTarget.terms.resize(target.terms.size());
+      for (size_t termIndex = 0; termIndex < target.terms.size(); ++termIndex) {
+        const auto &term = target.terms[termIndex];
         uint32_t delay = 0;
         if (!term.constant &&
             static_cast<size_t>(term.channel) < arrival.size()) {
           const uint64_t difference = latest - arrival[term.channel];
           delay = static_cast<uint32_t>(difference);
         }
+        auto &preparedTerm = preparedTarget.terms[termIndex];
+        preparedTerm.delay = delay;
         if (term.delay != delay) {
-          // This is control-thread graph maintenance, not the audio callback.
-          // Swap drops stale capacity when dynamic latency decreases.
-          std::vector<float> replacement(delay, 0.0f);
-          term.ring.swap(replacement);
-          term.delay = delay;
-          term.cursor = 0;
+          skyapo::testing::beforePdcRingAllocationForTesting();
+          preparedTerm.replacementRing.assign(delay, 0.0f);
+          skyapo::testing::recordPdcRingAllocationForTesting(delay);
         }
       }
       updated[target.output] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+    return prepared;
+  }
+  static void commit(Prepared &&prepared) noexcept {
+    auto &filter = *prepared.filter;
+    for (size_t targetIndex = 0; targetIndex < prepared.targets.size();
+         ++targetIndex) {
+      auto &target = filter.targets_[targetIndex];
+      auto &preparedTarget = prepared.targets[targetIndex];
+      for (size_t termIndex = 0; termIndex < preparedTarget.terms.size();
+           ++termIndex) {
+        auto &term = target.terms[termIndex];
+        auto &preparedTerm = preparedTarget.terms[termIndex];
+        if (term.delay == preparedTerm.delay)
+          continue;
+        term.ring.swap(preparedTerm.replacementRing);
+        term.delay = preparedTerm.delay;
+        term.cursor = 0;
+      }
+    }
   }
 
   uint64_t ringCapacitySamples() const noexcept {
@@ -737,6 +791,7 @@ void Engine::loadConfig(const std::string &path) {
   loadedConfigFiles.swap(configFiles);
   loadedConfigNotices.swap(notices);
   fixedBlock = newFixedBlock;
+  latencyPlanValid = true;
 }
 
 std::vector<Engine::FilterNode> Engine::buildGraph(
@@ -999,7 +1054,11 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
 
 void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
                             unsigned laneCount) const {
+  using PreparedPdcUpdate =
+      std::variant<PdcAlignmentFilter::Prepared, PdcCopyFilter::Prepared>;
   std::vector<uint64_t> arrival(laneCount, 0);
+  std::vector<PreparedPdcUpdate> preparedUpdates;
+  preparedUpdates.reserve(nodes.size());
   uint64_t pdcRingSamples = 0;
   for (const auto &node : nodes) {
     if (node.fixedBufferSamples > MaxPdcRingSamples - pdcRingSamples)
@@ -1019,13 +1078,15 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
       if (!alignment)
         throw std::runtime_error("invalid internal PDC alignment node");
       const auto inputArrival = arrival;
-      alignment->configure(inputArrival, arrival, pdcRingSamples);
+      preparedUpdates.emplace_back(
+          alignment->prepare(inputArrival, arrival, pdcRingSamples));
       continue;
     }
 
     if (auto *copy = dynamic_cast<PdcCopyFilter *>(node.filter)) {
       const auto inputArrival = arrival;
-      copy->configure(inputArrival, arrival, pdcRingSamples);
+      preparedUpdates.emplace_back(
+          copy->prepare(inputArrival, arrival, pdcRingSamples));
       continue;
     }
 
@@ -1060,6 +1121,20 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
       arrival[destination] = sourceLatency + nodeLatency;
     }
   }
+
+  // Allocate and validate the complete replacement schedule before touching
+  // any live alignment rings. Committing these prepared states is noexcept,
+  // so a rejected budget or allocation failure cannot leave mixed PDC delays.
+  for (auto &update : preparedUpdates)
+    std::visit(
+        [](auto &prepared) {
+          using Prepared = std::decay_t<decltype(prepared)>;
+          if constexpr (std::is_same_v<Prepared, PdcAlignmentFilter::Prepared>)
+            PdcAlignmentFilter::commit(std::move(prepared));
+          else
+            PdcCopyFilter::commit(std::move(prepared));
+        },
+        update);
 }
 
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
@@ -1416,6 +1491,10 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
 }
 
 void Engine::process(float *samples, unsigned frames) {
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency refresh failed; reload the configuration before "
+        "processing");
   if (frames > maxFrameCount)
     throw std::runtime_error("frame block exceeds configured maximum");
   if (fixedBlock && frames != maxFrameCount)
@@ -1431,6 +1510,10 @@ unsigned Engine::processTransitionTo(Engine &next, float *samples,
                                      unsigned frames,
                                      unsigned transitionCounter,
                                      unsigned transitionLength) {
+  if (!latencyPlanValid || !next.latencyPlanValid)
+    throw std::runtime_error(
+        "cannot crossfade an Engine with a failed latency refresh; reload "
+        "the configuration first");
   if (this == &next)
     throw std::invalid_argument("cannot transition an Engine to itself");
   if (rate != next.rate || channelCount != next.channelCount ||
@@ -1501,37 +1584,77 @@ bool Engine::pluginLatencyRefreshPending() const noexcept {
 }
 
 unsigned Engine::refreshPluginLatencies() {
-  unsigned refreshed = 0;
-  uint64_t updatedBypassSamples = 0;
-  uint64_t fixedDelaySamples = 0;
-  for (auto &node : graph) {
-    fixedDelaySamples += node.fixedBufferSamples;
-    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
-    if (refresh && refresh->refreshPluginLatency()) {
-      ++refreshed;
-      auto *bypass = dynamic_cast<IPluginBypassControl *>(node.filter);
-      if (!bypass)
-        throw std::runtime_error(
-            "latency-changing plugin has no host bypass-ring accounting");
-      node.pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency refresh previously failed; reload the configuration "
+        "before refreshing again");
+  try {
+    unsigned refreshed = 0;
+    uint64_t updatedBypassSamples = 0;
+    uint64_t fixedDelaySamples = 0;
+    for (auto &node : graph) {
+      fixedDelaySamples += node.fixedBufferSamples;
+      auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
+      if (refresh && refresh->refreshPluginLatency()) {
+        ++refreshed;
+        auto *bypass = dynamic_cast<IPluginBypassControl *>(node.filter);
+        if (!bypass)
+          throw std::runtime_error(
+              "latency-changing plugin has no host bypass-ring accounting");
+        node.pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+        if (fixedDelaySamples > MaxPdcRingSamples ||
+            updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
+            node.pluginBypassBufferSamples >
+                MaxPdcRingSamples - fixedDelaySamples - updatedBypassSamples)
+          throw std::runtime_error(
+              "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 "
+              "MiB per-graph realtime ring-buffer budget after latency "
+              "refresh");
+      }
+      updatedBypassSamples += node.pluginBypassBufferSamples;
       if (fixedDelaySamples > MaxPdcRingSamples ||
-          updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
-          node.pluginBypassBufferSamples >
-              MaxPdcRingSamples - fixedDelaySamples - updatedBypassSamples)
+          updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples)
         throw std::runtime_error(
-            "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
+            "plugin bypass and EAPO Delay exceed SkyAPO's shared 16 MiB "
             "per-graph realtime ring-buffer budget after latency refresh");
     }
-    updatedBypassSamples += node.pluginBypassBufferSamples;
-    if (fixedDelaySamples > MaxPdcRingSamples ||
-        updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples)
-      throw std::runtime_error(
-          "plugin bypass and EAPO Delay exceed SkyAPO's shared 16 MiB "
-          "per-graph realtime ring-buffer budget after latency refresh");
+    if (refreshed)
+      rebuildPdcPlan(graph, allChannelCount);
+    return refreshed;
+  } catch (...) {
+    // Plugin lifecycle refresh cannot generally be rolled back portably. The
+    // PDC schedule is transactional, and the Engine must fail closed rather
+    // than process audio with plugin latency that no longer matches its plan.
+    latencyPlanValid = false;
+    throw;
   }
-  if (refreshed)
-    rebuildPdcPlan(graph, allChannelCount);
-  return refreshed;
+}
+
+void Engine::validateForActivation() {
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency plan is invalid; cannot activate this configuration");
+
+  // Some plugins publish their initial latency only after their first non-empty
+  // run. Prime the unpublished candidate off the realtime thread so recovery
+  // cannot briefly unmute a graph whose first block immediately invalidates
+  // its PDC schedule. The block is silence and is discarded.
+  if (pluginLatencyCompensationActive()) {
+    std::vector<float> silence(
+        static_cast<size_t>(channelCount) * maxFrameCount, 0.0f);
+    process(silence.data(), maxFrameCount);
+    if (pluginLatencyRefreshPending())
+      (void)refreshPluginLatencies();
+  }
+
+  if (!latencyPlanValid || pluginLatencyRefreshPending())
+    throw std::runtime_error(
+        "plugin latency/PDC state is not stable enough to activate");
+  const auto failures = failedPluginDescriptions();
+  if (!failures.empty())
+    throw std::runtime_error("plugin failed while validating replacement "
+                             "Engine: " +
+                             failures.front());
 }
 
 unsigned Engine::savePersistentPluginStates() {

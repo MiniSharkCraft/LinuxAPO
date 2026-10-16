@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "PdcAllocationTestHook.h"
 #include "BiQuad.h"
 #include "LoudnessVolumeProvider.h"
 #ifdef SKYAPO_TEST_CLAP
@@ -374,6 +375,151 @@ int main() {
       std::cerr << "LV2 host bypass did not preserve reported latency\n";
       return 1;
     }
+  }
+
+  std::string rejectedDynamicPdc =
+      "Channel: L\n"
+      "Plugin: LV2 https://skyapo.example/plugins/test-latency-increase\n"
+      "Channel: L R\n"
+      "Copy: L2=L";
+  for (unsigned term = 0; term < 430; ++term)
+    rejectedDynamicPdc += "+R";
+  rejectedDynamicPdc += "\n";
+  if (!write(path, rejectedDynamicPdc))
+    return 1;
+  Engine rejectedDynamicPdcEngine(48000, 2, 128, {L"L", L"R"});
+  rejectedDynamicPdcEngine.loadConfig(path);
+  const auto originalPdcBytes =
+      rejectedDynamicPdcEngine.knownAudioBufferPayload().pdcRingCapacityBytes;
+  float triggerLatencyChange[16]{};
+  triggerLatencyChange[0] = 0.25f;
+  rejectedDynamicPdcEngine.process(triggerLatencyChange, 8);
+  bool rejectedDynamicPdcRefresh = false;
+  try {
+    (void)rejectedDynamicPdcEngine.refreshPluginLatencies();
+  } catch (const std::exception &error) {
+    rejectedDynamicPdcRefresh =
+        std::string(error.what())
+            .find("shared 16 MiB per-graph realtime ring-buffer budget") !=
+        std::string::npos;
+    if (!rejectedDynamicPdcRefresh)
+      std::cerr << "unexpected dynamic PDC refresh error: " << error.what()
+                << '\n';
+  }
+  if (!rejectedDynamicPdcRefresh || originalPdcBytes == 0 ||
+      rejectedDynamicPdcEngine.knownAudioBufferPayload().pdcRingCapacityBytes !=
+          originalPdcBytes) {
+    std::cerr << "failed dynamic PDC rebuild changed live ring allocations"
+              << " (before=" << originalPdcBytes << ", after="
+              << rejectedDynamicPdcEngine.knownAudioBufferPayload()
+                     .pdcRingCapacityBytes
+              << ")\n";
+    return 1;
+  }
+  bool rejectedEngineProcess = false;
+  try {
+    rejectedDynamicPdcEngine.process(triggerLatencyChange, 8);
+  } catch (const std::exception &error) {
+    rejectedEngineProcess =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!rejectedEngineProcess || triggerLatencyChange[0] != 0.25f) {
+    std::cerr << "Engine processed audio after an uncommittable latency plan\n";
+    return 1;
+  }
+
+  if (!write(path, "Channel: L\n"
+                   "Plugin: LV2 https://skyapo.example/plugins/"
+                   "test-latency-increase\n"
+                   "Channel: L R\n"
+                   "Copy: L2=L+R\n"
+                   "Copy: R2=R+L\n"))
+    return 1;
+  Engine allocationFailureEngine(48000, 2, 128, {L"L", L"R"});
+  allocationFailureEngine.loadConfig(path);
+  const auto originalAllocationFailurePdcBytes =
+      allocationFailureEngine.knownAudioBufferPayload().pdcRingCapacityBytes;
+  if (originalAllocationFailurePdcBytes == 0) {
+    std::cerr
+        << "PDC allocation-failure fixture did not create initial rings\n";
+    return 1;
+  }
+  float triggerAllocationFailure[16]{};
+  triggerAllocationFailure[0] = 0.375f;
+  allocationFailureEngine.process(triggerAllocationFailure, 8);
+  skyapo::testing::failPdcAllocationAfterForTesting(1);
+  bool caughtPdcAllocationFailure = false;
+  try {
+    (void)allocationFailureEngine.refreshPluginLatencies();
+  } catch (const std::bad_alloc &) {
+    caughtPdcAllocationFailure = true;
+  } catch (const std::exception &error) {
+    skyapo::testing::clearPdcAllocationFailureForTesting();
+    std::cerr << "unexpected PDC allocation-failure error: " << error.what()
+              << '\n';
+    return 1;
+  }
+  const auto successfulPreparedPdcRings =
+      skyapo::testing::successfulPdcRingAllocationsForTesting();
+  skyapo::testing::clearPdcAllocationFailureForTesting();
+  if (!caughtPdcAllocationFailure || successfulPreparedPdcRings == 0 ||
+      allocationFailureEngine.knownAudioBufferPayload().pdcRingCapacityBytes !=
+          originalAllocationFailurePdcBytes) {
+    std::cerr << "PDC allocation failure did not preserve live rings after a "
+                 "successful replacement allocation (prepared="
+              << successfulPreparedPdcRings
+              << ", before=" << originalAllocationFailurePdcBytes << ", after="
+              << allocationFailureEngine.knownAudioBufferPayload()
+                     .pdcRingCapacityBytes
+              << ")\n";
+    return 1;
+  }
+  bool allocationFailureEngineClosed = false;
+  try {
+    allocationFailureEngine.process(triggerAllocationFailure, 8);
+  } catch (const std::exception &error) {
+    allocationFailureEngineClosed =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!allocationFailureEngineClosed || triggerAllocationFailure[0] != 0.375f) {
+    std::cerr << "Engine did not fail closed after PDC allocation failure\n";
+    return 1;
+  }
+
+  Engine activationAllocationFailureEngine(48000, 2, 128, {L"L", L"R"});
+  activationAllocationFailureEngine.loadConfig(path);
+  skyapo::testing::failPdcAllocationAfterForTesting(1);
+  bool activationRejectedAllocationFailure = false;
+  try {
+    activationAllocationFailureEngine.validateForActivation();
+  } catch (const std::bad_alloc &) {
+    activationRejectedAllocationFailure = true;
+  } catch (const std::exception &error) {
+    skyapo::testing::clearPdcAllocationFailureForTesting();
+    std::cerr << "unexpected recovery-candidate validation error: "
+              << error.what() << '\n';
+    return 1;
+  }
+  const auto activationPreparedPdcRings =
+      skyapo::testing::successfulPdcRingAllocationsForTesting();
+  skyapo::testing::clearPdcAllocationFailureForTesting();
+  bool activationCandidateStayedClosed = false;
+  float activationCandidateProbe[16]{};
+  try {
+    activationAllocationFailureEngine.process(activationCandidateProbe, 8);
+  } catch (const std::exception &error) {
+    activationCandidateStayedClosed =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!activationRejectedAllocationFailure || activationPreparedPdcRings == 0 ||
+      !activationCandidateStayedClosed) {
+    std::cerr << "recovery candidate passed activation after its PDC "
+                 "allocation failed (prepared="
+              << activationPreparedPdcRings << ")\n";
+    return 1;
   }
 
   if (!write(path, "Copy: L2=L R2=R\n"

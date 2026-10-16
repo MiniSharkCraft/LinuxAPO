@@ -39,8 +39,13 @@ struct Consumer {
   unsigned channels{2};
   bool expectSilent{};
   bool acceptAnyAudio{};
+  bool allowRateChanges{};
   double expectedDb{-6.0};
   unsigned expectedRate{};
+  unsigned durationMs{3000};
+  unsigned maxConsecutiveSilenceMs{};
+  unsigned maxCallbackGapMs{};
+  std::string consumerNodeName{"skyapo.test.consumer"};
   std::array<const char *, MaxChannels> channelNames{};
   std::array<void *, MaxChannels> inputs{};
   std::array<uint32_t, MaxChannels> inputIds{
@@ -63,6 +68,11 @@ struct Consumer {
   std::atomic<unsigned> zeroDurationCalls{0};
   std::atomic<unsigned> nullBufferCalls{0};
   std::atomic<int> filterState{PW_FILTER_STATE_UNCONNECTED};
+  std::array<std::atomic<uint64_t>, MaxChannels> consecutiveSilentNanoseconds{};
+  std::array<std::atomic<uint64_t>, MaxChannels> maximumSilentNanoseconds{};
+  std::atomic<bool> silenceMeasurementArmed{false};
+  std::atomic<uint64_t> previousCallbackMonotonicNanoseconds{0};
+  std::atomic<uint64_t> callbackGapViolationNanoseconds{0};
   std::vector<float> recordedLeft{};
   std::vector<float> recordedRight{};
   size_t recordedSamples{};
@@ -123,7 +133,7 @@ struct Consumer {
       const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
       if (name && std::strcmp(name, "skyapo.virtual_mic") == 0)
         c.sourceNode = id;
-      else if (name && std::strcmp(name, "skyapo.test.consumer") == 0)
+      else if (name && c.consumerNodeName == name)
         c.ownNode = id;
       else
         return;
@@ -185,12 +195,35 @@ struct Consumer {
                                                : 0;
     const auto previousRate = c.sampleRate.load(std::memory_order_relaxed);
     if (!rate || (c.expectedRate && rate != c.expectedRate) ||
-        (previousRate && previousRate != rate)) {
+        (!c.allowRateChanges && previousRate && previousRate != rate)) {
       c.invalidRateCalls.fetch_add(1, std::memory_order_relaxed);
       c.failed.store(true, std::memory_order_relaxed);
       return;
     }
     c.sampleRate.store(rate, std::memory_order_relaxed);
+    if (c.maxCallbackGapMs) {
+      timespec now{};
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        c.failed.store(true, std::memory_order_relaxed);
+      } else {
+        const auto nowNanoseconds =
+            static_cast<uint64_t>(now.tv_sec) * 1000000000ull +
+            static_cast<uint64_t>(now.tv_nsec);
+        const auto previousNanoseconds =
+            c.previousCallbackMonotonicNanoseconds.exchange(
+                nowNanoseconds, std::memory_order_relaxed);
+        if (previousNanoseconds && nowNanoseconds < previousNanoseconds) {
+          c.failed.store(true, std::memory_order_relaxed);
+        } else if (previousNanoseconds &&
+                   nowNanoseconds - previousNanoseconds >
+                       static_cast<uint64_t>(c.maxCallbackGapMs) * 1000000ull) {
+          uint64_t noViolationRecorded = 0;
+          (void)c.callbackGapViolationNanoseconds.compare_exchange_strong(
+              noViolationRecorded, nowNanoseconds - previousNanoseconds,
+              std::memory_order_relaxed);
+        }
+      }
+    }
     const uint32_t count = position->clock.duration;
     if (count == 0)
       c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
@@ -214,6 +247,47 @@ struct Consumer {
       for (uint32_t i = 0; i < count; ++i)
         blockEnergy +=
             static_cast<double>(channelData[ch][i]) * channelData[ch][i];
+    }
+    if (c.maxConsecutiveSilenceMs) {
+      constexpr float SilenceThreshold = 1.0e-7f;
+      const uint64_t frameDurationNanoseconds = 1000000000ull / rate;
+      std::array<uint64_t, MaxChannels> consecutiveSilent{};
+      std::array<uint64_t, MaxChannels> maximumSilent{};
+      for (unsigned ch = 0; ch < c.channels; ++ch) {
+        consecutiveSilent[ch] =
+            c.consecutiveSilentNanoseconds[ch].load(std::memory_order_relaxed);
+        maximumSilent[ch] =
+            c.maximumSilentNanoseconds[ch].load(std::memory_order_relaxed);
+      }
+      auto silenceMeasurementArmed =
+          c.silenceMeasurementArmed.load(std::memory_order_relaxed);
+      for (uint32_t i = 0; i < count; ++i) {
+        bool anySignal = false;
+        for (unsigned ch = 0; ch < c.channels; ++ch)
+          anySignal =
+              anySignal || std::abs(channelData[ch][i]) > SilenceThreshold;
+        if (!silenceMeasurementArmed) {
+          silenceMeasurementArmed = anySignal;
+          continue;
+        }
+        for (unsigned ch = 0; ch < c.channels; ++ch) {
+          if (std::abs(channelData[ch][i]) <= SilenceThreshold) {
+            consecutiveSilent[ch] += frameDurationNanoseconds;
+          } else {
+            maximumSilent[ch] =
+                std::max(maximumSilent[ch], consecutiveSilent[ch]);
+            consecutiveSilent[ch] = 0;
+          }
+        }
+      }
+      for (unsigned ch = 0; ch < c.channels; ++ch) {
+        c.consecutiveSilentNanoseconds[ch].store(consecutiveSilent[ch],
+                                                 std::memory_order_relaxed);
+        c.maximumSilentNanoseconds[ch].store(maximumSilent[ch],
+                                             std::memory_order_relaxed);
+      }
+      c.silenceMeasurementArmed.store(silenceMeasurementArmed,
+                                      std::memory_order_relaxed);
     }
     if (c.measureSourceLag && c.channels == 2) {
       constexpr double preampGain = 0.5011872336272722;
@@ -310,7 +384,7 @@ struct Consumer {
 
     const bool mono = channels == 1;
     auto *properties = pw_properties_new(
-        PW_KEY_NODE_NAME, "skyapo.test.consumer", PW_KEY_NODE_DESCRIPTION,
+        PW_KEY_NODE_NAME, consumerNodeName.c_str(), PW_KEY_NODE_DESCRIPTION,
         "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS, "Audio/Sink",
         PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER, "true",
         PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
@@ -348,7 +422,8 @@ struct Consumer {
     timeout = pw_loop_add_timer(pw_main_loop_get_loop(loop), finish, this);
     if (!timeout)
       throw std::runtime_error("cannot create test timer");
-    timespec duration{3, 0};
+    timespec duration{static_cast<time_t>(durationMs / 1000),
+                      static_cast<long>((durationMs % 1000) * 1000000)};
     pw_loop_update_timer(pw_main_loop_get_loop(loop), timeout, &duration,
                          nullptr, false);
     pw_main_loop_run(loop);
@@ -365,6 +440,13 @@ struct Consumer {
     pw_deinit();
 
     const auto capturedFrames = frames.load();
+    uint64_t maximumSilenceNs = 0;
+    for (unsigned ch = 0; ch < channels; ++ch)
+      maximumSilenceNs = std::max(
+          maximumSilenceNs,
+          std::max(maximumSilentNanoseconds[ch].load(std::memory_order_relaxed),
+                   consecutiveSilentNanoseconds[ch].load(
+                       std::memory_order_relaxed)));
     if (capturedFrames == 0) {
       std::fprintf(stderr,
                    "test consumer diagnostics: sourceNode=%u ownNode=%u "
@@ -384,6 +466,7 @@ struct Consumer {
     const double expected =
         InputAmplitude * std::pow(10.0, expectedDb / 20.0) / std::sqrt(2.0);
     const double ratio = expected > 0 ? rms / expected : 0.0;
+    const double maximumSilenceMs = maximumSilenceNs / 1000000.0;
     auto sortedLatency = sourceConsumerLatencyUs;
     std::sort(sortedLatency.begin(),
               sortedLatency.begin() + sourceConsumerLatencyCount);
@@ -467,6 +550,20 @@ struct Consumer {
                   "Left RMS: %.8f\nRight RMS: %.8f\n",
                   bestChannelLag, bestLagDifferenceRatio, recordedLeftRms,
                   recordedRightRms);
+    if (maxConsecutiveSilenceMs)
+      std::printf("Maximum consecutive silence: %.3f ms\n", maximumSilenceMs);
+    const auto callbackGapViolation =
+        callbackGapViolationNanoseconds.load(std::memory_order_relaxed);
+    if (maxCallbackGapMs) {
+      if (callbackGapViolation) {
+        std::printf("Process callback interval exceeded %u ms "
+                    "(observed %.3f ms)\n",
+                    maxCallbackGapMs, callbackGapViolation / 1000000.0);
+      } else {
+        std::printf("No process callback interval exceeded %u ms\n",
+                    maxCallbackGapMs);
+      }
+    }
     if (measureSourceLag)
       std::printf("Source callback to virtual-consumer callback latency: "
                   "median %u us, p95 %u us, n=%zu at %u Hz\n",
@@ -475,11 +572,18 @@ struct Consumer {
     const bool audioMatches =
         acceptAnyAudio ||
         (expectSilent ? rms < 1.0e-6 : std::abs(ratio - 1.0) < 0.03);
+    const bool continuityMatches =
+        !maxConsecutiveSilenceMs ||
+        (silenceMeasurementArmed.load(std::memory_order_relaxed) &&
+         maximumSilenceMs <= maxConsecutiveSilenceMs);
+    const bool callbackGapsWithinLimit =
+        !maxCallbackGapMs || callbackGapViolation == 0;
     const bool channelsMatch =
         !expectIdenticalChannels || channelDifferenceRatio < 0.01;
     const bool latencyMatches =
         !measureSourceLag || sourceConsumerLatencyCount >= 4;
     return !failed.load() && capturedFrames > 48000 && audioMatches &&
+                   continuityMatches && callbackGapsWithinLimit &&
                    channelsMatch && latencyMatches
                ? 0
                : 1;
@@ -495,8 +599,13 @@ int main(int argc, char **argv) {
   bool acceptAnyAudio = false;
   bool expectIdenticalChannels = false;
   bool measureSourceLag = false;
+  bool allowRateChanges = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
+  unsigned durationMs = 3000;
+  unsigned maxConsecutiveSilenceMs = 0;
+  unsigned maxCallbackGapMs = 0;
+  std::string consumerNodeName{"skyapo.test.consumer"};
   for (int arg = 1; arg < argc; ++arg) {
     const std::string option(argv[arg]);
     if (option == "--mono")
@@ -513,6 +622,8 @@ int main(int argc, char **argv) {
       expectIdenticalChannels = true;
     else if (option == "--measure-source-lag")
       measureSourceLag = true;
+    else if (option == "--allow-rate-changes")
+      allowRateChanges = true;
     else if (option == "--expected-db" && arg + 1 < argc) {
       char *end = nullptr;
       expectedDb = std::strtod(argv[++arg], &end);
@@ -528,12 +639,39 @@ int main(int argc, char **argv) {
         return 2;
       }
       expectedRate = static_cast<unsigned>(parsed);
+    } else if ((option == "--duration-ms" ||
+                option == "--max-consecutive-silence-ms" ||
+                option == "--max-callback-gap-ms") &&
+               arg + 1 < argc) {
+      char *end = nullptr;
+      const auto parsed = std::strtoul(argv[++arg], &end, 10);
+      if (end == argv[arg] || *end || parsed == 0 || parsed > 60000) {
+        std::fprintf(stderr, "test consumer: invalid %s value\n",
+                     option.c_str());
+        return 2;
+      }
+      if (option == "--duration-ms")
+        durationMs = static_cast<unsigned>(parsed);
+      else if (option == "--max-consecutive-silence-ms")
+        maxConsecutiveSilenceMs = static_cast<unsigned>(parsed);
+      else
+        maxCallbackGapMs = static_cast<unsigned>(parsed);
+    } else if (option == "--name" && arg + 1 < argc) {
+      consumerNodeName = argv[++arg];
+      if (consumerNodeName.empty()) {
+        std::fprintf(stderr, "test consumer: --name must not be empty\n");
+        return 2;
+      }
     } else {
       std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer "
                            "[--mono|--surround51|--surround71] "
                            "[--expect-silent] [--accept-any-audio] "
                            "[--expect-identical-channels] "
-                           "[--measure-source-lag] "
+                           "[--measure-source-lag] [--allow-rate-changes] "
+                           "[--duration-ms MS] "
+                           "[--max-consecutive-silence-ms MS] "
+                           "[--max-callback-gap-ms MS] "
+                           "[--name NODE] "
                            "[--expected-db DB] [--expected-rate HZ]\n");
       return 2;
     }
@@ -547,6 +685,11 @@ int main(int argc, char **argv) {
     }
     Consumer consumer(mono, surround51, surround71, expectSilent,
                       acceptAnyAudio, expectedDb, expectedRate);
+    consumer.allowRateChanges = allowRateChanges;
+    consumer.durationMs = durationMs;
+    consumer.maxConsecutiveSilenceMs = maxConsecutiveSilenceMs;
+    consumer.maxCallbackGapMs = maxCallbackGapMs;
+    consumer.consumerNodeName = consumerNodeName;
     if (expectIdenticalChannels && mono) {
       std::fprintf(
           stderr,
