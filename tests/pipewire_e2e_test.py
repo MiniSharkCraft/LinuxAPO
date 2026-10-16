@@ -1229,7 +1229,8 @@ def main():
                 continuous_renegotiate_consumer = subprocess.Popen(
                     [str(consumer), "--expected-db", "-6",
                      "--allow-rate-changes", "--duration-ms", "30000",
-                     "--max-consecutive-silence-ms", "150", "--name",
+                     "--max-consecutive-silence-ms", "150",
+                     "--max-callback-gap-ms", "150", "--name",
                      "skyapo.test.consumer.renegotiate"],
                     env=env, text=True, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE)
@@ -1291,9 +1292,14 @@ def main():
                     continuous_output)
                 continuous_ratio = re.search(
                     r"RMS ratio to expected: ([0-9.]+)", continuous_output)
+                callback_gap_check = re.search(
+                    r"No process callback interval exceeded ([0-9]+) ms",
+                    continuous_output)
                 if (not max_silence or float(max_silence.group(1)) > 150.0 or
                         not continuous_ratio or
-                        abs(float(continuous_ratio.group(1)) - 1.0) >= 0.03):
+                        abs(float(continuous_ratio.group(1)) - 1.0) >= 0.03 or
+                        not callback_gap_check or
+                        int(callback_gap_check.group(1)) != 150):
                     raise RuntimeError(
                         "continuous output was silent or outside the expected "
                         "gain across format/quantum rebuilds:\n"
@@ -1301,7 +1307,9 @@ def main():
                 continuous_renegotiate_consumer = None
                 print("One independent consumer recorded through all format "
                       f"rebuilds; longest silence {max_silence.group(1)} ms, "
-                      f"RMS ratio {float(continuous_ratio.group(1)):.6f}.")
+                      f"RMS ratio {float(continuous_ratio.group(1)):.6f}; "
+                      f"callback interval cap {callback_gap_check.group(1)} "
+                      "ms.")
 
             if lv2_pdc_final:
                 # Keep the input graph steady while measuring channel phase:
