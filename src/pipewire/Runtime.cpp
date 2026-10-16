@@ -241,6 +241,31 @@ struct Runtime {
     if (callbacksInFlight.load(std::memory_order_seq_cst) == 0)
       retiredEngines.clear();
   }
+  void publishValidatedTransition() {
+    Engine *next = pending.load(std::memory_order_seq_cst);
+    if (!next || !pendingEngine || pendingEngine.get() != next)
+      throw std::runtime_error(
+          "validated DSP transition no longer matches its pending Engine");
+    if (activeEngine)
+      retiredEngines.push_back(std::move(activeEngine));
+    activeEngine = std::move(pendingEngine);
+    active.store(activeEngine.get(), std::memory_order_seq_cst);
+    pending.store(nullptr, std::memory_order_seq_cst);
+    transitionCounter = 0;
+    transitionLength = 0;
+    transitionComplete.store(false, std::memory_order_seq_cst);
+    transitionMetrics.graphReplaced();
+    reclaimRetired();
+  }
+  void discardPendingTransitionAfterDrain() noexcept {
+    pending.store(nullptr, std::memory_order_seq_cst);
+    pendingEngine.reset();
+    transitionCounter = 0;
+    transitionLength = 0;
+    transitionComplete.store(false, std::memory_order_seq_cst);
+    transitionMetrics.graphReplaced();
+    reclaimRetired();
+  }
   void waitForTransition() {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
@@ -606,6 +631,19 @@ struct Runtime {
       out[c] =
           static_cast<float *>(pw_filter_get_dsp_buffer(r.outputs[c], frames));
     }
+    // Check quiescence before dereferencing any Engine pointer. A control
+    // thread may have drained callbacks and replaced owners after publishing
+    // Quiescing; later callbacks must only write silence until it resumes.
+    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
+      const bool rateChanged = r.requestedRate.exchange(hz) != hz;
+      const bool quantumChanged = r.requestedQuantum.exchange(frames) != frames;
+      if (rateChanged || quantumChanged)
+        pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.rateEvent);
+      for (unsigned c = 0; c < r.channels; ++c)
+        if (out[c])
+          std::fill_n(out[c], frames, 0.0f);
+      return;
+    }
     Engine *engine = r.active.load(std::memory_order_seq_cst);
     Engine *nextEngine = r.pending.load(std::memory_order_seq_cst);
     if (!engine || engine->sampleRate() != hz ||
@@ -618,12 +656,6 @@ struct Runtime {
       if (!engine || engine->sampleRate() != hz ||
           engine->maxFrames() != frames || rateChanged || quantumChanged)
         pw_loop_signal_event(pw_main_loop_get_loop(r.main), r.rateEvent);
-      return;
-    }
-    if (r.audioMode.load(std::memory_order_seq_cst) != AudioMode::Running) {
-      for (unsigned c = 0; c < r.channels; ++c)
-        if (out[c])
-          std::fill_n(out[c], frames, 0.0f);
       return;
     }
     double raw = 0, processed = 0;
@@ -640,6 +672,14 @@ struct Runtime {
         r.transitionCounter = engine->processTransitionTo(
             *nextEngine, r.work.data(), n, r.transitionCounter,
             r.transitionLength);
+        // A transition executes both configurations. Neither blended output
+        // is safe to publish when either plugin reports a latency change.
+        if (engine->pluginLatencyRefreshPending() ||
+            nextEngine->pluginLatencyRefreshPending()) {
+          latencyRefreshPending = true;
+          requestPluginLatencyRefresh(r);
+          break;
+        }
         if (r.transitionCounter >= r.transitionLength) {
           engine = nextEngine;
           r.active.store(engine, std::memory_order_seq_cst);
@@ -653,14 +693,11 @@ struct Runtime {
         }
       } else {
         engine->process(r.work.data(), n);
-      }
-      // The plugin may have changed its intrinsic delay during this run().
-      // Do not publish even this quantum with the old PDC schedule: the
-      // control thread will validate/rebuild while callbacks stay quiesced.
-      if (!nextEngine && engine->pluginLatencyRefreshPending()) {
-        latencyRefreshPending = true;
-        requestPluginLatencyRefresh(r);
-        break;
+        if (engine->pluginLatencyRefreshPending()) {
+          latencyRefreshPending = true;
+          requestPluginLatencyRefresh(r);
+          break;
+        }
       }
       for (unsigned f = 0; f < n; ++f)
         for (unsigned c = 0; c < r.channels; ++c) {
@@ -670,9 +707,11 @@ struct Runtime {
           processed += double(s) * s;
         }
     }
-    if (!latencyRefreshPending && !r.pending.load(std::memory_order_seq_cst)) {
+    if (!latencyRefreshPending) {
       Engine *processedEngine = r.active.load(std::memory_order_seq_cst);
-      if (processedEngine && processedEngine->pluginLatencyRefreshPending()) {
+      Engine *pendingEngine = r.pending.load(std::memory_order_seq_cst);
+      if ((processedEngine && processedEngine->pluginLatencyRefreshPending()) ||
+          (pendingEngine && pendingEngine->pluginLatencyRefreshPending())) {
         latencyRefreshPending = true;
         requestPluginLatencyRefresh(r);
       }
@@ -713,12 +752,11 @@ struct Runtime {
   }
   static void refreshPluginLatency(Runtime &r) {
     r.reclaimRetired();
-    if (r.pending.load(std::memory_order_seq_cst)) {
-      r.resumeAudio();
-      return;
-    }
     auto *engine = r.active.load(std::memory_order_seq_cst);
-    if (!engine || !engine->pluginLatencyRefreshPending()) {
+    auto *nextEngine = r.pending.load(std::memory_order_seq_cst);
+    const bool transitionPending = nextEngine != nullptr;
+    if ((!engine || !engine->pluginLatencyRefreshPending()) &&
+        (!nextEngine || !nextEngine->pluginLatencyRefreshPending())) {
       r.resumeAudio();
       return;
     }
@@ -731,7 +769,22 @@ struct Runtime {
     try {
       r.reclaimRetired();
       engine = r.active.load(std::memory_order_seq_cst);
-      const unsigned count = engine ? engine->refreshPluginLatencies() : 0;
+      nextEngine = r.pending.load(std::memory_order_seq_cst);
+      unsigned count = 0;
+      if (nextEngine) {
+        // A crossfade has no safe partial outcome. Validate both graphs on
+        // the control thread while callbacks are drained, then publish the
+        // candidate at this synchronization boundary. Any validation failure
+        // leaves audio silenced and is handled by the fail-closed path below.
+        if (engine)
+          engine->validateForActivation();
+        nextEngine->validateForActivation();
+        r.publishValidatedTransition();
+        r.pluginLatencyError.clear();
+        r.resetMetrics.store(true, std::memory_order_release);
+      } else {
+        count = engine ? engine->refreshPluginLatencies() : 0;
+      }
       if (count) {
         r.pluginLatencyRefreshes += count;
         r.pluginLatencyError.clear();
@@ -747,12 +800,16 @@ struct Runtime {
       // leaves every live PDC ring untouched. Stay quiesced and preserve the
       // daemon control socket so a valid config reload can install a fresh
       // graph without processing misaligned audio.
+      if (transitionPending)
+        r.discardPendingTransitionAfterDrain();
       r.pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
       r.audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
       return;
     } catch (...) {
       r.pluginLatencyError =
           "unknown non-standard exception during plugin latency refresh";
+      if (transitionPending)
+        r.discardPendingTransitionAfterDrain();
       r.pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
       r.audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
       return;

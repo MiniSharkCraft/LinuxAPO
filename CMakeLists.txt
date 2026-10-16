@@ -1213,6 +1213,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       LABELS "pipewire;integration;plugin;latency;pdc;recovery"
       ENVIRONMENT
         "LV2_PATH=${SKYAPO_TEST_LV2_PATH};SKYAPO_PW_METADATA=${SKYAPO_PW_METADATA_EXECUTABLE}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-pdc-transition-fault
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt
+        lv2-pdc-transition-fault)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-transition-fault
+      PROPERTIES TIMEOUT 90
+      LABELS "pipewire;integration;plugin;latency;pdc;transition;recovery"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
   endif()
   if(SKYAPO_HAVE_VST3 AND TARGET skyapo-test-vst3)
     add_test(NAME skyapo-pipewire-e2e-vst3-bypass

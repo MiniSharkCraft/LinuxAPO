@@ -293,7 +293,8 @@ def main():
         "vst3-live-param", "vst2-live-param", "plugin-bypass",
         "vst3-bypass", "lv2-bypass",
         "vst3-latency-change", "vst2-latency-change", "clap-latency-change",
-        "lv2-latency-change", "lv2-pdc-final", "lv2-pdc-recovery", "renegotiate",
+        "lv2-latency-change", "lv2-pdc-final", "lv2-pdc-recovery",
+        "lv2-pdc-transition-fault", "renegotiate",
         "transition-format", "device-filter", "stage-warning", "systemd-crash-restart",
         "device-switch", "delay-pdc", "source-consumer-latency"
     ):
@@ -307,7 +308,7 @@ def main():
             "vst2-live-param|plugin-bypass|vst3-bypass|lv2-bypass|vst3-latency-change|"
             "vst2-latency-change|"
             "clap-latency-change|lv2-latency-change|lv2-pdc-final|"
-            "lv2-pdc-recovery|"
+            "lv2-pdc-recovery|lv2-pdc-transition-fault|"
             "renegotiate|transition-format|systemd-crash-restart|"
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency")
@@ -332,6 +333,7 @@ def main():
     lv2_latency_change = mode == "lv2-latency-change"
     lv2_pdc_final = mode == "lv2-pdc-final"
     lv2_pdc_recovery = mode == "lv2-pdc-recovery"
+    lv2_pdc_transition_fault = mode == "lv2-pdc-transition-fault"
     delay_pdc = mode == "delay-pdc"
     plugin_live = mode in (
         "plugin-live-param", "lv2-live-param", "vst3-live-param") or vst2_live
@@ -348,7 +350,7 @@ def main():
                     clap_latency_change)
     plugin_chain = plugin_chain or lv2_latency_change
     plugin_chain = plugin_chain or lv2_pdc_final
-    plugin_chain = plugin_chain or lv2_pdc_recovery
+    plugin_chain = plugin_chain or lv2_pdc_recovery or lv2_pdc_transition_fault
     if mode == "lv2-live-param":
         live_plugin_id, live_parameter = (
             "https://skyapo.example/plugins/test-gain", "gain")
@@ -385,7 +387,8 @@ def main():
         state_home.mkdir(mode=0o700)
         rate_config = make_rate_config(
             pw_config, root / f"pipewire-{sample_rate}.conf", sample_rate)
-        if renegotiate or transition_format or lv2_pdc_recovery:
+        if (renegotiate or transition_format or lv2_pdc_recovery or
+                lv2_pdc_transition_fault):
             text = rate_config.read_text()
             text = text.replace(
                 "default.clock.allowed-rates = [ 48000 ]",
@@ -407,6 +410,9 @@ def main():
         if transition_format:
             transition_config.write_text("Preamp: -6 dB\n")
             dsp_config = transition_config
+        if lv2_pdc_transition_fault:
+            pdc_recovery_config.write_text("Preamp: -120 dB\n")
+            dsp_config = pdc_recovery_config
         if device_filter:
             device_config = root / "device-filter.txt"
             device_config.write_text(
@@ -431,6 +437,12 @@ def main():
                 "Copy: L2=L" + "+R" * 430 + "\n")
             pdc_recovery_config.write_text(rejected_dynamic_pdc)
             dsp_config = pdc_recovery_config
+        elif lv2_pdc_transition_fault:
+            rejected_dynamic_pdc = (
+                "Channel: L\n"
+                "Plugin: LV2 https://skyapo.example/plugins/test-latency-increase\n"
+                "Channel: L R\n"
+                "Copy: L2=L" + "+R" * 430 + "\n")
         env = os.environ.copy()
         env.update({
             "XDG_RUNTIME_DIR": str(runtime),
@@ -438,7 +450,7 @@ def main():
             "XDG_STATE_HOME": str(state_home),
             "PIPEWIRE_RUNTIME_DIR": str(runtime),
         })
-        if transition_format:
+        if transition_format or lv2_pdc_transition_fault:
             env["SKYAPO_TEST_TRANSITION_MS"] = "500"
         logs = (root / "pipewire.log").open("w+")
         source_log = (root / "source.log").open("w+")
@@ -529,9 +541,10 @@ def main():
             else:
                 raise RuntimeError(f"daemon did not reach streaming state:\n{status}")
             expected_filters = (4 if (delay_pdc or lv2_pdc_recovery) else
+                                (1 if lv2_pdc_transition_fault else
                                 (1 if vst2_live else
                                 (3 if lv2_pdc_final else
-                                 (2 if plugin_chain else 1))))
+                                 (2 if plugin_chain else 1)))))
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
                 f"Channel positions: {channel_positions}",
@@ -611,6 +624,108 @@ def main():
             if not old_capture_id:
                 raise RuntimeError("daemon status lacks initial capture node ID")
             assert_virtual_source(pw_dump, env, old_virtual_id)
+
+            if lv2_pdc_transition_fault:
+                # Keep one independent reader connected from before reload,
+                # throughout the 500 ms crossfade and fault handling. The old
+                # graph is effectively silent; any candidate audio emitted
+                # with an unvalidated PDC plan makes this measurement fail.
+                transition_consumer = subprocess.Popen(
+                    [str(consumer), "--expect-silent",
+                     "--expected-rate", str(sample_rate)],
+                    env=env, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                try:
+                    time.sleep(0.15)
+                    pdc_recovery_config.write_text(rejected_dynamic_pdc)
+                    reload_result = run([str(cli), "config", "reload"], env,
+                                        timeout=10, check=False)
+                    if (reload_result.returncode != 0 or
+                            "Config reload succeeded" not in
+                            reload_result.stdout):
+                        raise RuntimeError(
+                            "unsafe candidate was not staged for the PDC "
+                            f"crossfade test:\n{reload_result.stdout}"
+                            f"{reload_result.stderr}")
+                    deadline = time.monotonic() + 8
+                    transition_fault_status = ""
+                    while time.monotonic() < deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        transition_fault_status = result.stdout
+                        if (result.returncode == 0 and
+                                "DSP state: paused (plugin latency refresh failed; "
+                                "output silence)" in transition_fault_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "excessive plugin latency during crossfade did not "
+                            "leave the runtime fail-closed:\n"
+                            f"{transition_fault_status}")
+                    for allocation_status in (
+                            "Callback allocations: 0",
+                            "Callback deallocations: 0"):
+                        if allocation_status not in transition_fault_status:
+                            raise RuntimeError(
+                                "PDC crossfade fault handling violated the "
+                                "realtime allocation invariant:\n"
+                                f"{transition_fault_status}")
+                    transition_stdout, transition_stderr = (
+                        transition_consumer.communicate(timeout=8))
+                    if transition_consumer.returncode:
+                        raise RuntimeError(
+                            "audio escaped during PDC crossfade fault:\n"
+                            f"{transition_stdout}{transition_stderr}")
+                    transition_silence = re.search(
+                        r"RMS: ([0-9.]+)", transition_stdout)
+                    if (not transition_silence or
+                            float(transition_silence.group(1)) >= 1.0e-6):
+                        raise RuntimeError(
+                            "unvalidated PDC candidate emitted audio during "
+                            "crossfade:\n"
+                            f"{transition_stdout}{transition_stderr}")
+                finally:
+                    if transition_consumer.poll() is None:
+                        transition_consumer.terminate()
+                        transition_consumer.wait(timeout=3)
+
+                pdc_recovery_config.write_text("Preamp: -6 dB\n")
+                recovered = run([str(cli), "config", "reload"], env,
+                                timeout=10, check=False)
+                if (recovered.returncode != 0 or
+                        "Config reload succeeded" not in recovered.stdout):
+                    raise RuntimeError(
+                        "valid replacement did not recover from the PDC "
+                        f"crossfade fault:\n{recovered.stdout}{recovered.stderr}")
+                deadline = time.monotonic() + 8
+                recovered_status = ""
+                while time.monotonic() < deadline:
+                    result = run([str(cli), "status"], env, timeout=5,
+                                 check=False)
+                    recovered_status = result.stdout
+                    if (result.returncode == 0 and
+                            "DSP state: running" in recovered_status and
+                            "Plugin latency update error:" not in recovered_status):
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        "safe config did not resume audio after the PDC "
+                        f"crossfade fault:\n{recovered_status}")
+                recovered_audio = run(
+                    [str(consumer), "--expected-rate", str(sample_rate),
+                     "--expected-db", "-6"], env, timeout=12)
+                recovered_ratio = re.search(
+                    r"RMS ratio to expected: ([0-9.]+)", recovered_audio.stdout)
+                if (not recovered_ratio or
+                        abs(float(recovered_ratio.group(1)) - 1.0) >= 0.03):
+                    raise RuntimeError(
+                        "recovered virtual microphone did not carry expected "
+                        f"-6 dB audio:\n{recovered_audio.stdout}")
+                print("Excessive dynamic latency during a 500 ms config "
+                      "crossfade remained silent; safe reload recovered to "
+                      f"-6 dB audio (ratio {float(recovered_ratio.group(1)):.6f}).")
 
             if lv2_pdc_recovery:
                 deadline = time.monotonic() + 8
