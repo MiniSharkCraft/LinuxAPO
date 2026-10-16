@@ -39,6 +39,9 @@ core.*
 /packaging/*.rpm
 /packaging/*.tar.zst
 /release-artifacts/
+# Owner-supplied artwork and Windows reference captures are not cleared for redistribution.
+/src/ui/resources/icons/hicolor/
+/example-windows/
 /*.pkg.tar.*
 /*.deb
 /*.rpm

@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
 import configparser
 import pathlib
+import struct
 import sys
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 
-desktop_path, icon_path, metainfo_path = map(pathlib.Path, sys.argv[1:4])
+desktop_path = pathlib.Path(sys.argv[1])
+icon_argument = sys.argv[2]
+metainfo_path = pathlib.Path(sys.argv[3])
 desktop = configparser.ConfigParser(interpolation=None)
 desktop.read(desktop_path, encoding="utf-8")
 entry = desktop["Desktop Entry"]
-if entry.get("Icon") != "skyapo":
-    raise SystemExit("desktop entry does not use the branded skyapo icon")
 if entry.get("Exec") != "skyapo-ui":
     raise SystemExit("desktop entry does not launch skyapo-ui")
-if not icon_path.is_file():
-    raise SystemExit("branded icon asset is missing")
+if icon_argument:
+    icon_path = pathlib.Path(icon_argument)
+    if entry.get("Icon") != "skyapo":
+        raise SystemExit("branded icon build lacks its desktop Icon entry")
+    if not icon_path.is_file():
+        raise SystemExit("branded icon asset is missing")
+    png = icon_path.read_bytes()
+    if png[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit("application icon must be a PNG")
+    width, height, _bit_depth, color_type = struct.unpack(">IIBB", png[16:26])
+    if (width, height, color_type) != (256, 256, 6):
+        raise SystemExit("application icon must be a 256x256 RGBA PNG")
+elif "Icon" in entry:
+    raise SystemExit(
+        "desktop entry references an icon although branded artwork is disabled"
+    )
 
 root = ET.parse(metainfo_path).getroot()
 if root.attrib.get("type") != "desktop-application":

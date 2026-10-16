@@ -1,5 +1,7 @@
 # Qt editor license/resource audit
 
+Release artwork redistribution status: EXCLUDED
+
 Audit performed against the current CMake target, pinned official
 `upstream/equalizerapo` checkout, staged-install rules and the Linux runtime
 linker output. This is an engineering inventory, not legal advice.
@@ -57,7 +59,6 @@ conditions for each distribution/release; the notice alone is not a complete
 legal-compliance determination.
 
 ## Evidence and remaining work
-
 - CMake links `Qt6::Widgets`, uses shared libraries in the local executable,
   and does not bundle Qt binaries.
 - Installed docs include Equalizer APO's GPL text and, when the UI is built,
@@ -68,6 +69,20 @@ legal-compliance determination.
 - Still open: review target-distribution Qt packaging/relink instructions and
   perform a release-specific legal review. Do not mark the 1.0 licensing gate
   complete until these are resolved.
+
+## LinuxAPO application icon
+
+The hicolor PNGs and Qt application icon are converted from WebP artwork
+supplied locally by the project owner. The original image remains unmodified.
+Its authorship, license, and explicit redistribution permission could not be
+verified from the local file metadata or repository. Therefore the image and
+its derivatives are **not committed or included in public packages/releases**.
+The `SKYAPO_BUNDLE_BRANDED_APP_ICON` option defaults OFF and CMake rejects
+enabling it unless rights are documented as CLEARED and all expected PNG sizes
+are present. With it disabled, the Qt app embeds no supplied artwork and the
+installed desktop entry has no `Icon` key. The release workflow accepts the
+EXCLUDED state only while the option remains OFF and no icon assets are Git
+tracked. Resizing or converting the user-supplied image does not grant rights.
 
 References:
 

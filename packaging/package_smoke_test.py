@@ -4,6 +4,7 @@
 import os
 import pathlib
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -106,8 +107,25 @@ def validate_desktop_metadata(root, application_version):
         raise RuntimeError("desktop entry Type must be Application")
     if entries.get("Exec") != "skyapo-ui":
         raise RuntimeError("desktop entry Exec must name the installed skyapo-ui executable")
-    if entries.get("Icon") != "skyapo":
-        raise RuntimeError("desktop entry Icon must match the installed skyapo icon")
+    icon_name = entries.get("Icon")
+    icon_candidates = sorted(
+        (root / "usr/share/icons/hicolor").glob("*/apps/skyapo.png")
+    )
+    if icon_name == "skyapo" and not icon_candidates:
+        raise RuntimeError("desktop icon does not resolve to an installed hicolor PNG")
+    if icon_name is None and icon_candidates:
+        raise RuntimeError("package contains branded icons not referenced by its desktop entry")
+    if icon_name not in (None, "skyapo"):
+        raise RuntimeError(f"unexpected unverified desktop icon reference: {icon_name!r}")
+    for icon_path in icon_candidates:
+        png = icon_path.read_bytes()
+        if png[:8] != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError(f"installed desktop icon is not PNG: {icon_path}")
+        width, height, _depth, color_type = struct.unpack(">IIBB", png[16:26])
+        if width != height or width not in (16, 24, 32, 48, 64, 128, 256, 512):
+            raise RuntimeError(f"installed desktop icon has an unexpected size: {icon_path}")
+        if color_type != 6:
+            raise RuntimeError(f"installed desktop icon does not preserve alpha: {icon_path}")
 
     provided_binaries = [node.text for node in component.findall("./provides/binary")]
     if not provided_binaries:
@@ -130,7 +148,6 @@ def main():
         "usr/lib/systemd/user/skyapod.service",
         "usr/share/applications/skyapo.desktop",
         "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
-        "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
     ]
     for relative in required:
         path = root / relative
