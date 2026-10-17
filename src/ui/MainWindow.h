@@ -34,7 +34,10 @@ private:
   void openConfig(const QString &path);
   void rebuildRows();
   void addFilter(const QString &line);
-  void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {});
+  void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {},
+                                const QString &formatFilter = {});
+  bool handlePluginTemplate(const QString &line,
+                            std::optional<qsizetype> beforeIndex);
   void configureSelectedPluginParameters();
   void markModified();
   bool saveConfig();
