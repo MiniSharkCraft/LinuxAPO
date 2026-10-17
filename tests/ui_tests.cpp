@@ -1887,6 +1887,99 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  const auto addPluginBeforeRow = [&](QAction *action, const QString &format,
+                                      const QString &directive,
+                                      int beforeIndex) {
+    auto *before = table->itemAt(beforeIndex);
+    if (!action || !before)
+      return false;
+    const QString anchorLine = before->text;
+    bool pickerWasValid = false;
+    bool pickerWasHandled = false;
+    QString pickerDetails = QStringLiteral("picker was not shown");
+    QEventLoop pickerWait;
+    QTimer pickerPoll;
+    pickerPoll.setInterval(10);
+    QTimer pickerTimeout;
+    pickerTimeout.setSingleShot(true);
+    QObject::connect(&pickerPoll, &QTimer::timeout, &pickerWait, [&] {
+      for (auto *candidate : window.findChildren<QDialog *>()) {
+        if (candidate->objectName() != "pluginPicker")
+          continue;
+        auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+        auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+        pickerDetails =
+            candidate->windowTitle() + QStringLiteral("; ") +
+            (choices ? QStringLiteral("rows=%1").arg(choices->count())
+                     : QStringLiteral("list missing"));
+        if (choices)
+          for (int index = 0; index < choices->count(); ++index)
+            pickerDetails += QStringLiteral("; %1").arg(
+                choices->item(index)->data(Qt::UserRole).toString());
+        pickerWasValid =
+            choices && choices->count() == 1 &&
+            choices->item(0)->data(Qt::UserRole).toString() == directive &&
+            candidate->windowTitle() ==
+                QStringLiteral("Add %1 plugin").arg(format) &&
+            add;
+        if (pickerWasValid)
+          add->click();
+        else
+          candidate->reject();
+        pickerWasHandled = true;
+        pickerWait.quit();
+        break;
+      }
+      if (pickerWasHandled)
+        return;
+      if (auto *modal =
+              qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        pickerDetails =
+            modal->windowTitle() + QStringLiteral(": unexpected dialog");
+        modal->reject();
+        pickerWasHandled = true;
+        pickerWait.quit();
+      }
+    });
+    QObject::connect(&pickerTimeout, &QTimer::timeout, &pickerWait, [&] {
+      if (auto *modal =
+              qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+        modal->reject();
+      pickerWait.quit();
+    });
+    pickerPoll.start();
+    pickerTimeout.start(2000);
+    table->addLine(action->data().value<FilterTemplate>().getLine(), before);
+    pickerWait.exec();
+    pickerPoll.stop();
+    pickerTimeout.stop();
+    if (!pickerWasValid || !pickerWasHandled ||
+        table->itemAt(beforeIndex)->text != directive ||
+        !table->itemAt(beforeIndex + 1) ||
+        table->itemAt(beforeIndex + 1)->text != anchorLine) {
+      std::cerr << format.toStdString()
+                << " plugin action did not filter discovery and insert before "
+                   "the selected row; "
+                << pickerDetails.toStdString() << '\n';
+      return false;
+    }
+    return true;
+  };
+
+  const QString lv2Directive =
+      QStringLiteral("Plugin: LV2 https://example.test/plugins/gain");
+  const QString clapDirective = QStringLiteral("Plugin: CLAP test.clap.gain");
+  if (!addPluginBeforeRow(lv2PluginAction, QStringLiteral("LV2"), lv2Directive,
+                          0) ||
+      !addPluginBeforeRow(clapPluginAction, QStringLiteral("CLAP"),
+                          clapDirective, 1) ||
+      table->itemAt(0)->text != lv2Directive ||
+      table->itemAt(1)->text != clapDirective) {
+    std::cerr << "format-specific plugin actions changed the existing filter "
+                 "order\n";
+    return 1;
+  }
+
   const QString pluginParameterConfigPath =
       temporary.filePath(QStringLiteral("plugin-parameters.txt"));
   const QByteArray pluginParameterOriginal =
