@@ -284,6 +284,7 @@ struct Runtime {
   }
   void fail(const std::string &e) {
     error = e;
+    std::cerr << "skyapod: fatal PipeWire runtime error: " << e << '\n';
     pw_main_loop_quit(main);
   }
   int requestCoreSync() {
