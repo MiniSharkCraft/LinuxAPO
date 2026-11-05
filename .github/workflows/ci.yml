@@ -92,7 +92,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             cmake git libsndfile pipewire fftw lilv muparser lv2 \
-            qt6-base pkgconf hicolor-icon-theme wireplumber namcap
+            qt6-base pkgconf hicolor-icon-theme polkit wireplumber namcap
 
       - name: Build and test Arch packages
         run: |
