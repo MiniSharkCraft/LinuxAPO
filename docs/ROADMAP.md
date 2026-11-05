@@ -696,7 +696,11 @@ not implied.
 **Known limitations:** initial support may be limited to one selected sink and
 PipeWire-managed application streams; per-application routing, simultaneous
 multi-sink graphs and JACK/PulseAudio-specific behavior are out of scope unless
-the tested design requires them.
+the tested design requires them. Current playback routing also depends on
+WirePlumber 0.5 Smart Filters; hosted Ubuntu 24.04 CI with WirePlumber 0.4.17
+reports zero playback target links and fails 15 playback E2Es.
+Compatibility with WirePlumber 0.4 is not established and remains a milestone
+gap; the tests remain enabled and failing rather than being skipped.
 
 **Release readiness:** publish only after real playback and independent
 recording evidence exists and capture/virtual-mic acceptance remains green.

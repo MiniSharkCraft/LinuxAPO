@@ -347,6 +347,18 @@ The test fixture's SPA null sink is not evidence of a hardware output. The
 v0.10.0 playback milestone remains open pending those checks plus the remaining
 playback recovery/configuration regression gates.
 
+Hosted compatibility check (2026-11-05): Ubuntu 24.04 CI uses WirePlumber
+0.4.17, where 15 playback smart-filter E2Es fail. The graph reported both
+SkyAPO filters streaming and internal links complete, but **0/2 target links**;
+the ordinary test playback stream remained suspended. The two PDC race E2Es
+passed after the test source began handling its trigger signals with
+`sigaction`. WirePlumber's Smart Filters policy is a 0.5 feature
+([official policy documentation](https://pipewire.pages.freedesktop.org/wireplumber/policies/smart_filters.html));
+the current LinuxAPO playback route depends on that policy. Playback is
+therefore not verified on WirePlumber 0.4, including the Ubuntu 24.04 CI
+environment. The compatibility gap remains open; these failing tests have not
+been disabled or counted as passing.
+
 Playback target switching/recovery follow-up (2026-10-16): while the daemon is
 running, `skyapo device output set <node>` now retargets the paired stream
 filter without recreating the smart-filter node or restarting the capture
