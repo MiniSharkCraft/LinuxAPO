@@ -471,6 +471,15 @@ struct Runtime {
       throw std::runtime_error("timed out at test config-candidate barrier");
 #endif
   }
+  void consumePendingConfigReload() {
+    // An explicit reload reads the latest file contents, so an already queued
+    // inotify debounce would only build and transition to the same graph a
+    // second time. Drain it and cancel that timer before the explicit reload.
+    configWatcher->consumeEvents();
+    timespec disarmed{};
+    pw_loop_update_timer(pw_main_loop_get_loop(main), reloadTimer, &disarmed,
+                         nullptr, false);
+  }
   void resumeAudio() noexcept {
     auto mode = audioMode.load(std::memory_order_seq_cst);
     while (mode != AudioMode::Stopping) {
@@ -1746,6 +1755,7 @@ struct Runtime {
         text = r.status();
       } else if (request.command == settings::ipc::Command::Reload) {
         try {
+          r.consumePendingConfigReload();
           r.reloadConfig();
           text = "Config reload succeeded\n";
         } catch (const std::exception &e) {

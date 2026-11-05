@@ -2781,6 +2781,18 @@ def main():
                     raise RuntimeError(
                         "candidate built before the PDC event was not safely "
                         "validated and committed:\n" + recovered_status)
+                # The file write also schedules the automatic inotify reload.
+                # The explicit CLI reload above must consume that pending
+                # debounce instead of starting a duplicate graph transition.
+                time.sleep(0.25)
+                recovered_status = run(
+                    [str(cli), "status"], env, timeout=5).stdout
+                if ("Config reload error:" in recovered_status or
+                        "Daemon: streaming" not in recovered_status):
+                    raise RuntimeError(
+                        "explicit config reload left a duplicate watcher "
+                        "reload or damaged the recovered daemon:\n" +
+                        recovered_status)
                 recovered_audio = run(
                     [str(consumer), "--expected-rate", str(sample_rate),
                      "--expected-db", "-6"], env, timeout=10)
