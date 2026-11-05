@@ -814,7 +814,7 @@ def main():
                     env["SKYAPO_TEST_LINK_FAULT_MODE"] = "async-error"
         if wireplumber_playback:
             env["WIREPLUMBER_DEBUG"] = os.environ.get(
-                "SKYAPO_WIREPLUMBER_DEBUG", "D:s-linking,s-node")
+                "SKYAPO_WIREPLUMBER_DEBUG", "D:script/policy-node,wp-*")
         if transition_format or playback_pdc_recovery:
             env["SKYAPO_TEST_TRANSITION_MS"] = "500"
         config_candidate_pause = root / "config-candidate-pause"
