@@ -154,6 +154,13 @@ def require_icon_theme_cache(transaction):
         )
 
 
+def package_has_hicolor_icons(package_paths):
+    return any(
+        path.startswith("/usr/share/icons/hicolor/") and "/apps/" in path
+        for path in package_paths
+    )
+
+
 def isolated_env(temp):
     temp = pathlib.Path(temp)
     env = os.environ.copy()
@@ -319,6 +326,7 @@ def pacman_install_test(package, render_test_binary):
 
     primary_error = None
     installed_files = []
+    has_hicolor_icons = False
     install_succeeded = False
     try:
         installation = run(["pacman", "-U", "--noconfirm", str(package)])
@@ -326,7 +334,6 @@ def pacman_install_test(package, render_test_binary):
         require_package_hooks(
             "install", installation.stdout + installation.stderr
         )
-        require_icon_theme_cache("install")
         print("Pacman install transaction:")
         print(installation.stdout.rstrip())
         if installation.stderr.strip():
@@ -339,6 +346,11 @@ def pacman_install_test(package, render_test_binary):
         print(f"Installed package file integrity: {integrity.stdout.strip()}")
         files = run(["pacman", "-Qlq", "skyapo"])
         package_paths = [pathlib.Path(line) for line in files.stdout.splitlines()]
+        has_hicolor_icons = package_has_hicolor_icons(files.stdout.splitlines())
+        if has_hicolor_icons:
+            require_icon_theme_cache("install")
+        else:
+            print("Package ships no hicolor icons; icon cache is not required.")
         installed_files = [
             path for path in package_paths if path.is_file()
         ]
@@ -374,7 +386,8 @@ def pacman_install_test(package, render_test_binary):
                     require_package_hooks(
                         "remove", removal.stdout + removal.stderr
                     )
-                    require_icon_theme_cache("remove")
+                    if has_hicolor_icons:
+                        require_icon_theme_cache("remove")
         if package_is_installed():
             detail = "pacman -Rns left the skyapo package installed"
             if primary_error is not None:
