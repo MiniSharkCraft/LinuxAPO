@@ -53,11 +53,13 @@ LICENSE_DIRECTORY_CANDIDATES = (
     "usr/share/doc/SkyAPO/licenses",
 )
 PACKAGE_FILES = tuple(f"usr/bin/{binary}" for binary in EXECUTABLES) + FIXED_FILES
-EXPECTED_PACKAGE_HOOKS = (
-    "Updating icon theme caches...",
-    "Updating the desktop file MIME type cache...",
-    "Reloading user manager configuration...",
-)
+EXPECTED_PACKAGE_HOOKS = {
+    "install": (
+        "Updating icon theme caches...",
+        "Updating the desktop file MIME type cache...",
+    ),
+    "remove": ("Reloading user manager configuration...",),
+}
 ICON_THEME_CACHE = pathlib.Path("/usr/share/icons/hicolor/icon-theme.cache")
 
 
@@ -133,9 +135,12 @@ def run(command, env=None, expected=0):
 
 
 def require_package_hooks(transaction, output):
+    expected = EXPECTED_PACKAGE_HOOKS.get(transaction)
+    if expected is None:
+        raise ValueError(f"unknown pacman transaction: {transaction}")
     missing = [
         description
-        for description in EXPECTED_PACKAGE_HOOKS
+        for description in expected
         if description not in output
     ]
     if missing:
