@@ -2480,6 +2480,37 @@ def main():
                     print("Unrelated playback stayed on its separate sink; "
                           "measured output/expected ratio "
                           f"{float(unrelated_ratio.group(1)):.6f} (unity).")
+                    wpctl = shutil.which("wpctl")
+                    if not wpctl:
+                        raise RuntimeError(
+                            "wpctl is required to test default-sink changes")
+                    graph = pipewire_dump_objects(
+                        run([str(pw_dump)], env, timeout=5).stdout)
+                    alternate_id = next((
+                        str(item.get("id")) for item in graph
+                        if item.get("type", "").endswith(":Node") and
+                        item.get("info", {}).get("props", item.get("props", {}))
+                        .get("node.name") == "skyapo.test.null-target-alt"), None)
+                    if alternate_id is None:
+                        raise RuntimeError(
+                            "cannot find the alternate default sink node")
+                    run([wpctl, "set-default", alternate_id], env, timeout=5)
+                    deadline = time.monotonic() + 5
+                    override_status = ""
+                    while time.monotonic() < deadline:
+                        override_status = run(
+                            [str(cli), "status"], env, timeout=5).stdout
+                        if ("Playback routing policy: inactive (system default "
+                                "was changed externally; SkyAPO left it untouched)"
+                                in override_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "runtime did not report the external default-sink "
+                            f"change without reclaiming it:\n{override_status}")
+                    print("External default-sink change was preserved; SkyAPO "
+                          "relinquished route ownership.")
                 if playback_pdc_recovery:
                     recovery_status = run(
                         [str(cli), "status"], env, timeout=5).stdout
@@ -4095,8 +4126,12 @@ def main():
                         "WirePlumber playback test requires pw-metadata")
                 default_metadata = run(
                     [metadata, "-n", "default"], env, timeout=5).stdout
+                expected_default = (
+                    "skyapo.test.null-target-alt"
+                    if mode == "playback-wireplumber" else
+                    "skyapo.test.null-target")
                 if ("key:'default.audio.sink' " not in default_metadata or
-                        "value:'{\"name\":\"skyapo.test.null-target\"}'" not in
+                        f"value:'{{\"name\":\"{expected_default}\"}}'" not in
                         default_metadata):
                     raise RuntimeError(
                         "orderly daemon shutdown did not restore the original "

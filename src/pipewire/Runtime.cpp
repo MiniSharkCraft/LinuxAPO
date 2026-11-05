@@ -447,6 +447,9 @@ struct Runtime {
     if (defaultRouteOwned)
       return "active (ordinary application playback routes through SkyAPO; "
              "previous default is restored on clean shutdown)";
+    if (defaultRouteOverridden)
+      return "inactive (system default was changed externally; SkyAPO left it "
+             "untouched)";
     if (defaultRoutePending)
       return "waiting for PipeWire to confirm the SkyAPO default route";
     if (!defaultRouteError.empty())
