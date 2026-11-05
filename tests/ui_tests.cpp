@@ -958,12 +958,15 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
 #ifdef SKYAPO_HAVE_BRANDED_APP_ICON
   const QIcon applicationIcon(QStringLiteral(":/icons/skyapo.png"));
-  if (applicationIcon.isNull() || applicationIcon.availableSizes().isEmpty()) {
+  if (!QFile::exists(QStringLiteral(":/icons/skyapo.png")) ||
+      applicationIcon.isNull() || applicationIcon.availableSizes().isEmpty()) {
     std::cerr << "application icon resource is missing or unreadable\n";
     return 1;
   }
 #else
-  if (!QIcon(QStringLiteral(":/icons/skyapo.png")).isNull()) {
+  // QIcon may create a non-null engine for a missing resource path, depending
+  // on the Qt version. QFile::exists checks whether the resource is embedded.
+  if (QFile::exists(QStringLiteral(":/icons/skyapo.png"))) {
     std::cerr << "unlicensed branded application icon was embedded\n";
     return 1;
   }
