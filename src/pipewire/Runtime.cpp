@@ -162,6 +162,7 @@ struct Runtime {
   bool defaultRouteSetRequested{};
   bool defaultRouteRestoring{};
   bool defaultRouteOverridden{};
+  bool defaultRouteRecoveryPending{};
   int nextCoreSequence{};
   int defaultMetadataSnapshotSequence{-1};
   int defaultRouteSequence{-1};
@@ -170,6 +171,8 @@ struct Runtime {
   std::string defaultMetadataType;
   std::string defaultMetadataValue;
   std::string defaultMetadataName;
+  std::chrono::steady_clock::time_point defaultRouteLastWrite{};
+  std::chrono::steady_clock::time_point defaultRouteRecoveryReadySince{};
   std::string originalDefaultMetadataType;
   std::string originalDefaultMetadataValue;
   bool originalDefaultMetadataPresent{};
@@ -301,6 +304,7 @@ struct Runtime {
     if (subject != PW_ID_CORE || !key ||
         std::strcmp(key, "default.audio.sink") != 0)
       return 0;
+    const auto previousName = r.defaultMetadataName;
     r.defaultMetadataPresent = value != nullptr;
     r.defaultMetadataType = type ? type : "";
     r.defaultMetadataValue = value ? value : "";
@@ -310,8 +314,33 @@ struct Runtime {
                                         parseDefaultNodeMetadata(value, name)
                                 ? std::move(name)
                                 : std::string{};
+    if (r.defaultMetadataName != previousName)
+      std::cerr << "skyapod: PipeWire default sink metadata changed from '"
+                << previousName << "' to '" << r.defaultMetadataName
+                << "' (route-owned=" << r.defaultRouteOwned
+                << ", route-write-pending=" << r.defaultRouteSetRequested
+                << ")\n";
     if (r.defaultRouteOwned && !r.defaultRouteRestoring &&
         r.defaultMetadataName != "skyapo.playback") {
+      const bool routeWriteSettling =
+          r.defaultRouteLastWrite.time_since_epoch().count() != 0 &&
+          std::chrono::steady_clock::now() - r.defaultRouteLastWrite <
+              std::chrono::seconds(1);
+      const bool playbackUnavailable =
+          r.playbackGraph && !r.playbackGraph->ready();
+      if (playbackUnavailable) {
+        r.defaultRouteRecoveryPending = true;
+        r.defaultRouteRecoveryReadySince = {};
+      }
+      if (playbackUnavailable || r.defaultRouteRecoveryPending ||
+          routeWriteSettling) {
+        std::cerr << "skyapod: retaining SkyAPO as the default playback route "
+                     "while PipeWire/WirePlumber settles its route\n";
+        r.reassertOwnedDefaultRoute();
+        if (r.defaultRouteRecoveryPending)
+          r.scheduleDefaultRouteRecoveryCheck();
+        return 0;
+      }
       r.defaultRouteOwned = false;
       r.defaultRouteSetRequested = false;
       r.defaultRouteOverridden = true;
@@ -319,6 +348,7 @@ struct Runtime {
     if (r.defaultRouteSetRequested &&
         r.defaultMetadataName == "skyapo.playback") {
       r.defaultRoutePending = false;
+      r.defaultRouteSetRequested = false;
       r.defaultRouteOwned = true;
       r.defaultRouteError.clear();
       r.defaultRouteSequence = -1;
@@ -404,6 +434,11 @@ struct Runtime {
       return;
     }
 
+    reassertOwnedDefaultRoute();
+  }
+  void reassertOwnedDefaultRoute() {
+    if (!defaultMetadata)
+      return;
     defaultRoutePending = true;
     defaultRouteSetRequested = true;
     const int result = pw_metadata_set_property(
@@ -418,6 +453,7 @@ struct Runtime {
       std::cerr << "skyapod: " << defaultRouteError << '\n';
       return;
     }
+    defaultRouteLastWrite = std::chrono::steady_clock::now();
 
     defaultRouteSequence = requestCoreSync();
     if (defaultRouteSequence < 0) {
@@ -432,14 +468,43 @@ struct Runtime {
         defaultRouteAttempted || defaultRouteOwned || defaultRoutePending ||
         defaultRouteOverridden)
       return;
-    timespec delay{0, 10000000};
+    // Let the session manager finish reconciling its initial default route
+    // after the PipeWire graph appears before claiming the route. Without this
+    // settling window WirePlumber may immediately restore its startup value,
+    // which looks indistinguishable from an intentional user override.
+    timespec delay{1, 0};
     pw_loop_update_timer(pw_main_loop_get_loop(main), defaultRouteTimer, &delay,
                          nullptr, false);
   }
   static void defaultRouteReady(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
+    if (r.defaultRouteRecoveryPending) {
+      const auto now = std::chrono::steady_clock::now();
+      if (!r.playbackGraph || !r.playbackGraph->ready()) {
+        r.defaultRouteRecoveryReadySince = {};
+      } else if (r.defaultRouteRecoveryReadySince.time_since_epoch().count() ==
+                 0) {
+        r.defaultRouteRecoveryReadySince = now;
+      } else if (now - r.defaultRouteRecoveryReadySince >=
+                 std::chrono::seconds(1)) {
+        r.defaultRouteRecoveryPending = false;
+        r.defaultRouteRecoveryReadySince = {};
+      }
+      if (r.defaultRouteRecoveryPending) {
+        r.scheduleDefaultRouteRecoveryCheck();
+        return;
+      }
+    }
     r.updateDefaultRoute();
     r.scheduleDefaultRouteUpdate();
+  }
+  void scheduleDefaultRouteRecoveryCheck() {
+    if (!defaultRouteTimer || !main || cleaning || stopping ||
+        !defaultRouteRecoveryPending)
+      return;
+    timespec delay{0, 100000000};
+    pw_loop_update_timer(pw_main_loop_get_loop(main), defaultRouteTimer, &delay,
+                         nullptr, false);
   }
   std::string defaultRouteStatus() const {
     if (!playbackGraph)

@@ -142,6 +142,7 @@ struct PlaybackGraph::Impl {
   std::string configPath;
   std::shared_ptr<const ConfigSourceSnapshot> acceptedConfigSources;
   std::string lastInternalLinkError;
+  std::string lastSinkLinkError;
   pw_filter *filter{};
   pw_filter *streamFilter{};
   spa_hook filterHook{};
@@ -162,6 +163,9 @@ struct PlaybackGraph::Impl {
   std::array<pw_proxy *, MaxChannels> links{};
   std::array<spa_hook, MaxChannels> linkHooks{};
   std::array<uint32_t, MaxChannels> linkGlobalIds{};
+  std::array<pw_proxy *, MaxChannels> sinkLinks{};
+  std::array<spa_hook, MaxChannels> sinkLinkHooks{};
+  std::array<spa_hook, MaxChannels> sinkProxyHooks{};
   std::array<uint32_t, MaxChannels> sinkLinkGlobalIds{};
   std::array<bool, MaxChannels> linked{};
   std::array<spa_hook, MaxChannels> proxyHooks{};
@@ -169,9 +173,12 @@ struct PlaybackGraph::Impl {
   std::array<bool, MaxChannels> internalLinkExists{};
   std::array<bool, MaxChannels> proxyListenerAttached{};
   std::array<bool, MaxChannels> linkListenerAttached{};
+  std::array<bool, MaxChannels> sinkProxyListenerAttached{};
+  std::array<bool, MaxChannels> sinkLinkListenerAttached{};
   struct LinkContext {
     Impl *owner{};
     unsigned channel{};
+    bool sinkLink{};
   };
   struct NodeBinding {
     Impl *owner{};
@@ -180,6 +187,7 @@ struct PlaybackGraph::Impl {
     spa_hook hook{};
   };
   std::array<LinkContext, MaxChannels> linkContexts{};
+  std::array<LinkContext, MaxChannels> sinkLinkContexts{};
   std::vector<std::unique_ptr<NodeBinding>> sinkBindings;
   std::vector<AudioPort> knownInputPorts;
   std::vector<float> work;
@@ -252,8 +260,10 @@ struct PlaybackGraph::Impl {
     streamOutputIds.fill(SPA_ID_INVALID);
     linkGlobalIds.fill(SPA_ID_INVALID);
     sinkLinkGlobalIds.fill(SPA_ID_INVALID);
-    for (unsigned channel = 0; channel < channels; ++channel)
+    for (unsigned channel = 0; channel < channels; ++channel) {
       linkContexts[channel] = {this, channel};
+      sinkLinkContexts[channel] = {this, channel, true};
+    }
     formatEvent = pw_loop_add_event(loop, formatReady, this);
     if (!formatEvent)
       throw std::runtime_error("cannot create playback graph format event");
@@ -311,6 +321,25 @@ struct PlaybackGraph::Impl {
     internalLinked[channel] = false;
   }
 
+  void destroySinkLink(unsigned channel) noexcept {
+    if (channel >= MaxChannels)
+      return;
+    if (sinkProxyListenerAttached[channel]) {
+      spa_hook_remove(&sinkProxyHooks[channel]);
+      sinkProxyListenerAttached[channel] = false;
+    }
+    if (sinkLinkListenerAttached[channel]) {
+      spa_hook_remove(&sinkLinkHooks[channel]);
+      sinkLinkListenerAttached[channel] = false;
+    }
+    if (sinkLinks[channel]) {
+      pw_proxy_destroy(sinkLinks[channel]);
+      sinkLinks[channel] = nullptr;
+    }
+    sinkLinkGlobalIds[channel] = SPA_ID_INVALID;
+    linked[channel] = false;
+  }
+
   void selectSink(AudioDevice selectedSink,
                   std::vector<AudioPort> selectedPorts) {
     std::sort(selectedPorts.begin(), selectedPorts.end(),
@@ -336,6 +365,8 @@ struct PlaybackGraph::Impl {
     auto previousSink = sink;
     auto previousPorts = ports;
     const bool previousSinkAvailable = sinkAvailable;
+    for (unsigned channel = 0; channel < channels; ++channel)
+      destroySinkLink(channel);
     sink = std::move(selectedSink);
     ports = std::move(selectedPorts);
     sinkAvailable = true;
@@ -352,9 +383,7 @@ struct PlaybackGraph::Impl {
       sinkLinkGlobalIds.fill(SPA_ID_INVALID);
       linked.fill(false);
       try {
-        // The previous stream was disconnected before the replacement was
-        // created. Recreate it before reporting failure so WirePlumber can
-        // reconnect playback to the still-selected target.
+        // Restore the previous stream and its explicit target links.
         recreateStreamFilter();
         for (unsigned channel = 0; channel < channels; ++channel)
           ports[channel].node = sink.id;
@@ -409,6 +438,7 @@ struct PlaybackGraph::Impl {
     }
     for (unsigned channel = 0; channel < channels; ++channel) {
       destroyLink(channel);
+      destroySinkLink(channel);
     }
     if (registryListenerAttached) {
       spa_hook_remove(&registryHook);
@@ -429,7 +459,7 @@ struct PlaybackGraph::Impl {
                    static_cast<long>(delayMs % 1000) * 1000000L};
     if (pw_loop_update_timer(loop, linkRetryTimer, &delay, nullptr, false) <
         0) {
-      error = "cannot schedule internal playback link retry";
+      error = "cannot schedule playback link retry";
       return;
     }
     linkRetryScheduled = true;
@@ -440,6 +470,32 @@ struct PlaybackGraph::Impl {
     lastInternalLinkError = error;
   }
 
+  void setSinkLinkError(std::string message) {
+    error = std::move(message);
+    lastSinkLinkError = error;
+  }
+
+  void resetLinkRetryBackoffIfRecovered() {
+    const bool internalReady =
+        std::all_of(internalLinked.begin(), internalLinked.begin() + channels,
+                    [](bool value) { return value; });
+    const bool sinkReady =
+        std::all_of(linked.begin(), linked.begin() + channels,
+                    [](bool value) { return value; });
+    if (internalReady && sinkReady)
+      linkRetryBackoffMs = 100;
+  }
+
+  void clearSinkLinkErrorIfRecovered() {
+    if (!std::all_of(linked.begin(), linked.begin() + channels,
+                     [](bool value) { return value; }))
+      return;
+    if (!lastSinkLinkError.empty() && error == lastSinkLinkError)
+      error.clear();
+    lastSinkLinkError.clear();
+    resetLinkRetryBackoffIfRecovered();
+  }
+
   void clearInternalLinkErrorIfRecovered() {
     if (!std::all_of(internalLinked.begin(), internalLinked.begin() + channels,
                      [](bool value) { return value; }))
@@ -447,7 +503,7 @@ struct PlaybackGraph::Impl {
     if (!lastInternalLinkError.empty() && error == lastInternalLinkError)
       error.clear();
     lastInternalLinkError.clear();
-    linkRetryBackoffMs = 100;
+    resetLinkRetryBackoffIfRecovered();
   }
 
   static void retryLinks(void *data, uint64_t) noexcept {
@@ -460,10 +516,13 @@ struct PlaybackGraph::Impl {
                 self.ownOutputIds[channel] != SPA_ID_INVALID &&
                 self.streamInputIds[channel] != SPA_ID_INVALID)
               self.createLink(channel);
-          if (std::all_of(self.internalLinked.begin(),
-                          self.internalLinked.begin() + self.channels,
-                          [](bool value) { return value; }))
-            self.linkRetryBackoffMs = 100;
+          for (unsigned channel = 0; channel < self.channels; ++channel)
+            if (!self.sinkLinks[channel] && self.sinkAvailable &&
+                self.sink.id != SPA_ID_INVALID &&
+                self.streamOutputIds[channel] != SPA_ID_INVALID &&
+                self.ports[channel].id != SPA_ID_INVALID)
+              self.createSinkLink(channel);
+          self.resetLinkRetryBackoffIfRecovered();
         },
         self.controlCallbackFailed, self.faulted);
   }
@@ -507,9 +566,8 @@ struct PlaybackGraph::Impl {
         "SkyAPO Playback Stream", PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
         PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.virtual", "true",
-        PW_KEY_NODE_AUTOCONNECT, "true", PW_KEY_TARGET_OBJECT,
-        sink.name.c_str(), "node.dont-fallback", "true", "node.linger", "true",
-        nullptr);
+        PW_KEY_NODE_AUTOCONNECT, "false", "node.dont-fallback", "true",
+        "node.linger", "true", nullptr);
     if (!streamProps)
       throw std::runtime_error("cannot allocate playback stream properties");
     streamFilter = pw_filter_new(core, "SkyAPO Playback Stream", streamProps);
@@ -620,6 +678,7 @@ struct PlaybackGraph::Impl {
       std::this_thread::yield();
     for (unsigned channel = 0; channel < channels; ++channel) {
       destroyLink(channel);
+      destroySinkLink(channel);
       linked[channel] = false;
       streamInputs[channel] = nullptr;
       streamOutputs[channel] = nullptr;
@@ -636,10 +695,9 @@ struct PlaybackGraph::Impl {
         PW_KEY_NODE_NAME, "skyapo.playback.stream", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback Stream", PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
-        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.link-group",
-        "skyapo-playback", "node.virtual", "true", PW_KEY_NODE_AUTOCONNECT,
-        "true", PW_KEY_TARGET_OBJECT, sink.name.c_str(), "node.dont-fallback",
-        "true", "node.linger", "true", nullptr);
+        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.virtual", "true",
+        PW_KEY_NODE_AUTOCONNECT, "false", "node.dont-fallback", "true",
+        "node.linger", "true", nullptr);
     if (!streamProps)
       throw std::runtime_error("cannot allocate playback stream properties");
     streamFilter = pw_filter_new(core, "SkyAPO Playback Stream", streamProps);
@@ -960,6 +1018,68 @@ struct PlaybackGraph::Impl {
               << pw_proxy_get_id(links[channel]) << ")\n";
   }
 
+  void createSinkLink(unsigned channel) {
+    if (channel >= channels || sinkLinks[channel] || !sinkAvailable ||
+        sink.id == SPA_ID_INVALID ||
+        streamOutputIds[channel] == SPA_ID_INVALID ||
+        ports[channel].id == SPA_ID_INVALID ||
+        sinkLinkGlobalIds[channel] != SPA_ID_INVALID)
+      return;
+    auto *properties = pw_properties_new(nullptr, nullptr);
+    if (!properties) {
+      setSinkLinkError("cannot allocate playback sink-link properties");
+      scheduleLinkRetry();
+      return;
+    }
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u",
+                       pw_filter_get_node_id(streamFilter));
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u",
+                       streamOutputIds[channel]);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u", sink.id);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
+                       ports[channel].id);
+    auto *createdLink =
+        pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
+                              PW_VERSION_LINK, &properties->dict, 0);
+    sinkLinks[channel] = reinterpret_cast<pw_proxy *>(createdLink);
+    pw_properties_free(properties);
+    if (!sinkLinks[channel]) {
+      setSinkLinkError(
+          "cannot connect SkyAPO playback stream to selected sink");
+      scheduleLinkRetry();
+      return;
+    }
+    static const auto proxyEvents = [] {
+      pw_proxy_events value{};
+      value.version = PW_VERSION_PROXY_EVENTS;
+      value.error = proxyError;
+      return value;
+    }();
+    pw_proxy_add_listener(sinkLinks[channel], &sinkProxyHooks[channel],
+                          &proxyEvents, &sinkLinkContexts[channel]);
+    sinkProxyListenerAttached[channel] = true;
+    static const auto events = [] {
+      pw_link_events value{};
+      value.version = PW_VERSION_LINK_EVENTS;
+      value.info = linkInfo;
+      return value;
+    }();
+    if (pw_link_add_listener(reinterpret_cast<pw_link *>(sinkLinks[channel]),
+                             &sinkLinkHooks[channel], &events,
+                             &sinkLinkContexts[channel]) < 0) {
+      setSinkLinkError("cannot monitor SkyAPO playback sink link");
+      destroySinkLink(channel);
+      scheduleLinkRetry();
+      return;
+    }
+    sinkLinkListenerAttached[channel] = true;
+    std::cerr << "skyapod: linking playback stream port "
+              << streamOutputIds[channel] << " -> selected sink port "
+              << ports[channel].id << " (" << ports[channel].channel
+              << ", link proxy " << pw_proxy_get_id(sinkLinks[channel])
+              << ")\n";
+  }
+
   static void global(void *data, uint32_t id, uint32_t, const char *type,
                      uint32_t, const spa_dict *props) noexcept {
     auto &self = *static_cast<Impl *>(data);
@@ -1002,13 +1122,7 @@ struct PlaybackGraph::Impl {
             inputNode == std::to_string(self.sink.id) &&
             self.streamOutputIds[channel] == outputPort &&
             self.ports[channel].id == inputPort) {
-          self.linked[channel] = true;
           self.sinkLinkGlobalIds[channel] = id;
-          if (self.error == "selected playback sink disappeared" &&
-              std::all_of(self.linked.begin(),
-                          self.linked.begin() + self.channels,
-                          [](bool value) { return value; }))
-            self.error.clear();
           return;
         }
       }
@@ -1050,10 +1164,12 @@ struct PlaybackGraph::Impl {
                  direction == "out" &&
                  self.streamOutputIds[index] == SPA_ID_INVALID) {
         self.streamOutputIds[index] = id;
+        self.createSinkLink(index);
       } else if (self.sinkAvailable && nodeId == std::to_string(self.sink.id) &&
                  direction == "in" && self.ports[index].id == SPA_ID_INVALID) {
         self.ports[index].id = id;
         self.ports[index].node = self.sink.id;
+        self.createSinkLink(index);
       }
       return;
     }
@@ -1153,14 +1269,20 @@ struct PlaybackGraph::Impl {
       self.sinkAvailable = false;
       self.sink.id = SPA_ID_INVALID;
       for (unsigned channel = 0; channel < self.channels; ++channel)
-        self.linked[channel] = false;
+        self.destroySinkLink(channel);
     }
     for (unsigned channel = 0; channel < self.channels; ++channel) {
-      if (self.ports[channel].id == id)
+      if (self.ports[channel].id == id) {
+        self.destroySinkLink(channel);
         self.ports[channel].id = SPA_ID_INVALID;
+      }
+      if (self.streamOutputIds[channel] == id) {
+        self.destroySinkLink(channel);
+        self.streamOutputIds[channel] = SPA_ID_INVALID;
+      }
       if (self.sinkLinkGlobalIds[channel] == id) {
-        self.sinkLinkGlobalIds[channel] = SPA_ID_INVALID;
-        self.linked[channel] = false;
+        self.destroySinkLink(channel);
+        self.scheduleLinkRetry();
       }
       if (self.linkGlobalIds[channel] != id)
         continue;
@@ -1350,6 +1472,17 @@ struct PlaybackGraph::Impl {
     auto &self = *context.owner;
     detail::invokeControlCallback(
         [&] {
+          if (context.sinkLink) {
+            if (!self.sinkLinks[context.channel])
+              return;
+            self.setSinkLinkError(
+                message ? std::string("PipeWire playback sink link failed: ") +
+                              message
+                        : "PipeWire playback sink link proxy failed");
+            self.destroySinkLink(context.channel);
+            self.scheduleLinkRetry();
+            return;
+          }
           if (!self.links[context.channel])
             return;
 #ifdef SKYAPO_PIPEWIRE_E2E_TESTING
@@ -1371,6 +1504,40 @@ struct PlaybackGraph::Impl {
         [&] {
           if (!info)
             return;
+          if (context.sinkLink) {
+            if (info->output_node_id !=
+                    pw_filter_get_node_id(self.streamFilter) ||
+                info->output_port_id != self.streamOutputIds[context.channel] ||
+                info->input_node_id != self.sink.id ||
+                info->input_port_id != self.ports[context.channel].id) {
+              self.setSinkLinkError(
+                  "PipeWire playback sink link resolved to unexpected endpoint "
+                  "IDs (output node/port " +
+                  std::to_string(info->output_node_id) + "/" +
+                  std::to_string(info->output_port_id) + ", input node/port " +
+                  std::to_string(info->input_node_id) + "/" +
+                  std::to_string(info->input_port_id) + ")");
+              self.destroySinkLink(context.channel);
+              self.scheduleLinkRetry();
+              return;
+            }
+            self.sinkLinkGlobalIds[context.channel] = info->id;
+            self.linked[context.channel] = info->state == PW_LINK_STATE_ACTIVE;
+            if (info->state == PW_LINK_STATE_ERROR) {
+              self.setSinkLinkError(info->error ? info->error
+                                                : "playback sink link failed");
+              self.destroySinkLink(context.channel);
+              self.scheduleLinkRetry();
+            } else if (info->state == PW_LINK_STATE_ACTIVE) {
+              if (self.error == "selected playback sink disappeared" &&
+                  std::all_of(self.linked.begin(),
+                              self.linked.begin() + self.channels,
+                              [](bool value) { return value; }))
+                self.error.clear();
+              self.clearSinkLinkErrorIfRecovered();
+            }
+            return;
+          }
           self.linkGlobalIds[context.channel] = info->id;
           self.internalLinkExists[context.channel] =
               info->state != PW_LINK_STATE_ERROR;

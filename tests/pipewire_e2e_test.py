@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import wave
+from functools import lru_cache
 from pprint import pformat
 
 from pipewire_dump import pipewire_dump_objects
@@ -28,13 +29,19 @@ def run(args, env, timeout=8, check=True):
     return result
 
 
-def wireplumber_command(executable):
-    """Select the policy-only profile when this WirePlumber supports it."""
+@lru_cache(maxsize=None)
+def wireplumber_supports_profiles(executable):
+    """Return whether this WirePlumber uses the 0.5 profile/logging API."""
     executable = str(executable)
     help_result = subprocess.run(
         [executable, "--help"], text=True, capture_output=True, timeout=5)
     help_text = help_result.stdout + help_result.stderr
-    if "--profile" in help_text:
+    return "--profile" in help_text
+
+
+def wireplumber_command(executable):
+    """Select the policy-only profile when this WirePlumber supports it."""
+    if wireplumber_supports_profiles(str(executable)):
         return [executable, "--profile", "policy"]
     # WirePlumber 0.4 has no profile CLI option; its default configuration
     # starts the session and policy manager together.
@@ -814,7 +821,10 @@ def main():
                     env["SKYAPO_TEST_LINK_FAULT_MODE"] = "async-error"
         if wireplumber_playback:
             env["WIREPLUMBER_DEBUG"] = os.environ.get(
-                "SKYAPO_WIREPLUMBER_DEBUG", "D:script/policy-node,wp-*")
+                "SKYAPO_WIREPLUMBER_DEBUG",
+                ("s-linking:D,s-node:D"
+                 if wireplumber_supports_profiles(wireplumber)
+                 else "I:script/policy-node"))
         if transition_format or playback_pdc_recovery:
             env["SKYAPO_TEST_TRANSITION_MS"] = "500"
         config_candidate_pause = root / "config-candidate-pause"
@@ -946,6 +956,16 @@ def main():
                         raise RuntimeError(
                             "PipeWire did not create the alternate playback target")
 
+            if wireplumber_playback:
+                metadata = shutil.which("pw-metadata")
+                if not metadata:
+                    raise RuntimeError(
+                        "WirePlumber playback test requires pw-metadata")
+                run([metadata, "-n", "default", "0",
+                     "default.audio.sink",
+                     '{"name":"skyapo.test.null-target"}',
+                     "Spa:String:JSON"], env, timeout=5)
+
             source_process = start_test_source(
                 source, mono, env, source_log,
                 serial="SKYAPO-TEST-SERIAL-42" if stable_id_replug else None,
@@ -1060,15 +1080,6 @@ def main():
                     raise RuntimeError("test playback sink was not enumerated")
                 run([str(cli), "device", "output", "set",
                      expected_sink], env, timeout=5)
-                if wireplumber_playback:
-                    metadata = shutil.which("pw-metadata")
-                    if not metadata:
-                        raise RuntimeError(
-                            "WirePlumber playback test requires pw-metadata")
-                    run([metadata, "-n", "default", "0",
-                         "default.audio.sink",
-                         '{"name":"skyapo.test.null-target"}',
-                         "Spa:String:JSON"], env, timeout=5)
                 if startup_playback_recovery:
                     graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
@@ -1516,11 +1527,12 @@ def main():
                     item.get("info", {}).get("props", item.get("props", {}))
                     .get("node.name") == "skyapo.playback.stream"), None)
                 if (not playback_stream_props or
+                        playback_stream_props.get("node.autoconnect") is not False or
                         playback_stream_props.get("node.dont-fallback") is not True or
                         playback_stream_props.get("node.linger") is not True):
                     raise RuntimeError(
-                        "SkyAPO playback output stream must wait for its selected "
-                        "sink instead of falling back or being destroyed; "
+                        "SkyAPO playback output stream must use explicit target "
+                        "links, wait for its selected sink, and linger; "
                         f"properties={playback_stream_props}")
                 advertised_formats = run(
                     [str(pw_cli), "enum-params", playback_node, "EnumFormat"],
@@ -4128,7 +4140,9 @@ def main():
                     [metadata, "-n", "default"], env, timeout=5).stdout
                 expected_default = (
                     "skyapo.test.null-target-alt"
-                    if mode == "playback-wireplumber" else
+                    if mode in (
+                        "playback-wireplumber",
+                        "playback-wireplumber-target-recovery-stable-id") else
                     "skyapo.test.null-target")
                 if ("key:'default.audio.sink' " not in default_metadata or
                         f"value:'{{\"name\":\"{expected_default}\"}}'" not in
