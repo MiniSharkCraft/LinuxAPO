@@ -34,6 +34,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/port-config.h>
 #include <spa/param/props.h>
+#include <spa/utils/result.h>
 #include <sstream>
 #include <sys/stat.h>
 #include <time.h>
@@ -125,8 +126,8 @@ struct Runtime {
   spa_hook coreHook{}, registryHook{}, filterHook{};
   spa_source *rateEvent{}, *transitionEvent{}, *statusEvent{},
       *pluginLatencyEvent{}, *processFaultEvent{}, *sigint{}, *sigterm{},
-      *selectionTimer{}, *playbackRecoveryTimer{}, *configEvent{},
-      *reloadTimer{}, *linkRetryTimer{};
+      *selectionTimer{}, *playbackRecoveryTimer{}, *defaultRouteTimer{},
+      *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
   std::unique_ptr<skyapo::platform::ConfigWatcher> configWatcher;
   int server = -1;
   bool ownsSocket = false;
@@ -154,6 +155,7 @@ struct Runtime {
   std::unique_ptr<skyapo::pipewire::PlaybackGraph> playbackGraph;
   bool defaultMetadataSnapshotReady{};
   bool defaultMetadataPresent{};
+  bool originalDefaultMetadataCaptured{};
   bool defaultRouteAttempted{};
   bool defaultRoutePending{};
   bool defaultRouteOwned{};
@@ -264,10 +266,10 @@ struct Runtime {
       pw_core_disconnect(core);
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
-      for (auto *s :
-           {rateEvent, transitionEvent, statusEvent, pluginLatencyEvent,
-            processFaultEvent, sigint, sigterm, selectionTimer,
-            playbackRecoveryTimer, configEvent, reloadTimer, linkRetryTimer})
+      for (auto *s : {rateEvent, transitionEvent, statusEvent,
+                      pluginLatencyEvent, processFaultEvent, sigint, sigterm,
+                      selectionTimer, playbackRecoveryTimer, defaultRouteTimer,
+                      configEvent, reloadTimer, linkRetryTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
@@ -347,6 +349,7 @@ struct Runtime {
     if (r.defaultMetadataSnapshotSequence == sequence) {
       r.defaultMetadataSnapshotReady = true;
       r.defaultMetadataSnapshotSequence = -1;
+      r.scheduleDefaultRouteUpdate();
     }
     if (r.defaultRouteSequence == sequence) {
       r.defaultRoutePending = false;
@@ -357,6 +360,8 @@ struct Runtime {
             "PipeWire did not confirm skyapo.playback as the default sink";
       r.defaultRouteSequence = -1;
     }
+    if (r.defaultRestoreSequence == sequence)
+      r.defaultRestoreSequence = -1;
   }
   void waitForCoreSync(int sequence) {
     if (sequence < 0 || !main)
@@ -370,17 +375,127 @@ struct Runtime {
     }
   }
   void updateDefaultRoute() {
-    // Do not replace the desktop's default audio sink. WirePlumber's smart-
-    // filter policy inserts the paired SkyAPO nodes transparently in the
-    // selected physical sink's route.
+    if (!playbackGraph || !playbackGraph->ready() || !defaultMetadata ||
+        !defaultMetadataSnapshotReady || defaultRouteAttempted ||
+        defaultRoutePending || defaultRouteOwned || defaultRouteOverridden)
+      return;
+
+    if (!originalDefaultMetadataCaptured) {
+      originalDefaultMetadataPresent = defaultMetadataPresent;
+      originalDefaultMetadataType = defaultMetadataType;
+      originalDefaultMetadataValue = defaultMetadataValue;
+      originalDefaultMetadataCaptured = true;
+    }
+
+    if (defaultMetadataName == "skyapo.playback") {
+      defaultRouteAttempted = true;
+      defaultRouteError =
+          "SkyAPO Playback is already the system default; this daemon did not "
+          "claim the route and will not change it on shutdown";
+      return;
+    }
+
+    defaultRouteAttempted = true;
+    if (!PW_PERM_IS_W(defaultMetadataPermissions)) {
+      defaultRouteError =
+          "PipeWire default metadata is not writable; ordinary application "
+          "playback remains on the existing default sink";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return;
+    }
+
+    defaultRoutePending = true;
+    defaultRouteSetRequested = true;
+    const int result = pw_metadata_set_property(
+        defaultMetadata, PW_ID_CORE, "default.audio.sink", "Spa:String:JSON",
+        "{\"name\":\"skyapo.playback\"}");
+    if (result < 0) {
+      defaultRoutePending = false;
+      defaultRouteSetRequested = false;
+      defaultRouteError =
+          std::string("cannot set PipeWire default sink metadata: ") +
+          spa_strerror(result);
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return;
+    }
+
+    defaultRouteSequence = requestCoreSync();
+    if (defaultRouteSequence < 0) {
+      defaultRoutePending = false;
+      defaultRouteSetRequested = false;
+      defaultRouteError = "cannot confirm the PipeWire default sink update";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+    }
+  }
+  void scheduleDefaultRouteUpdate() {
+    if (!defaultRouteTimer || !main || cleaning || stopping ||
+        defaultRouteAttempted || defaultRouteOwned || defaultRoutePending ||
+        defaultRouteOverridden)
+      return;
+    timespec delay{0, 10000000};
+    pw_loop_update_timer(pw_main_loop_get_loop(main), defaultRouteTimer, &delay,
+                         nullptr, false);
+  }
+  static void defaultRouteReady(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    r.updateDefaultRoute();
+    r.scheduleDefaultRouteUpdate();
   }
   std::string defaultRouteStatus() const {
     if (!playbackGraph)
       return "unavailable (playback graph is not active)";
-    return "delegated to PipeWire session policy; system default is preserved";
+    if (defaultRouteOwned)
+      return "active (ordinary application playback routes through SkyAPO; "
+             "previous default is restored on clean shutdown)";
+    if (defaultRoutePending)
+      return "waiting for PipeWire to confirm the SkyAPO default route";
+    if (!defaultRouteError.empty())
+      return "inactive (" + defaultRouteError + ")";
+    if (!playbackGraph->ready())
+      return "waiting for playback graph links to become active";
+    if (!defaultMetadata)
+      return "waiting for PipeWire default metadata";
+    if (!defaultMetadataSnapshotReady)
+      return "waiting for PipeWire default metadata snapshot";
+    return "waiting for default route application";
   }
   void restoreDefaultRouteAndWait() noexcept {
-    // Playback routing is policy-owned and must not rewrite user metadata.
+    if (!defaultRouteOwned || defaultRouteOverridden || !defaultMetadata ||
+        !originalDefaultMetadataCaptured ||
+        defaultMetadataName != "skyapo.playback")
+      return;
+
+    defaultRouteRestoring = true;
+    const int result = pw_metadata_set_property(
+        defaultMetadata, PW_ID_CORE, "default.audio.sink",
+        originalDefaultMetadataPresent ? originalDefaultMetadataType.c_str()
+                                       : nullptr,
+        originalDefaultMetadataPresent ? originalDefaultMetadataValue.c_str()
+                                       : nullptr);
+    if (result < 0) {
+      defaultRouteRestoring = false;
+      std::cerr << "skyapod: cannot restore PipeWire default sink metadata: "
+                << spa_strerror(result) << '\n';
+      return;
+    }
+
+    defaultRestoreSequence = requestCoreSync();
+    if (defaultRestoreSequence < 0) {
+      defaultRouteRestoring = false;
+      std::cerr
+          << "skyapod: cannot confirm PipeWire default sink restoration\n";
+      return;
+    }
+    waitForCoreSync(defaultRestoreSequence);
+    defaultRestoreSequence = -1;
+    defaultRouteRestoring = false;
+    defaultRouteOwned = false;
+    if (defaultMetadataPresent != originalDefaultMetadataPresent ||
+        (defaultMetadataPresent &&
+         (defaultMetadataType != originalDefaultMetadataType ||
+          defaultMetadataValue != originalDefaultMetadataValue)))
+      std::cerr << "skyapod: PipeWire did not confirm restoration of the "
+                   "previous default sink metadata\n";
   }
   bool sameFormat(const Engine &a, const Engine &b) const noexcept {
     return a.sampleRate() == b.sampleRate() && a.channels() == b.channels() &&
@@ -957,6 +1072,7 @@ struct Runtime {
             renderVolume.uniformChannelGainDb);
       }
       playbackError.clear();
+      scheduleDefaultRouteUpdate();
       std::cerr << "skyapod: playback graph recovered for "
                 << playbackDevice->name << '\n';
       return true;
@@ -1585,9 +1701,20 @@ struct Runtime {
       }
       r.defaultMetadataId = SPA_ID_INVALID;
       r.defaultMetadataSnapshotReady = false;
+      r.originalDefaultMetadataCaptured = false;
       r.defaultRouteOwned = false;
       r.defaultRoutePending = false;
+      r.defaultRouteAttempted = false;
       r.defaultRouteSetRequested = false;
+      r.defaultRouteRestoring = false;
+      r.defaultRouteOverridden = false;
+      r.originalDefaultMetadataPresent = false;
+      r.originalDefaultMetadataType.clear();
+      r.originalDefaultMetadataValue.clear();
+      r.defaultMetadataPresent = false;
+      r.defaultMetadataType.clear();
+      r.defaultMetadataValue.clear();
+      r.defaultMetadataName.clear();
       r.defaultRouteError = "PipeWire default metadata disappeared";
     }
     if (id == r.device.id)
@@ -1916,6 +2043,7 @@ struct Runtime {
     sigterm = pw_loop_add_signal(loop, SIGTERM, signal, this);
     selectionTimer = pw_loop_add_timer(loop, selectionChanged, this);
     playbackRecoveryTimer = pw_loop_add_timer(loop, playbackRecovery, this);
+    defaultRouteTimer = pw_loop_add_timer(loop, defaultRouteReady, this);
     reloadTimer = pw_loop_add_timer(loop, reloadReady, this);
     linkRetryTimer = pw_loop_add_timer(loop, retryLinks, this);
     configWatcher = std::make_unique<skyapo::platform::ConfigWatcher>(config);
@@ -1923,8 +2051,8 @@ struct Runtime {
                                  SPA_IO_IN, false, configReady, this);
     if (!rateEvent || !transitionEvent || !pluginLatencyEvent ||
         !processFaultEvent || !sigint || !sigterm || !selectionTimer ||
-        !playbackRecoveryTimer || !reloadTimer || !linkRetryTimer ||
-        !configEvent)
+        !playbackRecoveryTimer || !defaultRouteTimer || !reloadTimer ||
+        !linkRetryTimer || !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);

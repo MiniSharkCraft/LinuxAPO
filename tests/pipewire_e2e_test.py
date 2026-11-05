@@ -1033,8 +1033,10 @@ def main():
                     consumer_args[
                         consumer_args.index("--duration-ms") + 1] = "8000"
                     consumer_args.remove("--ignore-silent-blocks")
-                if (not startup_playback_recovery and not playback_pdc_recovery
-                        and not playback_quantum_variation):
+                if (not wireplumber_playback and
+                        not startup_playback_recovery and
+                        not playback_pdc_recovery and
+                        not playback_quantum_variation):
                     playback_consumer = subprocess.Popen(
                         consumer_args,
                         env=env, text=True,
@@ -1336,6 +1338,26 @@ def main():
                 raise RuntimeError(
                     f"daemon did not reach streaming state:\n{status}"
                     f"{policy_graph}")
+            if wireplumber_playback:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and (
+                        "PipeWire default sink: skyapo.playback" not in status):
+                    if daemon_process.poll() is not None:
+                        raise RuntimeError(
+                            "skyapod exited before enabling the SkyAPO default route")
+                    time.sleep(0.05)
+                    status = run([str(cli), "status"], env, timeout=5).stdout
+                if "PipeWire default sink: skyapo.playback" not in status:
+                    raise RuntimeError(
+                        "PipeWire did not route the system default through SkyAPO "
+                        f"within 5 seconds:\n{status}")
+                if (not startup_playback_recovery and
+                        not playback_pdc_recovery and
+                        not playback_quantum_variation):
+                    playback_consumer = subprocess.Popen(
+                        consumer_args, env=env, text=True,
+                        stdout=playback_consumer_log,
+                        stderr=subprocess.STDOUT)
             if observed_dsp_initialization:
                 print("Observed the DSP initialization status transition.")
             else:
@@ -1393,6 +1415,11 @@ def main():
             for expected in expected_status:
                 if expected not in status:
                     raise RuntimeError(f"missing runtime value {expected!r}:\n{status}")
+            if (wireplumber_playback and
+                    "PipeWire default sink: skyapo.playback" not in status):
+                raise RuntimeError(
+                    "ordinary application playback is not routed through the "
+                    "SkyAPO virtual sink while the daemon is active:\n" + status)
             if (not plugin_chain and not delay_pdc and not convolution and
                     not callback_process_exception and
                     ("DSP amplitude ratio: 1" if playback_stage else
@@ -4061,6 +4088,19 @@ def main():
             if daemon_process.returncode != 0:
                 raise RuntimeError(
                     f"skyapod exited with status {daemon_process.returncode}")
+            if wireplumber_playback:
+                metadata = shutil.which("pw-metadata")
+                if not metadata:
+                    raise RuntimeError(
+                        "WirePlumber playback test requires pw-metadata")
+                default_metadata = run(
+                    [metadata, "-n", "default"], env, timeout=5).stdout
+                if ("key:'default.audio.sink' " not in default_metadata or
+                        "value:'{\"name\":\"skyapo.test.null-target\"}'" not in
+                        default_metadata):
+                    raise RuntimeError(
+                        "orderly daemon shutdown did not restore the original "
+                        "PipeWire default sink metadata:\n" + default_metadata)
             state_layout = {
                 "plugin-live-param": ("clap-state", "*.clapstate", "CLAP"),
                 "clap-state-restart": ("clap-state", "*.clapstate", "CLAP"),

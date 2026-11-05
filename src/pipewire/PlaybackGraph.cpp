@@ -473,17 +473,18 @@ struct PlaybackGraph::Impl {
     for (const auto &port : ports)
       positions += " " + port.channel;
     positions += " ]";
-    // Leave the smart-filter target dynamic: WirePlumber then keeps ordinary
-    // playback streams in the SkyAPO chain when the default sink disappears
-    // and its effective fallback changes. The downstream stream remains
-    // explicitly pinned to the selected physical sink below.
+    // Publish a regular virtual sink. Runtime temporarily makes this the
+    // PipeWire default while its paired output stream sends processed audio to
+    // the selected physical sink. This works with both the standard
+    // WirePlumber 0.4 linking policy and the newer 0.5 smart-filter policy;
+    // ordinary application streams never need to know about SkyAPO.
     auto *props = pw_properties_new(
         PW_KEY_NODE_NAME, "skyapo.playback", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback", PW_KEY_MEDIA_CLASS, "Audio/Sink", PW_KEY_MEDIA_TYPE,
-        "Audio", "filter.smart", "true", "filter.smart.name", "skyapo-playback",
-        "node.link-group", "skyapo-playback", PW_KEY_NODE_WANT_DRIVER, "true",
-        PW_KEY_NODE_PAUSE_ON_IDLE, "false", PW_KEY_AUDIO_CHANNELS,
-        std::to_string(channels).c_str(), PW_KEY_AUDIO_RATE,
+        "Audio", "node.link-group", "skyapo-playback", PW_KEY_NODE_AUTOCONNECT,
+        "true", PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_PAUSE_ON_IDLE,
+        "false", PW_KEY_AUDIO_CHANNELS, std::to_string(channels).c_str(),
+        PW_KEY_AUDIO_RATE,
         std::to_string(sink.sampleRate ? sink.sampleRate : 48000).c_str(),
         PW_KEY_AUDIO_FORMAT, "F32", SPA_KEY_AUDIO_POSITION, positions.c_str(),
         nullptr);
