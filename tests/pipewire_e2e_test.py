@@ -40,24 +40,16 @@ def wireplumber_command(executable):
     return [executable]
 
 
-def ensure_private_session_bus():
-    """Run the whole WirePlumber E2E process tree on a private D-Bus session."""
-    if (len(sys.argv) < 11 or
-            not sys.argv[10].startswith("playback-wireplumber") or
-            os.environ.get("SKYAPO_TEST_PRIVATE_DBUS") == "1"):
-        return
-
+def start_wireplumber(executable, env, logs):
+    """Give only WirePlumber a private session bus for its policy service."""
+    command = wireplumber_command(executable)
     dbus_run_session = shutil.which("dbus-run-session")
     if not dbus_run_session:
         raise RuntimeError(
             "WirePlumber E2E requires dbus-run-session; install dbus-daemon")
-    env = os.environ.copy()
-    env["SKYAPO_TEST_PRIVATE_DBUS"] = "1"
-    os.execvpe(
-        dbus_run_session,
-        [dbus_run_session, "--", sys.executable,
-         str(pathlib.Path(__file__).resolve()), *sys.argv[1:]],
-        env)
+    return subprocess.Popen(
+        [dbus_run_session, "--", *command], env=env, text=True,
+        stdout=logs, stderr=subprocess.STDOUT)
 
 
 class SystemdManagedDaemon:
@@ -458,7 +450,6 @@ def start_test_source(source, mono, env, source_log, name=None, serial=None,
 
 
 def main():
-    ensure_private_session_bus()
     if len(sys.argv) not in (11, 13, 14) or sys.argv[10] not in (
         "mono", "stereo", "surround51", "surround71", "mono-44100", "stereo-44100",
         "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
@@ -781,6 +772,9 @@ def main():
             "XDG_CONFIG_HOME": str(config_home),
             "XDG_STATE_HOME": str(state_home),
             "PIPEWIRE_RUNTIME_DIR": str(runtime),
+            # Prevent GIO from trying to create a per-test GVFS FUSE mount
+            # under this disposable runtime directory.
+            "GIO_USE_VFS": "local",
         })
         if output_switch or playback_isolation:
             fault_library = env.get("SKYAPO_TEST_FILTER_FAULT_LIBRARY")
@@ -858,9 +852,8 @@ def main():
             server = start_private_pipewire(
                 pipewire, rate_config, env, logs, runtime)
             if wireplumber_playback:
-                wireplumber_process = subprocess.Popen(
-                    wireplumber_command(wireplumber), env=env, text=True,
-                    stdout=logs, stderr=subprocess.STDOUT)
+                wireplumber_process = start_wireplumber(
+                    wireplumber, env, logs)
                 time.sleep(0.5)
                 if wireplumber_process.poll() is not None:
                     raise RuntimeError(
@@ -3372,9 +3365,8 @@ def main():
                     server = start_private_pipewire(
                         pipewire, pw_config, env, logs, runtime)
                     if playback_server_restart:
-                        wireplumber_process = subprocess.Popen(
-                            wireplumber_command(wireplumber), env=env,
-                            text=True, stdout=logs, stderr=subprocess.STDOUT)
+                        wireplumber_process = start_wireplumber(
+                            wireplumber, env, logs)
                         time.sleep(0.5)
                         if wireplumber_process.poll() is not None:
                             raise RuntimeError(
