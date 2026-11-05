@@ -27,6 +27,19 @@ def run(args, env, timeout=8, check=True):
     return result
 
 
+def wireplumber_command(executable):
+    """Select the policy-only profile when this WirePlumber supports it."""
+    executable = str(executable)
+    help_result = subprocess.run(
+        [executable, "--help"], text=True, capture_output=True, timeout=5)
+    help_text = help_result.stdout + help_result.stderr
+    if "--profile" in help_text:
+        return [executable, "--profile", "policy"]
+    # WirePlumber 0.4 has no profile CLI option; its default configuration
+    # starts the session and policy manager together.
+    return [executable]
+
+
 class SystemdManagedDaemon:
     """Popen-like control for a transient per-user skyapod.service."""
 
@@ -825,7 +838,7 @@ def main():
                 pipewire, rate_config, env, logs, runtime)
             if wireplumber_playback:
                 wireplumber_process = subprocess.Popen(
-                    [str(wireplumber), "-p", "policy"], env=env, text=True,
+                    wireplumber_command(wireplumber), env=env, text=True,
                     stdout=logs, stderr=subprocess.STDOUT)
                 time.sleep(0.5)
                 if wireplumber_process.poll() is not None:
@@ -3339,7 +3352,7 @@ def main():
                         pipewire, pw_config, env, logs, runtime)
                     if playback_server_restart:
                         wireplumber_process = subprocess.Popen(
-                            [str(wireplumber), "-p", "policy"], env=env,
+                            wireplumber_command(wireplumber), env=env,
                             text=True, stdout=logs, stderr=subprocess.STDOUT)
                         time.sleep(0.5)
                         if wireplumber_process.poll() is not None:
