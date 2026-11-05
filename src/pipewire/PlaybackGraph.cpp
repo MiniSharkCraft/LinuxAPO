@@ -474,17 +474,16 @@ struct PlaybackGraph::Impl {
       positions += " " + port.channel;
     positions += " ]";
     // Publish a regular virtual sink. Runtime temporarily makes this the
-    // PipeWire default while its paired output stream sends processed audio to
-    // the selected physical sink. This works with both the standard
-    // WirePlumber 0.4 linking policy and the newer 0.5 smart-filter policy;
-    // ordinary application streams never need to know about SkyAPO.
+    // PipeWire default while the paired output stream sends processed audio to
+    // the selected physical sink. Keep both nodes out of node.link-group:
+    // WirePlumber 0.4 refuses to link nodes in the same group, and Smart
+    // Filters are not used by this regular-sink routing design.
     auto *props = pw_properties_new(
         PW_KEY_NODE_NAME, "skyapo.playback", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback", PW_KEY_MEDIA_CLASS, "Audio/Sink", PW_KEY_MEDIA_TYPE,
-        "Audio", "node.link-group", "skyapo-playback", PW_KEY_NODE_AUTOCONNECT,
-        "true", PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_PAUSE_ON_IDLE,
-        "false", PW_KEY_AUDIO_CHANNELS, std::to_string(channels).c_str(),
-        PW_KEY_AUDIO_RATE,
+        "Audio", PW_KEY_NODE_AUTOCONNECT, "true", PW_KEY_NODE_WANT_DRIVER,
+        "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false", PW_KEY_AUDIO_CHANNELS,
+        std::to_string(channels).c_str(), PW_KEY_AUDIO_RATE,
         std::to_string(sink.sampleRate ? sink.sampleRate : 48000).c_str(),
         PW_KEY_AUDIO_FORMAT, "F32", SPA_KEY_AUDIO_POSITION, positions.c_str(),
         nullptr);
@@ -507,10 +506,10 @@ struct PlaybackGraph::Impl {
         PW_KEY_NODE_NAME, "skyapo.playback.stream", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback Stream", PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
-        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.link-group",
-        "skyapo-playback", "node.virtual", "true", PW_KEY_NODE_AUTOCONNECT,
-        "true", PW_KEY_TARGET_OBJECT, sink.name.c_str(), "node.dont-fallback",
-        "true", "node.linger", "true", nullptr);
+        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.virtual", "true",
+        PW_KEY_NODE_AUTOCONNECT, "true", PW_KEY_TARGET_OBJECT,
+        sink.name.c_str(), "node.dont-fallback", "true", "node.linger", "true",
+        nullptr);
     if (!streamProps)
       throw std::runtime_error("cannot allocate playback stream properties");
     streamFilter = pw_filter_new(core, "SkyAPO Playback Stream", streamProps);
