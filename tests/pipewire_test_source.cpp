@@ -18,11 +18,29 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <signal.h>
 #include <time.h>
 #include <utility>
 
 namespace {
 constexpr unsigned MaxChannels = 8;
+volatile std::sig_atomic_t pdcSignalStaging = 0;
+volatile std::sig_atomic_t pdcSignalStage = 0;
+volatile std::sig_atomic_t signalEnabled = 1;
+
+// Test triggers are observed directly by the audio callback, so keep these
+// handlers async-signal-safe instead of routing user signals through PipeWire.
+void userSignalHandler(int signalNumber) noexcept {
+  if (pdcSignalStaging) {
+    if (signalNumber == SIGUSR2)
+      pdcSignalStage = 1;
+    else if (signalNumber == SIGUSR1)
+      pdcSignalStage = 2;
+  } else if (signalNumber == SIGUSR1) {
+    signalEnabled = 1;
+  }
+}
+
 constexpr std::array<const char *, MaxChannels> Surround51 = {
     "FL", "FR", "FC", "LFE", "RL", "RR", "", ""};
 constexpr std::array<const char *, MaxChannels> Surround71 = {
@@ -53,21 +71,12 @@ struct Source {
   double phase{};
   bool latencyProbe{};
   bool pdcTriggerStaging{};
-  std::atomic<unsigned> pdcSignalStage{0};
-  std::atomic<bool> signalEnabled{true};
   bool failed{};
 
   static void signal(void *data, int signalNumber) {
     auto &source = *static_cast<Source *>(data);
-    if (source.pdcTriggerStaging && signalNumber == SIGUSR2) {
-      source.pdcSignalStage.store(1, std::memory_order_relaxed);
-    } else if (source.pdcTriggerStaging && signalNumber == SIGUSR1) {
-      source.pdcSignalStage.store(2, std::memory_order_relaxed);
-    } else if (signalNumber == SIGUSR1) {
-      source.signalEnabled.store(true, std::memory_order_relaxed);
-    } else {
+    if (signalNumber == SIGINT || signalNumber == SIGTERM)
       pw_main_loop_quit(source.loop);
-    }
   }
 
   static void coreError(void *, uint32_t, int, int result,
@@ -128,10 +137,8 @@ struct Source {
                                   position->clock.rate.num
                             : 48000.0;
     const double step = twoPi * frequency / rate;
-    const bool signalEnabled =
-        source.signalEnabled.load(std::memory_order_relaxed);
-    const unsigned pdcSignalStage =
-        source.pdcSignalStage.load(std::memory_order_relaxed);
+    const auto enabled = signalEnabled;
+    const auto stage = pdcSignalStage;
     uint64_t callbackUs = 0;
     if (source.latencyProbe) {
       timespec now{};
@@ -161,10 +168,9 @@ struct Source {
       for (unsigned c = 0; c < source.channels; ++c) {
         const bool emitSignal =
             source.pdcTriggerStaging
-                ? (pdcSignalStage == 0
-                       ? std::strcmp(source.channelNames[c], "FR") == 0
-                       : pdcSignalStage == 2)
-                : signalEnabled;
+                ? (stage == 0 ? std::strcmp(source.channelNames[c], "FR") == 0
+                              : stage == 2)
+                : enabled;
         buffers[c][i] = emitSignal ? signal : 0.0f;
         advancePhase = advancePhase || emitSignal;
       }
@@ -184,8 +190,11 @@ struct Source {
       : channels(channelCount), nodeName(std::move(name)),
         deviceSerial(std::move(serial)), linkNodeName(std::move(destination)),
         playbackStream(asPlaybackStream), channelNames(positions),
-        latencyProbe(probe), pdcTriggerStaging(usePdcTriggerStaging),
-        signalEnabled(!startSilent) {}
+        latencyProbe(probe), pdcTriggerStaging(usePdcTriggerStaging) {
+    pdcSignalStaging = pdcTriggerStaging;
+    pdcSignalStage = 0;
+    signalEnabled = !startSilent;
+  }
 
   void createLink(unsigned channel) {
     if (channel >= channels || targetNode == SPA_ID_INVALID ||
@@ -278,9 +287,13 @@ struct Source {
     pw_core_add_listener(core, &coreHook, &coreEvents, this);
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGINT, signal, this);
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGTERM, signal, this);
-    pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGUSR1, signal, this);
-    if (pdcTriggerStaging)
-      pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGUSR2, signal, this);
+    struct sigaction userSignalAction{};
+    userSignalAction.sa_handler = userSignalHandler;
+    sigemptyset(&userSignalAction.sa_mask);
+    if (sigaction(SIGUSR1, &userSignalAction, nullptr) < 0 ||
+        (pdcTriggerStaging &&
+         sigaction(SIGUSR2, &userSignalAction, nullptr) < 0))
+      throw std::runtime_error("cannot install test source signal handlers");
     registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
     static const pw_registry_events registryEvents = [] {
       pw_registry_events value{};
