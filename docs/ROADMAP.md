@@ -63,9 +63,11 @@ editor. LinuxAPO also contains native LV2, CLAP and single-audio-bus VST3
 hosts; FST-based VST2 compatibility is optional and experimental. This is not
 full EAPO parity, system-wide playback processing, or production-final.
 
-The active unpublished checkpoint is **post-0.9.0 runtime hardening**. The
-worktree currently contains uncommitted runtime, DSP, UI, packaging, test and
-documentation changes; none is treated as released. New focused PipeWire E2E
+The active unpublished checkpoint is **v0.10.0 PipeWire playback** on
+`feature/v0.10-playback-candidate`; it remains a prerelease candidate, not a
+published version. The latest playback-routing commits are `ca2c920` and
+`cf9144f`. The historical entries below retain the test scope recorded at
+each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
 Release and **77/77** ASan/UBSan. Newer evidence supersedes those counts: full
@@ -693,14 +695,31 @@ physical output and capture a loopback/monitor recording. Verify no feedback
 under ordinary desktop playback. Other audio servers and device diversity are
 not implied.
 
-**Known limitations:** initial support may be limited to one selected sink and
-PipeWire-managed application streams; per-application routing, simultaneous
-multi-sink graphs and JACK/PulseAudio-specific behavior are out of scope unless
-the tested design requires them. Current playback routing also depends on
-WirePlumber 0.5 Smart Filters; hosted Ubuntu 24.04 CI with WirePlumber 0.4.17
-reports zero playback target links and fails 15 playback E2Es.
-Compatibility with WirePlumber 0.4 is not established and remains a milestone
-gap; the tests remain enabled and failing rather than being skipped.
+**Latest playback-routing verification (2026-11-06):** the PipeWire backend now
+publishes a regular virtual sink and temporarily selects it as the PipeWire
+default, allowing ordinary default-target application streams to pass through
+SkyAPO. It no longer relies on WirePlumber 0.5 Smart Filters. On the local
+WirePlumber 0.5.18 private graph, the default playback E2E and `link-error`,
+`stage`, and `volume` variants passed **4/4**; the independent consumer
+verified `Preamp: -6 dB`, zero callback allocations/deallocations and zero
+overruns. The tests verify restoration of the previous default on clean stop
+and verify a `wpctl set-default` change relinquishes SkyAPO's route ownership
+and remains selected after shutdown. Hosted build/test and Arch package jobs
+for `ca2c920` were still running at this checkpoint; hosted sanitizer and
+release-metadata jobs passed. Commit `cf9144f` adds the external-default
+ownership/status regression and has local build/E2E verification, but awaits
+hosted CI.
+
+**Known limitations:** playback routing temporarily changes the per-user
+PipeWire default while SkyAPO runs. Local WirePlumber 0.5.18 verifies that
+behavior, including respecting a user-selected replacement default. CI for
+WirePlumber 0.4.17 is still required to establish compatibility with the
+older policy used by Ubuntu 24.04. Current hardware inspection found only the
+built-in analog sink, which is muted; the configured USB headphone sink is
+absent. Physical audible playback/loopback is therefore unverified and was
+not attempted. Per-application routing, simultaneous multi-sink graphs and
+JACK/PulseAudio-specific behavior remain out of scope unless testing exposes
+a need.
 
 **Release readiness:** publish only after real playback and independent
 recording evidence exists and capture/virtual-mic acceptance remains green.
