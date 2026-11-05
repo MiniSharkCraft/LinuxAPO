@@ -2,8 +2,11 @@
 // --expect-silent accepts near-zero RMS for intentional plugin-failure tests.
 #include <pipewire/filter.h>
 #include <pipewire/keys.h>
+#include <pipewire/link.h>
 #include <pipewire/pipewire.h>
+#include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/props.h>
 
 #include <algorithm>
 #include <array>
@@ -13,13 +16,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <csignal>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <time.h>
 
 namespace {
+volatile sig_atomic_t measurementArmRequested = 0;
 constexpr uint32_t Invalid = SPA_ID_INVALID;
 constexpr double InputAmplitude = 0.1;
 constexpr unsigned MaxChannels = 8;
@@ -29,18 +35,34 @@ constexpr std::array<const char *, MaxChannels> Surround71 = {
     "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"};
 
 struct Consumer {
+  struct LinkWatch {
+    Consumer *consumer{};
+    unsigned channel{};
+  };
+
   pw_main_loop *loop{};
   pw_context *context{};
   pw_core *core{};
   pw_registry *registry{};
   pw_filter *filter{};
   spa_hook coreHook{}, registryHook{}, filterHook{};
-  spa_source *timeout{};
+  std::array<spa_hook, MaxChannels> linkHooks{};
+  spa_source *timeout{}, *readyTimer{}, *armTimer{};
   unsigned channels{2};
   bool expectSilent{};
   bool acceptAnyAudio{};
+  bool ignoreSilentBlocks{};
+  bool observeOnly{};
+  bool signalReady{};
+  bool signalConnected{};
+  bool armMeasurementOnSignal{};
+  bool readinessReported{};
   double expectedDb{-6.0};
   unsigned expectedRate{};
+  unsigned durationMs{3000};
+  unsigned maxConsecutiveSilenceMs{};
+  std::string captureNodeName{"skyapo.virtual_mic"};
+  std::string consumerNodeName{"skyapo.test.consumer"};
   std::array<const char *, MaxChannels> channelNames{};
   std::array<void *, MaxChannels> inputs{};
   std::array<uint32_t, MaxChannels> inputIds{
@@ -48,11 +70,14 @@ struct Consumer {
   std::array<uint32_t, MaxChannels> outputIds{
       Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid, Invalid};
   std::array<pw_proxy *, MaxChannels> links{};
+  std::array<LinkWatch, MaxChannels> linkWatches{};
+  std::array<pw_link_state, MaxChannels> linkStates{};
   uint32_t sourceNode{Invalid};
   uint32_t ownNode{Invalid};
   std::atomic<uint64_t> frames{0};
   std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
+  std::atomic<bool> measurementEnabled{true};
   std::atomic<double> channelDifferenceEnergy{0.0};
   bool expectIdenticalChannels{};
   bool measureSourceLag{};
@@ -63,16 +88,29 @@ struct Consumer {
   std::atomic<unsigned> zeroDurationCalls{0};
   std::atomic<unsigned> nullBufferCalls{0};
   std::atomic<int> filterState{PW_FILTER_STATE_UNCONNECTED};
+  uint64_t consecutiveSilentFrames{};
+  uint64_t maximumSilentFrames{};
+  bool silenceMeasurementArmed{};
   std::vector<float> recordedLeft{};
   std::vector<float> recordedRight{};
   size_t recordedSamples{};
   std::atomic<bool> failed{false};
 
   explicit Consumer(bool mono, bool surround51, bool surround71, bool silent,
-                    bool anyAudio, double gainDb, unsigned rate)
+                    bool anyAudio, bool ignoreSilent, double gainDb,
+                    unsigned rate, unsigned duration, std::string captureNode,
+                    unsigned silenceLimitMs, std::string consumerNode,
+                    bool onlyObserve, bool announceReady,
+                    bool announceConnected, bool armOnSignal)
       : channels(mono ? 1 : (surround51 ? 6 : (surround71 ? 8 : 2))),
-        expectSilent(silent), acceptAnyAudio(anyAudio), expectedDb(gainDb),
-        expectedRate(rate),
+        expectSilent(silent), acceptAnyAudio(anyAudio),
+        ignoreSilentBlocks(ignoreSilent), observeOnly(onlyObserve),
+        signalReady(announceReady), signalConnected(announceConnected),
+        armMeasurementOnSignal(armOnSignal), expectedDb(gainDb),
+        expectedRate(rate), durationMs(duration),
+        maxConsecutiveSilenceMs(silenceLimitMs),
+        captureNodeName(std::move(captureNode)),
+        consumerNodeName(std::move(consumerNode)),
         channelNames(
             mono ? std::array<const char *, MaxChannels>{"MONO", "", "", "", "",
                                                          "", "", ""}
@@ -88,6 +126,19 @@ struct Consumer {
       if (std::strcmp(channel, c.channelNames[i]) == 0)
         return i;
     return c.channels;
+  }
+
+  static void linkInfo(void *data, const pw_link_info *info) {
+    auto &watch = *static_cast<LinkWatch *>(data);
+    if (!info)
+      return;
+    auto &state = watch.consumer->linkStates[watch.channel];
+    if (state != info->state)
+      std::fprintf(stderr, "test consumer: link %s state %s\n",
+                   watch.consumer->channelNames[watch.channel],
+                   pw_link_state_as_string(info->state));
+    std::fflush(stderr);
+    state = info->state;
   }
 
   void linkChannel(unsigned channel) {
@@ -106,6 +157,17 @@ struct Consumer {
         pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
                               PW_VERSION_LINK, &properties->dict, 0));
     pw_properties_free(properties);
+    if (links[channel]) {
+      static const pw_link_events events = [] {
+        pw_link_events value{};
+        value.version = PW_VERSION_LINK_EVENTS;
+        value.info = linkInfo;
+        return value;
+      }();
+      linkWatches[channel] = {this, channel};
+      pw_proxy_add_object_listener(links[channel], &linkHooks[channel], &events,
+                                   &linkWatches[channel]);
+    }
     if (!links[channel]) {
       failed.store(true, std::memory_order_relaxed);
       std::fprintf(stderr, "test consumer: cannot link channel %s\n",
@@ -121,14 +183,15 @@ struct Consumer {
       return;
     if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
       const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
-      if (name && std::strcmp(name, "skyapo.virtual_mic") == 0)
+      if (name && c.captureNodeName == name)
         c.sourceNode = id;
-      else if (name && std::strcmp(name, "skyapo.test.consumer") == 0)
+      else if (name && c.consumerNodeName == name)
         c.ownNode = id;
       else
         return;
-      for (unsigned ch = 0; ch < c.channels; ++ch)
-        c.linkChannel(ch);
+      if (!c.observeOnly)
+        for (unsigned ch = 0; ch < c.channels; ++ch)
+          c.linkChannel(ch);
       return;
     }
     if (std::strcmp(type, PW_TYPE_INTERFACE_Port) != 0)
@@ -151,7 +214,8 @@ struct Consumer {
       c.outputIds[index] = id;
     else
       return;
-    c.linkChannel(index);
+    if (!c.observeOnly)
+      c.linkChannel(index);
   }
 
   static void globalRemove(void *, uint32_t) {}
@@ -175,6 +239,26 @@ struct Consumer {
     std::fprintf(stderr, "test consumer: %s\n",
                  error ? error : "PipeWire filter error");
     pw_main_loop_quit(c.loop);
+  }
+
+  static void paramChanged(void *data, void *port, uint32_t id,
+                           const spa_pod *param) {
+    auto &c = *static_cast<Consumer *>(data);
+    if (port || !param)
+      return;
+    if (id == SPA_PARAM_Format) {
+      spa_audio_info_raw info{};
+      if (spa_format_audio_raw_parse(param, &info) < 0 ||
+          info.channels != c.channels ||
+          (info.format != SPA_AUDIO_FORMAT_F32P &&
+           info.format != SPA_AUDIO_FORMAT_F32)) {
+        c.failed.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr, "test consumer: unsupported format request\n");
+        pw_main_loop_quit(c.loop);
+        return;
+      }
+    }
+    pw_filter_update_params(c.filter, nullptr, &param, 1);
   }
 
   static void process(void *data, spa_io_position *position) {
@@ -215,6 +299,26 @@ struct Consumer {
         blockEnergy +=
             static_cast<double>(channelData[ch][i]) * channelData[ch][i];
     }
+    if (c.maxConsecutiveSilenceMs) {
+      constexpr float SilenceThreshold = 1.0e-7f;
+      for (uint32_t i = 0; i < count; ++i) {
+        bool silentFrame = true;
+        for (unsigned ch = 0; ch < c.channels; ++ch)
+          silentFrame =
+              silentFrame && std::abs(channelData[ch][i]) <= SilenceThreshold;
+        if (!c.silenceMeasurementArmed) {
+          c.silenceMeasurementArmed = !silentFrame;
+          continue;
+        }
+        if (silentFrame) {
+          ++c.consecutiveSilentFrames;
+        } else {
+          c.maximumSilentFrames =
+              std::max(c.maximumSilentFrames, c.consecutiveSilentFrames);
+          c.consecutiveSilentFrames = 0;
+        }
+      }
+    }
     if (c.measureSourceLag && c.channels == 2) {
       constexpr double preampGain = 0.5011872336272722;
       for (uint32_t i = 0; i < count && c.sourceConsumerLatencyCount <
@@ -252,6 +356,10 @@ struct Consumer {
                   c.recordedRight.data() + c.recordedSamples);
       c.recordedSamples += copyCount;
     }
+    if (c.ignoreSilentBlocks && blockEnergy < 1.0e-12)
+      return;
+    if (!c.measurementEnabled.load(std::memory_order_acquire))
+      return;
     double total = c.energy.load(std::memory_order_relaxed);
     while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
                                            std::memory_order_relaxed)) {
@@ -269,6 +377,65 @@ struct Consumer {
 
   static void finish(void *data, uint64_t) {
     pw_main_loop_quit(static_cast<Consumer *>(data)->loop);
+  }
+
+  static void requestMeasurementArm(int) {
+    measurementArmRequested = 1;
+  }
+
+  static void pollMeasurementArm(void *data, uint64_t) {
+    auto &consumer = *static_cast<Consumer *>(data);
+    if (measurementArmRequested) {
+      measurementArmRequested = 0;
+      consumer.energy.store(0.0, std::memory_order_release);
+      consumer.frames.store(0, std::memory_order_release);
+      consumer.measurementEnabled.store(true, std::memory_order_release);
+      std::puts("SKYAPO_CONSUMER_MEASUREMENT_ARMED");
+      std::fflush(stdout);
+      timespec measurement{0, 700000000};
+      pw_loop_update_timer(pw_main_loop_get_loop(consumer.loop),
+                           consumer.timeout, &measurement, nullptr, false);
+    } else {
+      timespec retry{0, 10000000};
+      pw_loop_update_timer(pw_main_loop_get_loop(consumer.loop),
+                           consumer.armTimer, &retry, nullptr, false);
+    }
+  }
+
+  void startDurationTimer() {
+    timespec duration{static_cast<time_t>(durationMs / 1000),
+                      static_cast<long>((durationMs % 1000) * 1000000)};
+    pw_loop_update_timer(pw_main_loop_get_loop(loop), timeout, &duration,
+                         nullptr, false);
+  }
+
+  static void reportReady(void *data, uint64_t) {
+    auto &consumer = *static_cast<Consumer *>(data);
+    if (consumer.readinessReported)
+      return;
+    if (consumer.signalReady &&
+        consumer.frames.load(std::memory_order_acquire) != 0) {
+      consumer.readinessReported = true;
+      consumer.startDurationTimer();
+      std::puts("SKYAPO_CONSUMER_READY");
+      std::fflush(stdout);
+      return;
+    }
+    if (consumer.signalConnected &&
+        consumer.filterState.load(std::memory_order_acquire) ==
+            PW_FILTER_STATE_STREAMING &&
+        (consumer.observeOnly ||
+         (consumer.linkStates[0] == PW_LINK_STATE_ACTIVE &&
+          consumer.linkStates[1] == PW_LINK_STATE_ACTIVE))) {
+      consumer.readinessReported = true;
+      consumer.startDurationTimer();
+      std::puts("SKYAPO_CONSUMER_CONNECTED");
+      std::fflush(stdout);
+      return;
+    }
+    timespec retry{0, 10000000};
+    pw_loop_update_timer(pw_main_loop_get_loop(consumer.loop),
+                         consumer.readyTimer, &retry, nullptr, false);
   }
 
   int run() {
@@ -310,10 +477,11 @@ struct Consumer {
 
     const bool mono = channels == 1;
     auto *properties = pw_properties_new(
-        PW_KEY_NODE_NAME, "skyapo.test.consumer", PW_KEY_NODE_DESCRIPTION,
+        PW_KEY_NODE_NAME, consumerNodeName.c_str(), PW_KEY_NODE_DESCRIPTION,
         "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS, "Audio/Sink",
-        PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER, "true",
-        PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
+        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_NODE_WANT_DRIVER, "true",
+        PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false",
+        "wireplumber.is-virtual", "true", nullptr);
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     std::string positions = "[";
     for (unsigned channel = 0; channel < channels; ++channel)
@@ -327,6 +495,7 @@ struct Consumer {
       pw_filter_events value{};
       value.version = PW_VERSION_FILTER_EVENTS;
       value.state_changed = stateChanged;
+      value.param_changed = paramChanged;
       value.process = process;
       return value;
     }();
@@ -342,21 +511,91 @@ struct Consumer {
       if (!inputs[ch])
         throw std::runtime_error("cannot create consumer port");
     }
-    if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0)
+    spa_audio_info_raw info{};
+    info.format = SPA_AUDIO_FORMAT_F32P;
+    info.rate = expectedRate ? expectedRate : 48000;
+    info.channels = channels;
+    for (unsigned channel = 0; channel < channels; ++channel) {
+      const char *name = channelNames[channel];
+      if (std::strcmp(name, "MONO") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_MONO;
+      else if (std::strcmp(name, "FL") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_FL;
+      else if (std::strcmp(name, "FR") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_FR;
+      else if (std::strcmp(name, "FC") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_FC;
+      else if (std::strcmp(name, "LFE") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_LFE;
+      else if (std::strcmp(name, "RL") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_RL;
+      else if (std::strcmp(name, "RR") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_RR;
+      else if (std::strcmp(name, "SL") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_SL;
+      else if (std::strcmp(name, "SR") == 0)
+        info.position[channel] = SPA_AUDIO_CHANNEL_SR;
+      else
+        throw std::runtime_error("unsupported test channel position");
+    }
+    uint8_t formatBytes[1024];
+    spa_pod_builder builder =
+        SPA_POD_BUILDER_INIT(formatBytes, sizeof(formatBytes));
+    std::array<float, MaxChannels> unityVolumes{};
+    unityVolumes.fill(1.0f);
+    const spa_pod *params[] = {
+        spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info),
+        spa_format_audio_raw_build(&builder, SPA_PARAM_Format, &info),
+        static_cast<spa_pod *>(spa_pod_builder_add_object(
+            &builder, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
+            SPA_POD_Float(1.0f), SPA_PROP_mute, SPA_POD_Bool(false),
+            SPA_PROP_channelVolumes,
+            SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
+                          unityVolumes.data())))};
+    if (!params[0] || !params[1] || !params[2] ||
+        pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 3) < 0)
       throw std::runtime_error("cannot connect consumer filter");
     ownNode = pw_filter_get_node_id(filter);
     timeout = pw_loop_add_timer(pw_main_loop_get_loop(loop), finish, this);
     if (!timeout)
       throw std::runtime_error("cannot create test timer");
-    timespec duration{3, 0};
-    pw_loop_update_timer(pw_main_loop_get_loop(loop), timeout, &duration,
-                         nullptr, false);
+    if (!signalReady && !signalConnected)
+      startDurationTimer();
+    if (signalReady || signalConnected) {
+      readyTimer =
+          pw_loop_add_timer(pw_main_loop_get_loop(loop), reportReady, this);
+      if (!readyTimer)
+        throw std::runtime_error("cannot create consumer readiness timer");
+      timespec retry{0, 10000000};
+      pw_loop_update_timer(pw_main_loop_get_loop(loop), readyTimer, &retry,
+                           nullptr, false);
+    }
+    if (armMeasurementOnSignal) {
+      measurementEnabled.store(false, std::memory_order_release);
+      measurementArmRequested = 0;
+      std::signal(SIGUSR1, requestMeasurementArm);
+      armTimer = pw_loop_add_timer(pw_main_loop_get_loop(loop),
+                                   pollMeasurementArm, this);
+      if (!armTimer)
+        throw std::runtime_error("cannot create measurement signal handler");
+      timespec retry{0, 10000000};
+      pw_loop_update_timer(pw_main_loop_get_loop(loop), armTimer, &retry,
+                           nullptr, false);
+    }
     pw_main_loop_run(loop);
 
     const auto actualFilterState = pw_filter_get_state(filter, nullptr);
+    if (readyTimer)
+      pw_loop_destroy_source(pw_main_loop_get_loop(loop), readyTimer);
+    if (armTimer)
+      pw_loop_destroy_source(pw_main_loop_get_loop(loop), armTimer);
+    if (timeout)
+      pw_loop_destroy_source(pw_main_loop_get_loop(loop), timeout);
     for (unsigned channel = 0; channel < channels; ++channel)
-      if (links[channel])
+      if (links[channel]) {
+        spa_hook_remove(&linkHooks[channel]);
         pw_proxy_destroy(links[channel]);
+      }
     pw_filter_destroy(filter);
     pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
     pw_core_disconnect(core);
@@ -369,11 +608,14 @@ struct Consumer {
       std::fprintf(stderr,
                    "test consumer diagnostics: sourceNode=%u ownNode=%u "
                    "outputPorts=%u,%u inputPorts=%u,%u links=%p,%p "
+                   "linkStates=%d,%d "
                    "failed=%d processCalls=%u invalidRate=%u zeroDuration=%u "
                    "nullBuffer=%u filterState=%d actualFilterState=%d\n",
                    sourceNode, ownNode, outputIds[0], outputIds[1], inputIds[0],
                    inputIds[1], static_cast<void *>(links[0]),
-                   static_cast<void *>(links[1]), failed.load(),
+                   static_cast<void *>(links[1]),
+                   static_cast<int>(linkStates[0]),
+                   static_cast<int>(linkStates[1]), failed.load(),
                    processCalls.load(), invalidRateCalls.load(),
                    zeroDurationCalls.load(), nullBufferCalls.load(),
                    filterState.load(), static_cast<int>(actualFilterState));
@@ -399,6 +641,15 @@ struct Consumer {
         expectIdenticalChannels && energy.load() > 0.0
             ? std::sqrt(channelDifferenceEnergy.load() / energy.load())
             : 0.0;
+    maximumSilentFrames =
+        std::max(maximumSilentFrames, consecutiveSilentFrames);
+    const uint64_t maximumAllowedSilentFrames =
+        static_cast<uint64_t>(sampleRate.load()) * maxConsecutiveSilenceMs /
+        1000;
+    const bool silenceRunMatches =
+        !maxConsecutiveSilenceMs ||
+        (silenceMeasurementArmed &&
+         maximumSilentFrames <= maximumAllowedSilentFrames);
     int bestChannelLag = 0;
     double bestLagDifferenceRatio = channelDifferenceRatio;
     double recordedLeftRms = 0.0;
@@ -461,6 +712,12 @@ struct Consumer {
     if (expectIdenticalChannels)
       std::printf("Inter-channel difference ratio: %.8f\n",
                   channelDifferenceRatio);
+    if (maxConsecutiveSilenceMs)
+      std::printf("Longest consecutive near-silence: %llu frames (%.3f ms)\n",
+                  static_cast<unsigned long long>(maximumSilentFrames),
+                  sampleRate.load()
+                      ? 1000.0 * maximumSilentFrames / sampleRate.load()
+                      : 0.0);
     if (expectIdenticalChannels)
       std::printf("Best relative channel lag: %d samples\n"
                   "Best-lag difference ratio: %.8f\n"
@@ -480,7 +737,7 @@ struct Consumer {
     const bool latencyMatches =
         !measureSourceLag || sourceConsumerLatencyCount >= 4;
     return !failed.load() && capturedFrames > 48000 && audioMatches &&
-                   channelsMatch && latencyMatches
+                   channelsMatch && latencyMatches && silenceRunMatches
                ? 0
                : 1;
   }
@@ -493,10 +750,19 @@ int main(int argc, char **argv) {
   bool surround71 = false;
   bool expectSilent = false;
   bool acceptAnyAudio = false;
+  bool ignoreSilentBlocks = false;
   bool expectIdenticalChannels = false;
   bool measureSourceLag = false;
+  bool observeOnly = false;
+  bool signalReady = false;
+  bool signalConnected = false;
+  bool armMeasurementOnSignal = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
+  unsigned durationMs = 3000;
+  unsigned maxConsecutiveSilenceMs = 0;
+  std::string captureNode = "skyapo.virtual_mic";
+  std::string consumerNode = "skyapo.test.consumer";
   for (int arg = 1; arg < argc; ++arg) {
     const std::string option(argv[arg]);
     if (option == "--mono")
@@ -509,6 +775,8 @@ int main(int argc, char **argv) {
       expectSilent = true;
     else if (option == "--accept-any-audio")
       acceptAnyAudio = true;
+    else if (option == "--ignore-silent-blocks")
+      ignoreSilentBlocks = true;
     else if (option == "--expect-identical-channels")
       expectIdenticalChannels = true;
     else if (option == "--measure-source-lag")
@@ -528,13 +796,57 @@ int main(int argc, char **argv) {
         return 2;
       }
       expectedRate = static_cast<unsigned>(parsed);
+    } else if (option == "--duration-ms" && arg + 1 < argc) {
+      char *end = nullptr;
+      const auto parsed = std::strtoul(argv[++arg], &end, 10);
+      if (end == argv[arg] || *end || parsed < 100 || parsed > 60000) {
+        std::fprintf(stderr, "test consumer: invalid --duration-ms value\n");
+        return 2;
+      }
+      durationMs = static_cast<unsigned>(parsed);
+    } else if (option == "--max-consecutive-silence-ms" && arg + 1 < argc) {
+      char *end = nullptr;
+      const auto parsed = std::strtoul(argv[++arg], &end, 10);
+      if (end == argv[arg] || *end || parsed == 0 || parsed > 60000) {
+        std::fprintf(stderr, "test consumer: invalid "
+                             "--max-consecutive-silence-ms value\n");
+        return 2;
+      }
+      maxConsecutiveSilenceMs = static_cast<unsigned>(parsed);
+    } else if (option == "--capture-node" && arg + 1 < argc) {
+      captureNode = argv[++arg];
+      if (captureNode.empty()) {
+        std::fprintf(stderr, "test consumer: empty --capture-node value\n");
+        return 2;
+      }
+    } else if (option == "--name" && arg + 1 < argc) {
+      consumerNode = argv[++arg];
+      if (consumerNode.empty()) {
+        std::fprintf(stderr, "test consumer: empty --name value\n");
+        return 2;
+      }
+    } else if (option == "--observe-only") {
+      observeOnly = true;
+    } else if (option == "--signal-ready") {
+      signalReady = true;
+    } else if (option == "--signal-connected") {
+      signalConnected = true;
+    } else if (option == "--arm-on-signal") {
+      armMeasurementOnSignal = true;
     } else {
       std::fprintf(stderr, "usage: skyapo-pipewire-test-consumer "
                            "[--mono|--surround51|--surround71] "
                            "[--expect-silent] [--accept-any-audio] "
+                           "[--ignore-silent-blocks] "
                            "[--expect-identical-channels] "
                            "[--measure-source-lag] "
-                           "[--expected-db DB] [--expected-rate HZ]\n");
+                           "[--expected-db DB] [--expected-rate HZ] "
+                           "[--duration-ms MS] "
+                           "[--max-consecutive-silence-ms MS] "
+                           "[--capture-node NAME] "
+                           "[--name NODE-NAME] "
+                           "[--observe-only] [--signal-ready] "
+                           "[--signal-connected] [--arm-on-signal]\n");
       return 2;
     }
   }
@@ -546,7 +858,11 @@ int main(int argc, char **argv) {
       return 2;
     }
     Consumer consumer(mono, surround51, surround71, expectSilent,
-                      acceptAnyAudio, expectedDb, expectedRate);
+                      acceptAnyAudio, ignoreSilentBlocks, expectedDb,
+                      expectedRate, durationMs, std::move(captureNode),
+                      maxConsecutiveSilenceMs, std::move(consumerNode),
+                      observeOnly, signalReady, signalConnected,
+                      armMeasurementOnSignal);
     if (expectIdenticalChannels && mono) {
       std::fprintf(
           stderr,

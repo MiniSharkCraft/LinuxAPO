@@ -49,6 +49,19 @@ does not provide per-icon license metadata; its icon artwork is not included in
 these resources. The Qt/distribution license configuration still needs
 release-specific review.
 
+The separate LinuxAPO application/desktop icon is a WebP artwork supplied by
+the project owner and converted to PNG sizes without intentionally changing
+the artwork or alpha channel. The source image contains no verified author,
+license, or redistribution grant in the repository. Permission to redistribute
+it in source packages and binaries is therefore **unconfirmed**; do not treat
+the icon assets or any package containing them as cleared for public
+redistribution until the rights holder and license are documented. This notice
+records the unresolved status; it does not grant a license. The current
+release status is EXCLUDED. CMake therefore
+excludes the branded application icon by default; the opt-in
+`SKYAPO_BUNDLE_BRANDED_APP_ICON` must only be enabled after permission is
+confirmed.
+
 Other libraries (including PipeWire, libsndfile, FFTW, Lilv and muParser) are
 discovered from and linked to the host distribution; this project does not
 redistribute their binaries. Their corresponding source packages and license

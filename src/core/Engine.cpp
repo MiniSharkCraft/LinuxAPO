@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "PdcAllocationTestHook.h"
 #include "DevicePatternMatcher.h"
 #include "../plugin/IPluginFailureState.h"
 #include "../plugin/IPluginBypassControl.h"
@@ -58,10 +59,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cwchar>
 #include <filesystem>
 #include <limits>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
+#include <variant>
 #ifdef SKYAPO_HAVE_MUPARSERX
 #include <mpPackageCommon.h>
 #include <mpPackageNonCmplx.h>
@@ -80,6 +85,11 @@ constexpr uint64_t MaxPdcRingSamples = 4ULL * 1024ULL * 1024ULL;
 // Keep a separate cap because these are block scratch buffers, not delay rings.
 constexpr uint64_t MaxFilterConfigurationScratchBytes =
     64ULL * 1024ULL * 1024ULL;
+// Bound IIR coefficient/state memory independently from the upstream DSP.
+constexpr uint64_t MaxIirMemoryBytes = 64ULL * 1024ULL * 1024ULL;
+// A single IIR line beyond this size is not useful for realtime filtering and
+// would make upstream factory construction needlessly expensive.
+constexpr unsigned MaxIirOrder = 65536;
 constexpr uint64_t MaxConvolutionMemoryBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr unsigned MaxEngineChannelLanes = 256;
 constexpr unsigned MaxEngineFrameCount = 65536;
@@ -124,6 +134,68 @@ void accountPdcRing(uint64_t &usedSamples, uint64_t ringSamples) {
   usedSamples += ringSamples;
 }
 
+unsigned validateIirCoefficients(const std::wstring &parameters,
+                                 const std::filesystem::path &source,
+                                 unsigned line) {
+  static const std::wregex iirType(L"^\\s*ON\\s+IIR(?:\\s|$)");
+  std::wsmatch typeMatch;
+  if (!std::regex_search(parameters, typeMatch, iirType))
+    return 0;
+
+  // The upstream factory parses these values with wcstod and immediately
+  // normalizes by a0. Validate the same coefficient list at the Linux config
+  // boundary so malformed-but-regex-matching values cannot install NaN/Inf
+  // state into the realtime graph.
+  static const std::wregex orderPattern(L"Order\\s+([0-9]+)");
+  static const std::wregex coefficientsPattern(
+      L"Coefficients((?: [-+0-9.eE]+)+)");
+  std::wsmatch match;
+  if (!std::regex_search(parameters, match, orderPattern))
+    return 0; // Let the upstream factory report its normal syntax error.
+  unsigned long long order = 0;
+  try {
+    order = std::stoull(match.str(1));
+  } catch (const std::exception &) {
+    throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                             ": IIR order is outside the supported range");
+  }
+  if (order > std::numeric_limits<unsigned>::max())
+    throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                             ": IIR order is outside the supported range");
+  if (order > MaxIirOrder)
+    throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                             ": IIR order exceeds SkyAPO's maximum order of "
+                             "65536");
+  if (!std::regex_search(parameters, match, coefficientsPattern))
+    return 0; // Let the upstream factory report missing coefficients.
+
+  const size_t expectedCount = (static_cast<size_t>(order) + 1U) * 2U;
+  std::wistringstream stream(match.str(1));
+  std::vector<double> coefficients;
+  std::wstring token;
+  while (stream >> token) {
+    wchar_t *end = nullptr;
+    const double value = std::wcstod(token.c_str(), &end);
+    if (end == token.c_str() || *end != L'\0' || !std::isfinite(value))
+      throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                               ": IIR coefficients must be finite numbers");
+    coefficients.push_back(value);
+  }
+  if (coefficients.size() != expectedCount || order == 0)
+    return 0; // The upstream factory rejects an invalid coefficient
+              // count/order.
+
+  const double a0 = coefficients[static_cast<size_t>(order) + 1U];
+  if (a0 == 0.0)
+    throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                             ": IIR a0 coefficient must be nonzero");
+  for (const double value : coefficients)
+    if (!std::isfinite(value / a0))
+      throw std::runtime_error(source.string() + ":" + std::to_string(line) +
+                               ": normalized IIR coefficients must be finite");
+  return static_cast<unsigned>(order);
+}
+
 class ZeroDelayFilter final : public IFilter {
 public:
   bool getInPlace() override {
@@ -146,6 +218,12 @@ private:
 
 class PdcAlignmentFilter final : public IFilter {
 public:
+  struct Prepared {
+    PdcAlignmentFilter *filter{};
+    std::vector<uint32_t> delays;
+    std::vector<std::vector<float>> replacementRings;
+  };
+
   explicit PdcAlignmentFilter(std::vector<unsigned> channels)
       : channels_(std::move(channels)) {}
 
@@ -159,8 +237,8 @@ public:
     cursors_.assign(names.size(), 0);
     return names;
   }
-  void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
+  Prepared prepare(const std::vector<uint64_t> &arrival,
+                   std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     uint64_t latest = 0;
     for (const unsigned channel : channels_)
       if (channel < arrival.size())
@@ -171,14 +249,34 @@ public:
         continue;
       accountPdcRing(plannedRingSamples, latest - arrival[channel]);
     }
+    Prepared prepared;
+    prepared.filter = this;
+    prepared.delays = delays_;
+    prepared.replacementRings.resize(delays_.size());
     for (const unsigned channel : channels_) {
       if (channel >= delays_.size() || channel >= arrival.size())
         continue;
       const auto difference = static_cast<uint32_t>(latest - arrival[channel]);
-      setDelay(channel, static_cast<uint32_t>(difference));
+      if (delays_[channel] != difference) {
+        prepared.delays[channel] = difference;
+        skyapo::testing::beforePdcRingAllocationForTesting();
+        prepared.replacementRings[channel].assign(difference, 0.0f);
+        skyapo::testing::recordPdcRingAllocationForTesting(difference);
+      }
       updated[channel] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+    return prepared;
+  }
+  static void commit(Prepared &&prepared) noexcept {
+    auto &filter = *prepared.filter;
+    for (size_t channel = 0; channel < prepared.delays.size(); ++channel) {
+      if (filter.delays_[channel] == prepared.delays[channel])
+        continue;
+      filter.rings_[channel].swap(prepared.replacementRings[channel]);
+      filter.delays_[channel] = prepared.delays[channel];
+      filter.cursors_[channel] = 0;
+    }
   }
   uint64_t ringCapacitySamples() const noexcept {
     uint64_t samples = 0;
@@ -206,18 +304,6 @@ public:
   }
 
 private:
-  void setDelay(unsigned channel, uint32_t delay) {
-    if (delays_[channel] == delay)
-      return;
-    // Latency refresh runs on the control thread while callbacks are quiesced.
-    // Replace rather than assign so shrinking compensation releases the old
-    // allocation instead of retaining an unbudgeted historical capacity.
-    std::vector<float> replacement(delay, 0.0f);
-    rings_[channel].swap(replacement);
-    delays_[channel] = delay;
-    cursors_[channel] = 0;
-  }
-
   std::vector<unsigned> channels_;
   std::vector<uint32_t> delays_;
   std::vector<std::vector<float>> rings_;
@@ -226,6 +312,18 @@ private:
 
 class PdcCopyFilter final : public CopyFilter {
 public:
+  struct PreparedTerm {
+    uint32_t delay{};
+    std::vector<float> replacementRing;
+  };
+  struct PreparedTarget {
+    std::vector<PreparedTerm> terms;
+  };
+  struct Prepared {
+    PdcCopyFilter *filter{};
+    std::vector<PreparedTarget> targets;
+  };
+
   explicit PdcCopyFilter(const std::vector<Assignment> &assignments)
       : CopyFilter(assignments) {}
 
@@ -260,8 +358,8 @@ public:
     return outputs;
   }
 
-  void configure(const std::vector<uint64_t> &arrival,
-                 std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
+  Prepared prepare(const std::vector<uint64_t> &arrival,
+                   std::vector<uint64_t> &updated, uint64_t &pdcRingSamples) {
     // Validate all fan-in delay lengths before changing any ring in this
     // filter. A rejected graph/latency update must not leave half the fan-in
     // scheduled with its previous compensation.
@@ -279,7 +377,11 @@ public:
         accountPdcRing(plannedRingSamples, latest - arrival[term.channel]);
       }
     }
-    for (auto &target : targets_) {
+    Prepared prepared;
+    prepared.filter = this;
+    prepared.targets.resize(targets_.size());
+    for (size_t targetIndex = 0; targetIndex < targets_.size(); ++targetIndex) {
+      const auto &target = targets_[targetIndex];
       uint64_t latest = 0;
       for (const auto &term : target.terms)
         if (!term.constant &&
@@ -288,25 +390,46 @@ public:
       if (target.output < 0 ||
           static_cast<size_t>(target.output) >= updated.size())
         continue;
-      for (auto &term : target.terms) {
+      auto &preparedTarget = prepared.targets[targetIndex];
+      preparedTarget.terms.resize(target.terms.size());
+      for (size_t termIndex = 0; termIndex < target.terms.size(); ++termIndex) {
+        const auto &term = target.terms[termIndex];
         uint32_t delay = 0;
         if (!term.constant &&
             static_cast<size_t>(term.channel) < arrival.size()) {
           const uint64_t difference = latest - arrival[term.channel];
           delay = static_cast<uint32_t>(difference);
         }
+        auto &preparedTerm = preparedTarget.terms[termIndex];
+        preparedTerm.delay = delay;
         if (term.delay != delay) {
-          // This is control-thread graph maintenance, not the audio callback.
-          // Swap drops stale capacity when dynamic latency decreases.
-          std::vector<float> replacement(delay, 0.0f);
-          term.ring.swap(replacement);
-          term.delay = delay;
-          term.cursor = 0;
+          skyapo::testing::beforePdcRingAllocationForTesting();
+          preparedTerm.replacementRing.assign(delay, 0.0f);
+          skyapo::testing::recordPdcRingAllocationForTesting(delay);
         }
       }
       updated[target.output] = latest;
     }
     pdcRingSamples = plannedRingSamples;
+    return prepared;
+  }
+  static void commit(Prepared &&prepared) noexcept {
+    auto &filter = *prepared.filter;
+    for (size_t targetIndex = 0; targetIndex < prepared.targets.size();
+         ++targetIndex) {
+      auto &target = filter.targets_[targetIndex];
+      auto &preparedTarget = prepared.targets[targetIndex];
+      for (size_t termIndex = 0; termIndex < preparedTarget.terms.size();
+           ++termIndex) {
+        auto &term = target.terms[termIndex];
+        auto &preparedTerm = preparedTarget.terms[termIndex];
+        if (term.delay == preparedTerm.delay)
+          continue;
+        term.ring.swap(preparedTerm.replacementRing);
+        term.delay = preparedTerm.delay;
+        term.cursor = 0;
+      }
+    }
   }
 
   uint64_t ringCapacitySamples() const noexcept {
@@ -481,12 +604,14 @@ void Engine::ConfigurationDeleter::operator()(
 Engine::Engine(unsigned sampleRate, unsigned channels, unsigned maxFrames,
                std::vector<std::wstring> names, bool allowPendingEndpointVolume,
                bool enablePluginFilters, std::wstring deviceMatchText,
-               std::wstring deviceName, std::wstring connectionName)
+               std::wstring deviceName, std::wstring connectionName,
+               std::wstring processingStage)
     : rate(sampleRate), channelCount(channels), maxFrameCount(maxFrames),
       allowPendingEndpointVolume(allowPendingEndpointVolume),
       deviceMatchText(std::move(deviceMatchText)),
       deviceName(std::move(deviceName)),
-      connectionName(std::move(connectionName)) {
+      connectionName(std::move(connectionName)),
+      processingStage(std::move(processingStage)) {
   if (!channels || !maxFrames)
     throw std::runtime_error(
         "sample channels and maximum frame count must be nonzero");
@@ -541,10 +666,14 @@ Engine::knownAudioBufferPayload() const noexcept {
       static_cast<uint64_t>(allChannelCount) * maxFrameCount * 2U *
       sizeof(float);
   uint64_t delaySamples = 0;
+  uint64_t iirMemoryBytes = 0;
+  uint64_t convolutionEstimatedBytes = 0;
   uint64_t pdcCapacitySamples = 0;
   uint64_t pluginBypassCapacitySamples = 0;
   for (const auto &node : graph) {
     delaySamples += node.fixedBufferSamples;
+    iirMemoryBytes += node.iirMemoryBytes;
+    convolutionEstimatedBytes += node.convolutionEstimatedBytes;
     if (const auto *bypass =
             dynamic_cast<const IPluginBypassControl *>(node.filter))
       pluginBypassCapacitySamples += bypass->bypassRingCapacitySamples();
@@ -556,6 +685,8 @@ Engine::knownAudioBufferPayload() const noexcept {
       pdcCapacitySamples += copy->ringCapacitySamples();
   }
   payload.eapoDelayRingBytes = delaySamples * sizeof(float);
+  payload.iirFilterBytes = iirMemoryBytes;
+  payload.convolutionEstimatedBytes = convolutionEstimatedBytes;
   payload.pdcRingCapacityBytes = pdcCapacitySamples * sizeof(float);
   payload.pluginBypassRingCapacityBytes =
       pluginBypassCapacitySamples * sizeof(float);
@@ -563,12 +694,36 @@ Engine::knownAudioBufferPayload() const noexcept {
 }
 
 void Engine::loadConfig(const std::string &path) {
+  loadConfigImpl(path, nullptr, false);
+}
+
+void Engine::loadConfig(const std::string &path, bool captureSources) {
+  loadConfigImpl(path, nullptr, captureSources);
+}
+
+void Engine::loadConfig(
+    const std::string &path,
+    std::shared_ptr<const ConfigSourceSnapshot> sourceSnapshot) {
+  if (!sourceSnapshot)
+    throw std::invalid_argument("config source snapshot is null");
+  loadConfigImpl(path, std::move(sourceSnapshot), false);
+}
+
+void Engine::loadConfigImpl(
+    const std::string &path,
+    std::shared_ptr<const ConfigSourceSnapshot> sourceSnapshot,
+    bool captureSources) {
+  if (sourceSnapshot && captureSources)
+    throw std::invalid_argument(
+        "cannot capture config sources while loading a snapshot");
   FilterList candidate;
   std::vector<std::filesystem::path> includeStack;
   std::vector<std::filesystem::path> configFiles;
   std::vector<std::filesystem::path> attemptedFiles;
   std::vector<IncludeSite> includeChain;
   std::vector<ConfigNotice> notices;
+  uint64_t parsedIirCoefficientBytes = 0;
+  ConfigSourceSnapshot capturedSources;
   bool stageActive = true;
 #ifdef SKYAPO_HAVE_MUPARSERX
   mup::ParserX expressionParser(mup::pckALL_NON_COMPLEX);
@@ -580,11 +735,11 @@ void Engine::loadConfig(const std::string &path) {
   expressionParser.DefineConst(L"outputChannelCount",
                                static_cast<mup::float_type>(channelCount));
   // EAPO exposes device strings and the active processing stage to config
-  // expressions. Linux maps these to the selected PipeWire source description,
-  // stable node name and capture stage respectively.
+  // expressions. Linux maps the stage to capture for the microphone graph and
+  // post-mix for the mixed playback graph.
   expressionParser.DefineConst(L"deviceName", mup::Value(deviceName));
   expressionParser.DefineConst(L"connectionName", mup::Value(connectionName));
-  expressionParser.DefineConst(L"stage", mup::Value(L"capture"));
+  expressionParser.DefineConst(L"stage", mup::Value(processingStage));
   expressionParser.DefineFun(new skyapo::config::RegexSearchFunction());
   expressionParser.DefineFun(new skyapo::config::RegexReplaceFunction());
   // These are the actual Equalizer APO operators used by its
@@ -624,7 +779,9 @@ void Engine::loadConfig(const std::string &path) {
   try {
     parseConfigFile(std::filesystem::path(path), candidate, includeStack,
                     configFiles, attemptedFiles, includeChain, stageActive,
-                    expressionParserPtr, notices);
+                    expressionParserPtr, notices, parsedIirCoefficientBytes,
+                    sourceSnapshot.get(),
+                    captureSources ? &capturedSources : nullptr);
   } catch (const ConfigError &) {
     throw;
   } catch (const std::exception &error) {
@@ -725,6 +882,10 @@ void Engine::loadConfig(const std::string &path) {
   }
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> newConfiguration(
       built);
+  auto nextConfigSources = std::move(sourceSnapshot);
+  if (captureSources)
+    nextConfigSources = std::make_shared<const ConfigSourceSnapshot>(
+        std::move(capturedSources));
   for (auto &parsed : candidate)
     parsed.filter.release();
   for (auto &filter : generatedFilters)
@@ -736,7 +897,9 @@ void Engine::loadConfig(const std::string &path) {
   descriptions.swap(newDescriptions);
   loadedConfigFiles.swap(configFiles);
   loadedConfigNotices.swap(notices);
+  configSources = std::move(nextConfigSources);
   fixedBlock = newFixedBlock;
+  latencyPlanValid = true;
 }
 
 std::vector<Engine::FilterNode> Engine::buildGraph(
@@ -748,6 +911,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
   result.reserve(candidate.size());
   uint64_t delayBufferSamples = 0;
   uint64_t baseRingSamples = 0;
+  uint64_t iirMemoryBytes = 0;
   uint64_t convolutionMemoryBytes = 0;
 
   for (auto &parsed : candidate) {
@@ -798,6 +962,21 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     if (filter->getAllChannels())
       selectedNames = allNames;
     const auto inputNames = selectedNames;
+    uint64_t filterIirMemoryBytes = 0;
+    if (parsed.iirOrder) {
+      // Upstream IIRFilter owns two order-sized coefficient arrays and two
+      // order-by-channel state arrays. Check before initialize() touches x/y.
+      filterIirMemoryBytes = static_cast<uint64_t>(parsed.iirOrder) * 2U *
+                             sizeof(double) *
+                             (1U + static_cast<uint64_t>(inputNames.size()));
+      if (iirMemoryBytes > MaxIirMemoryBytes ||
+          filterIirMemoryBytes > MaxIirMemoryBytes - iirMemoryBytes)
+        throw std::runtime_error(
+            location + "IIR coefficients and per-channel state exceed "
+                       "SkyAPO's 64 MiB per-graph memory budget");
+      iirMemoryBytes += filterIirMemoryBytes;
+    }
+    uint64_t filterConvolutionEstimatedBytes = 0;
     uint32_t fixedLatencySamples = 0;
     uint64_t fixedBufferSamples = 0;
     if (const auto *delay = dynamic_cast<const DelayFilter *>(filter)) {
@@ -863,6 +1042,7 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
               "convolution IR and upstream FFT state exceed SkyAPO's 64 MiB "
               "per-graph convolution-memory budget");
         convolutionMemoryBytes += required;
+        filterConvolutionEstimatedBytes = required;
       } catch (const std::exception &error) {
         throw std::runtime_error(location + error.what());
       }
@@ -961,6 +1141,8 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
     node.filter = filter;
     node.fixedLatencySamples = fixedLatencySamples;
     node.fixedBufferSamples = fixedBufferSamples;
+    node.iirMemoryBytes = filterIirMemoryBytes;
+    node.convolutionEstimatedBytes = filterConvolutionEstimatedBytes;
     node.pluginBypassBufferSamples = pluginBypassBufferSamples;
     node.description = parsed.directive + " — " + parsed.source.string() + ":" +
                        std::to_string(parsed.line);
@@ -999,7 +1181,11 @@ std::vector<Engine::FilterNode> Engine::buildGraph(
 
 void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
                             unsigned laneCount) const {
+  using PreparedPdcUpdate =
+      std::variant<PdcAlignmentFilter::Prepared, PdcCopyFilter::Prepared>;
   std::vector<uint64_t> arrival(laneCount, 0);
+  std::vector<PreparedPdcUpdate> preparedUpdates;
+  preparedUpdates.reserve(nodes.size());
   uint64_t pdcRingSamples = 0;
   for (const auto &node : nodes) {
     if (node.fixedBufferSamples > MaxPdcRingSamples - pdcRingSamples)
@@ -1019,13 +1205,15 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
       if (!alignment)
         throw std::runtime_error("invalid internal PDC alignment node");
       const auto inputArrival = arrival;
-      alignment->configure(inputArrival, arrival, pdcRingSamples);
+      preparedUpdates.emplace_back(
+          alignment->prepare(inputArrival, arrival, pdcRingSamples));
       continue;
     }
 
     if (auto *copy = dynamic_cast<PdcCopyFilter *>(node.filter)) {
       const auto inputArrival = arrival;
-      copy->configure(inputArrival, arrival, pdcRingSamples);
+      preparedUpdates.emplace_back(
+          copy->prepare(inputArrival, arrival, pdcRingSamples));
       continue;
     }
 
@@ -1060,6 +1248,20 @@ void Engine::rebuildPdcPlan(std::vector<FilterNode> &nodes,
       arrival[destination] = sourceLatency + nodeLatency;
     }
   }
+
+  // Allocate and validate the complete replacement schedule before touching
+  // any live alignment rings. Committing these prepared states is noexcept,
+  // so a rejected budget or allocation failure cannot leave mixed PDC delays.
+  for (auto &update : preparedUpdates)
+    std::visit(
+        [](auto &prepared) {
+          using Prepared = std::decay_t<decltype(prepared)>;
+          if constexpr (std::is_same_v<Prepared, PdcAlignmentFilter::Prepared>)
+            PdcAlignmentFilter::commit(std::move(prepared));
+          else
+            PdcCopyFilter::commit(std::move(prepared));
+        },
+        update);
 }
 
 void Engine::parseConfigFile(const std::filesystem::path &configPath,
@@ -1069,7 +1271,10 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              std::vector<std::filesystem::path> &attemptedFiles,
                              std::vector<IncludeSite> &includeChain,
                              bool &stageActive, mup::ParserX *expressionParser,
-                             std::vector<ConfigNotice> &notices) {
+                             std::vector<ConfigNotice> &notices,
+                             uint64_t &parsedIirCoefficientBytes,
+                             const ConfigSourceSnapshot *sourceSnapshot,
+                             ConfigSourceSnapshot *capturedSources) {
   const auto normalizedPath =
       skyapo::platform::ConfigSource::canonicalize(configPath);
   if (std::find(attemptedFiles.begin(), attemptedFiles.end(), normalizedPath) ==
@@ -1083,7 +1288,18 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     throw std::runtime_error("include cycle detected at " +
                              normalizedPath.string());
 
-  auto in = skyapo::platform::ConfigSource::open(normalizedPath);
+  const std::vector<std::string> *sourceLines = nullptr;
+  std::unique_ptr<skyapo::platform::ConfigSource::Reader> fileReader;
+  if (sourceSnapshot) {
+    const auto source = sourceSnapshot->files.find(normalizedPath);
+    if (source == sourceSnapshot->files.end())
+      throw std::runtime_error("accepted config snapshot is missing " +
+                               normalizedPath.string());
+    sourceLines = &source->second;
+  } else {
+    fileReader = std::make_unique<skyapo::platform::ConfigSource::Reader>(
+        skyapo::platform::ConfigSource::open(normalizedPath));
+  }
   if (std::find(configFiles.begin(), configFiles.end(), normalizedPath) ==
       configFiles.end())
     configFiles.push_back(normalizedPath);
@@ -1097,7 +1313,8 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
 
   const auto widePath = StringHelper::toWString(normalizedPath.string(), 65001);
   const auto addFileFilters = [&](std::vector<IFilter *> produced,
-                                  unsigned line, const std::string &directive) {
+                                  unsigned line, const std::string &directive,
+                                  unsigned iirOrder = 0) {
     struct Guard {
       std::vector<IFilter *> &filters;
       FilterDeleter deleter;
@@ -1109,14 +1326,16 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     for (auto &filter : produced) {
       std::unique_ptr<IFilter, FilterDeleter> owned(filter);
       filter = nullptr;
-      candidate.push_back(
-          {std::move(owned), normalizedPath, line, directive, includeChain});
+      candidate.push_back({std::move(owned), normalizedPath, line, directive,
+                           includeChain, iirOrder});
     }
   };
   for (auto &factory : factories)
     addFileFilters(factory->startOfFile(widePath), 0, "file initialization");
   std::string raw;
   unsigned lineNo = 0;
+  size_t sourceLineIndex = 0;
+  std::vector<std::string> capturedLines;
   struct ConditionalFrame {
     bool parentActive;
     bool branchTaken;
@@ -1179,7 +1398,12 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                              "rebuild SkyAPO");
 #endif
   };
-  while (in.readLine(raw)) {
+  while (sourceLines ? sourceLineIndex < sourceLines->size()
+                     : fileReader->readLine(raw)) {
+    if (sourceLines)
+      raw = (*sourceLines)[sourceLineIndex++];
+    else if (capturedSources)
+      capturedLines.push_back(raw);
     ++lineNo;
     stripInlineComment(raw);
     auto line = StringHelper::trim(StringHelper::toWString(raw, 65001));
@@ -1280,31 +1504,33 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
     if (command == L"Stage") {
       std::wistringstream stages(StringHelper::toLowerCase(params));
       std::wstring stage;
-      bool foundCapture = false;
+      bool foundCurrentStage = false;
       bool foundAny = false;
-      bool foundUnsupportedLinuxStage = false;
+      bool foundUnsupportedPreMix = false;
       while (stages >> stage) {
         foundAny = true;
-        if (stage == L"capture")
-          foundCapture = true;
-        else if (stage == L"pre-mix" || stage == L"post-mix")
-          foundUnsupportedLinuxStage = true;
-        else
+        if (stage == L"capture" || stage == L"pre-mix" ||
+            stage == L"post-mix") {
+          foundCurrentStage = foundCurrentStage || stage == processingStage;
+          foundUnsupportedPreMix =
+              foundUnsupportedPreMix || stage == L"pre-mix";
+        } else {
           throw std::runtime_error(normalizedPath.string() + ":" +
                                    std::to_string(lineNo) +
                                    ": unsupported Stage value '" +
                                    StringHelper::toString(stage, 65001) + "'");
+        }
       }
       if (!foundAny)
         throw std::runtime_error(
             normalizedPath.string() + ":" + std::to_string(lineNo) +
             ": Stage requires capture, pre-mix, or post-mix");
-      if (foundUnsupportedLinuxStage)
+      if (foundUnsupportedPreMix)
         notices.push_back(
             {normalizedPath, lineNo,
-             "pre-mix/post-mix processing is unavailable in the PipeWire "
-             "capture graph; filters in those stages are ignored"});
-      stageActive = foundCapture;
+             "pre-mix processing is unavailable in the PipeWire graph; "
+             "filters in that stage are ignored"});
+      stageActive = foundCurrentStage;
       continue;
     }
     if (!stageActive)
@@ -1345,12 +1571,26 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
       // parser-owned source ancestry. Successful recursion unwinds this site.
       parseConfigFile(included, candidate, includeStack, configFiles,
                       attemptedFiles, includeChain, includedStage,
-                      expressionParser, notices);
+                      expressionParser, notices, parsedIirCoefficientBytes,
+                      sourceSnapshot, capturedSources);
       includeChain.pop_back();
       continue;
     }
 
     const auto originalCommand = command;
+    unsigned iirOrder = 0;
+    if (originalCommand.rfind(L"Filter", 0) == 0) {
+      iirOrder = validateIirCoefficients(params, normalizedPath, lineNo);
+      const uint64_t coefficientBytes =
+          static_cast<uint64_t>(iirOrder) * 2U * sizeof(double);
+      if (parsedIirCoefficientBytes > MaxIirMemoryBytes ||
+          coefficientBytes > MaxIirMemoryBytes - parsedIirCoefficientBytes)
+        throw std::runtime_error(
+            normalizedPath.string() + ":" + std::to_string(lineNo) +
+            ": IIR coefficients exceed SkyAPO's 64 MiB per-graph memory "
+            "budget");
+      parsedIirCoefficientBytes += coefficientBytes;
+    }
     std::vector<IFilter *> made;
     for (auto &factory : factories) {
       if (auto *sourceContext =
@@ -1402,20 +1642,26 @@ void Engine::parseConfigFile(const std::filesystem::path &configPath,
                                " parameters");
     }
     addFileFilters(std::move(made), lineNo,
-                   StringHelper::toString(originalCommand, 65001));
+                   StringHelper::toString(originalCommand, 65001), iirOrder);
   }
   if (!conditions.empty())
     throw std::runtime_error(normalizedPath.string() + ":" +
                              std::to_string(conditions.back().openingLine) +
                              ": If was not closed by EndIf");
-  if (in.failed())
+  if (fileReader && fileReader->failed())
     throw std::runtime_error("error reading config: " +
                              normalizedPath.string());
   for (auto &factory : factories)
     addFileFilters(factory->endOfFile(widePath), lineNo, "file finalization");
+  if (capturedSources)
+    capturedSources->files.emplace(normalizedPath, std::move(capturedLines));
 }
 
 void Engine::process(float *samples, unsigned frames) {
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency refresh failed; reload the configuration before "
+        "processing");
   if (frames > maxFrameCount)
     throw std::runtime_error("frame block exceeds configured maximum");
   if (fixedBlock && frames != maxFrameCount)
@@ -1431,6 +1677,10 @@ unsigned Engine::processTransitionTo(Engine &next, float *samples,
                                      unsigned frames,
                                      unsigned transitionCounter,
                                      unsigned transitionLength) {
+  if (!latencyPlanValid || !next.latencyPlanValid)
+    throw std::runtime_error(
+        "cannot crossfade an Engine with a failed latency refresh; reload "
+        "the configuration first");
   if (this == &next)
     throw std::invalid_argument("cannot transition an Engine to itself");
   if (rate != next.rate || channelCount != next.channelCount ||
@@ -1501,37 +1751,69 @@ bool Engine::pluginLatencyRefreshPending() const noexcept {
 }
 
 unsigned Engine::refreshPluginLatencies() {
-  unsigned refreshed = 0;
-  uint64_t updatedBypassSamples = 0;
-  uint64_t fixedDelaySamples = 0;
-  for (auto &node : graph) {
-    fixedDelaySamples += node.fixedBufferSamples;
-    auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
-    if (refresh && refresh->refreshPluginLatency()) {
-      ++refreshed;
-      auto *bypass = dynamic_cast<IPluginBypassControl *>(node.filter);
-      if (!bypass)
-        throw std::runtime_error(
-            "latency-changing plugin has no host bypass-ring accounting");
-      node.pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+  if (!latencyPlanValid)
+    throw std::runtime_error(
+        "Engine latency refresh previously failed; reload the configuration "
+        "before refreshing again");
+  try {
+    unsigned refreshed = 0;
+    uint64_t updatedBypassSamples = 0;
+    uint64_t fixedDelaySamples = 0;
+    for (auto &node : graph) {
+      fixedDelaySamples += node.fixedBufferSamples;
+      auto *refresh = dynamic_cast<IPluginLatencyRefresh *>(node.filter);
+      if (refresh && refresh->refreshPluginLatency()) {
+        ++refreshed;
+        auto *bypass = dynamic_cast<IPluginBypassControl *>(node.filter);
+        if (!bypass)
+          throw std::runtime_error(
+              "latency-changing plugin has no host bypass-ring accounting");
+        node.pluginBypassBufferSamples = bypass->bypassRingCapacitySamples();
+        if (fixedDelaySamples > MaxPdcRingSamples ||
+            updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
+            node.pluginBypassBufferSamples >
+                MaxPdcRingSamples - fixedDelaySamples - updatedBypassSamples)
+          throw std::runtime_error(
+              "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 "
+              "MiB per-graph realtime ring-buffer budget after latency "
+              "refresh");
+      }
+      updatedBypassSamples += node.pluginBypassBufferSamples;
       if (fixedDelaySamples > MaxPdcRingSamples ||
-          updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples ||
-          node.pluginBypassBufferSamples >
-              MaxPdcRingSamples - fixedDelaySamples - updatedBypassSamples)
+          updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples)
         throw std::runtime_error(
-            "plugin bypass, EAPO Delay and PDC exceed SkyAPO's shared 16 MiB "
+            "plugin bypass and EAPO Delay exceed SkyAPO's shared 16 MiB "
             "per-graph realtime ring-buffer budget after latency refresh");
     }
-    updatedBypassSamples += node.pluginBypassBufferSamples;
-    if (fixedDelaySamples > MaxPdcRingSamples ||
-        updatedBypassSamples > MaxPdcRingSamples - fixedDelaySamples)
-      throw std::runtime_error(
-          "plugin bypass and EAPO Delay exceed SkyAPO's shared 16 MiB "
-          "per-graph realtime ring-buffer budget after latency refresh");
+    if (refreshed)
+      rebuildPdcPlan(graph, allChannelCount);
+    return refreshed;
+  } catch (...) {
+    // Plugin lifecycle refresh cannot generally be rolled back portably. The
+    // PDC schedule is transactional, and the Engine must fail closed rather
+    // than process audio with plugin latency that no longer matches its plan.
+    latencyPlanValid = false;
+    throw;
   }
-  if (refreshed)
-    rebuildPdcPlan(graph, allChannelCount);
-  return refreshed;
+}
+
+void Engine::validateForActivation() {
+  constexpr unsigned MaxValidationBlocks = 4;
+  std::vector<float> silence(static_cast<size_t>(channelCount) * maxFrameCount,
+                             0.0f);
+  for (unsigned block = 0; block < MaxValidationBlocks; ++block) {
+    if (pluginLatencyRefreshPending())
+      refreshPluginLatencies();
+    if (pluginLatencyRefreshPending())
+      continue;
+
+    std::fill(silence.begin(), silence.end(), 0.0f);
+    process(silence.data(), maxFrameCount);
+    if (!pluginLatencyRefreshPending())
+      return;
+  }
+  throw std::runtime_error(
+      "plugin latency did not stabilize during silent activation validation");
 }
 
 unsigned Engine::savePersistentPluginStates() {

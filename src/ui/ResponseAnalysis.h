@@ -4,13 +4,17 @@
 #include <QPointF>
 #include <QVector>
 
+#include <optional>
+
 struct ResponseCurve {
   QString channel;
   QVector<QPointF> points;
+  QVector<QPointF> phasePoints;
 };
 
 struct ResponseAnalysisResult {
   QVector<ResponseCurve> curves;
+  std::optional<double> peakGainDb;
   QString error;
 };
 

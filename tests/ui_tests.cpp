@@ -45,12 +45,15 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QThread>
+#include <QToolButton>
 #include <QMessageBox>
+#include <QIcon>
 #include <QMenu>
 #include <QSettings>
 #include <QStandardPaths>
@@ -92,16 +95,23 @@ bool writeTestImpulseResponse(const QString &path) {
 }
 
 bool writeStatusCliFixture(const QString &path, const QString &state,
-                           int exitCode = 0) {
+                           int exitCode = 0,
+                           const QString &dspState = QStringLiteral("running"),
+                           bool negotiatedFormat = false) {
   QByteArray script = "#!/bin/sh\n"
                       "if [ \"$1\" = \"status\" ]; then\n"
                       "  printf '%s\\n' 'Daemon: ";
   script += state.toUtf8();
+  script += "' 'DSP state: ";
+  script += dspState.toUtf8();
   script += "' 'Selected device: fixture.mic' 'Capture node: 52 (Test mic)' "
             "'Virtual microphone: SkyAPO Virtual Mic' 'Virtual node: 90 "
-            "(skyapo.virtual_mic)' 'Format: F32 planar DSP' 'Channels: 2' "
-            "'Sample rate: unknown (awaiting graph)' 'Quantum: unknown'\n"
-            "  exit ";
+            "(skyapo.virtual_mic)' 'Format: F32 planar DSP' 'Channels: 2' ";
+  script +=
+      negotiatedFormat
+          ? "'Sample rate: 48000 Hz' 'Quantum: 1024'\n"
+          : "'Sample rate: unknown (awaiting graph)' 'Quantum: unknown'\n";
+  script += "  exit ";
   script += QByteArray::number(exitCode);
   script += "\nfi\n";
   if (exitCode != 0)
@@ -127,6 +137,134 @@ bool writeDeviceQueryFailureCliFixture(const QString &path) {
       "  exit 7\n"
       "fi\n"
       "exit 0\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
+bool writePolkitPreflightFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "printf 'result=%s\\n' \"${SKYAPO_UI_TEST_POLKIT_RESULT:-0}\" >> "
+      "\"$SKYAPO_UI_TEST_POLKIT_LOG\"\n"
+      "printf 'arg=%s\\n' \"$@\" >> \"$SKYAPO_UI_TEST_POLKIT_LOG\"\n"
+      "exit \"${SKYAPO_UI_TEST_POLKIT_RESULT:-0}\"\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
+bool writeDeviceVerificationCliFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$SKYAPO_UI_TEST_VERIFY_LOG\"\n"
+      "case \"$1:$2:$3\" in\n"
+      "  status::)\n"
+      "    case \"$SKYAPO_UI_TEST_VERIFY_SCENARIO\" in\n"
+      "      stopped)\n"
+      "        printf '%s\\n' 'Daemon: stopped' 'DSP state: stopped' "
+      "'Selected device: fixture.capture' 'Capture node: 41 (Built-in "
+      "capture)' 'Virtual microphone: not active' 'Virtual node: "
+      "4294967295 (unavailable)' 'Filters: 1' 'Active capture links: 0/2' "
+      "'Playback node: SkyAPO Playback (100)' 'Playback target: fixture "
+      "(USB DAC) (99)' 'Playback graph: unconnected / unconnected, internal "
+      "links 0/2, target links 0/2 channels'\n"
+      "        printf 'Config: %s\\n' \"$SKYAPO_UI_TEST_CONFIG_PATH\"\n"
+      "        exit 0 ;;\n"
+      "      initializing)\n"
+      "        printf '%s\\n' 'Daemon: streaming' 'DSP state: initializing "
+      "(awaiting negotiated format)' 'Selected device: fixture.capture' "
+      "'Capture node: 41 (Built-in capture)' 'Virtual microphone: "
+      "SkyAPO Virtual Mic' 'Virtual node: 4294967295 (pending)' 'Filters: 1' "
+      "'Active capture links: 0/2' 'Playback node: SkyAPO Playback (100)' "
+      "'Playback target: fixture (USB DAC) (99)' 'Playback graph: connecting "
+      "/ connecting, internal links 0/2, target links 0/2 channels'\n"
+      "        printf 'Config: %s\\n' \"$SKYAPO_UI_TEST_CONFIG_PATH\"\n"
+      "        exit 0 ;;\n"
+      "      disconnected)\n"
+      "        printf '%s\\n' 'Daemon: streaming' 'DSP state: running' "
+      "'Selected device: fixture.capture' 'Capture node: unavailable' "
+      "'Virtual microphone: SkyAPO Virtual Mic' 'Virtual node: "
+      "4294967295 (disconnected)' 'Filters: 1' 'Active capture links: 0/2' "
+      "'Playback node: SkyAPO Playback (100)' 'Playback target: fixture "
+      "(USB DAC) (99)' 'Playback graph: streaming / unconnected, internal "
+      "links 1/2, target links 0/2 channels'\n"
+      "        printf 'Config: %s\\n' \"$SKYAPO_UI_TEST_CONFIG_PATH\"\n"
+      "        exit 0 ;;\n"
+      "      unknown)\n"
+      "        printf '%s\\n' 'Daemon: unknown' 'DSP state: unknown'\n"
+      "        exit 0 ;;\n"
+      "      malformed-node)\n"
+      "        printf '%s\\n' 'Daemon: streaming' 'DSP state: running' "
+      "'Selected device: fixture.capture' 'Capture node: 41 (Built-in "
+      "capture)' 'Virtual microphone: SkyAPO Virtual Mic' 'Virtual node: "
+      "not-a-pipewire-node' 'Filters: 1' 'Active capture links: 2/2' "
+      "'Playback node: SkyAPO Playback (100)' 'Playback target: fixture "
+      "(USB DAC) (99)' 'Playback graph: streaming / streaming, internal "
+      "links 2/2, target links 2/2 channels'\n"
+      "        printf 'Config: %s\\n' \"$SKYAPO_UI_TEST_CONFIG_PATH\"\n"
+      "        exit 0 ;;\n"
+      "    esac\n"
+      "    if [ \"$SKYAPO_UI_TEST_VERIFY_BROKEN\" = 1 ]; then\n"
+      "      printf '%s\\n' 'Daemon: streaming' 'DSP state: paused (faulted)' "
+      "'Selected device: fixture.capture' 'Capture node: 41 (Built-in "
+      "capture)' 'Virtual microphone: SkyAPO Virtual Mic' 'Virtual node: "
+      "4294967295 "
+      "(skyapo.virtual_mic)' 'Filters: 1' 'Active capture links: 1/2' "
+      "'Playback node: SkyAPO Playback (100)' 'Playback target: fixture (USB "
+      "DAC) "
+      "(99)' 'Playback graph: streaming / streaming, internal links 2/2, "
+      "target links 0/2 channels' 'Config: /fixture/config.txt'\n"
+      "      exit 0\n"
+      "    fi\n"
+      "    printf '%s\\n' 'Daemon: streaming' 'DSP state: running' 'Selected "
+      "device: fixture.capture' 'Capture node: 41 (Built-in capture)' 'Virtual "
+      "microphone: SkyAPO Virtual Mic' 'Virtual node: 90 (skyapo.virtual_mic)' "
+      "'Filters: 1' 'Active capture links: 2/2' 'Playback node: SkyAPO "
+      "Playback (100)' 'Playback target: fixture (USB DAC) (99)' "
+      "'Playback graph: "
+      "streaming / streaming, internal links 2/2, target links 2/2 channels' "
+      "'DSP amplitude ratio: 0.5'\n"
+      "    printf 'Config: %s\\n' \"$SKYAPO_UI_TEST_CONFIG_PATH\"\n"
+      "    exit 0 ;;\n"
+      "  device:current:) printf '%s\\n' 'fixture.capture'; exit 0 ;;\n"
+      "  device:list:)\n"
+      "    printf '%b\\n' 'ID\\tNODE "
+      "NAME\\tDESCRIPTION\\tSELECTED\\tCHANNELS\\tSAMPLE RATE\\tSTABLE "
+      "PROPERTY\\tDEVICE BUS ID\\tALSA CARD\\tALSA PATH\\tDEFAULT' "
+      "'41\\tfixture.capture\\tBuilt-in "
+      "capture\\tyes\\t2\\t48000\\t\\t\\t\\t\\tno'; exit 0 ;;\n"
+      "  device:output:current)\n"
+      "    if [ \"$SKYAPO_UI_TEST_VERIFY_SCENARIO\" = "
+      "playback-command-failure ]; then\n"
+      "      echo 'fixture playback query permission denied' >&2\n"
+      "      exit 7\n"
+      "    fi\n"
+      "    if [ \"$SKYAPO_UI_TEST_VERIFY_BROKEN\" = 1 ]; then\n"
+      "      printf '%s\\n' 'fixture (USB DAC)' 'Playback target: fixture "
+      "(USB DAC) "
+      "(99)' 'Playback graph: streaming / streaming, internal links 2/2, "
+      "target links 0/2 channels'; exit 0\n"
+      "    fi\n"
+      "    printf '%s\\n' 'fixture (USB DAC)' 'Playback target: fixture "
+      "(USB DAC) (99)' "
+      "'Playback graph: streaming / streaming, internal links 2/2, target "
+      "links 2/2 channels'; exit 0 ;;\n"
+      "  device:output:list)\n"
+      "    printf '%b\\n' 'ID\\tNODE "
+      "NAME\\tDESCRIPTION\\tSELECTED\\tCHANNELS\\tSAMPLE RATE\\tSTABLE "
+      "PROPERTY\\tDEFAULT' '99\\tfixture (USB DAC)\\tBuilt-in "
+      "playback\\tyes\\t2\\t48000\\t\\tno'; exit 0 ;;\n"
+      "  config:check:*)\n"
+      "    if [ \"$SKYAPO_UI_TEST_VERIFY_BROKEN\" = 1 ]; then echo 'Invalid "
+      "config'; exit 1; fi\n"
+      "    echo 'Valid config: 1 filters'; exit 0 ;;\n"
+      "esac\n"
+      "exit 2\n";
   QFile file(path);
   return file.open(QIODevice::WriteOnly) &&
          file.write(script) == script.size() &&
@@ -200,6 +338,44 @@ bool writeConfigWorkflowCliFixture(const QString &path) {
                              QFileDevice::ExeOwner);
 }
 
+bool writeLivePluginCliFixture(const QString &path) {
+  const QByteArray script =
+      "#!/bin/sh\n"
+      "case \"$1\" in\n"
+      "  status) printf '%s\\n' 'Daemon: streaming'; exit 0 ;;\n"
+      "  device) printf '%s\\n' 'ID\\tNODE NAME\\tDESCRIPTION\\tSELECTED'; "
+      "exit 0 ;;\n"
+      "  config)\n"
+      "    if [ \"$2\" = check ] && [ \"$3\" = --json ]; then\n"
+      "      printf '%s\\n' '{\"valid\":true,\"filter_count\":1,"
+      "\"diagnostics\":[]}'; exit 0\n"
+      "    fi\n"
+      "    printf '%s\\n' 'Configuration is valid'; exit 0 ;;\n"
+      "  plugin)\n"
+      "    case \"$2\" in\n"
+      "      info) printf 'Test Gain\\nURI: test.gain.plugin\\n'"
+      "'gain\\tGain\\tdefault=0.25\\trange=[0, 1]\\n'"
+      "'mix\\tMix\\tdefault=1\\trange=[0, 1]\\n'; exit 0 ;;\n"
+      "      set) printf 'set\\t%s\\t%s\\t%s\\n' \"$3\" \"$4\" "
+      "\"$5\" >> \"$SKYAPO_UI_TEST_PLUGIN_CONTROL_LOG\"\n"
+      "           if [ \"$5\" = 0.66 ]; then echo 'fixture live-set error' "
+      ">&2; exit 9; fi\n"
+      "           echo \"Updated $3 parameter $4 to $5\"; exit 0 ;;\n"
+      "      bypass) printf 'bypass\\t%s\\t%s\\n' \"$3\" \"$4\" >> "
+      "\"$SKYAPO_UI_TEST_PLUGIN_CONTROL_LOG\"\n"
+      "              if [ \"$4\" = off ]; then echo 'fixture bypass error' "
+      " >&2; exit 8; fi\n"
+      "              echo \"Updated $3 bypass to $4\"; exit 0 ;;\n"
+      "    esac ;;\n"
+      "esac\n"
+      "exit 0\n";
+  QFile file(path);
+  return file.open(QIODevice::WriteOnly) &&
+         file.write(script) == script.size() &&
+         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                             QFileDevice::ExeOwner);
+}
+
 bool configIsValid(const QString &cli, const QString &path,
                    QString *diagnostic = nullptr) {
   QProcess process;
@@ -224,10 +400,577 @@ bool waitForValidation(QLabel *label, const QString &prefix,
   }
   return label && label->text().startsWith(prefix);
 }
+
+int runDeviceSelectorPolkitPreflightTest(const QString &cliPath) {
+  QTemporaryDir temporary;
+  if (!temporary.isValid()) {
+    std::cerr << "could not create isolated Polkit test directory\n";
+    return 1;
+  }
+  QSettings::setDefaultFormat(QSettings::IniFormat);
+  QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                     temporary.path());
+  const QString configPath = temporary.filePath("config.txt");
+  const QString cliFixturePath = temporary.filePath("skyapo-fixture");
+  const QString fixturePath = temporary.filePath("pkcheck-fixture");
+  const QString logPath = temporary.filePath("pkcheck.log");
+  const QString verificationLogPath =
+      temporary.filePath("verification-cli.log");
+  QFile config(configPath);
+  if (!config.open(QIODevice::WriteOnly) ||
+      config.write("Preamp: 0 dB\n") < 0 ||
+      !writePolkitPreflightFixture(fixturePath) ||
+      !writeDeviceVerificationCliFixture(cliFixturePath)) {
+    std::cerr << "could not create Polkit UI test fixtures\n";
+    return 1;
+  }
+  config.close();
+  qputenv("SKYAPO_UI_TEST_POLKIT_LOG", logPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_POLKIT_RESULT", "1");
+  qputenv("SKYAPO_UI_TEST_VERIFY_LOG", verificationLogPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_CONFIG_PATH", configPath.toLocal8Bit());
+
+  Q_UNUSED(cliPath);
+  MainWindow window(configPath, cliFixturePath, fixturePath);
+  auto *editablePreamp = window.findChild<PreampFilterGUI *>();
+  auto *editableGain =
+      editablePreamp
+          ? editablePreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+          : nullptr;
+  if (!editableGain) {
+    std::cerr << "config editor Preamp control is missing from the fixture\n";
+    return 1;
+  }
+  editableGain->setValue(-3.0);
+  window.show();
+  auto *openSelector = window.findChild<QPushButton *>("openDeviceSelector");
+  if (!openSelector) {
+    std::cerr << "Device Selector action is missing\n";
+    return 1;
+  }
+
+  bool denialShown = false;
+  QTimer denialProbe;
+  denialProbe.setInterval(10);
+  QObject::connect(&denialProbe, &QTimer::timeout, &window, [&] {
+    auto *warning =
+        window.findChild<QMessageBox *>("deviceSelectorAuthorizationError");
+    if (!warning || !warning->isVisible())
+      return;
+    if (!warning->text().contains("not opened", Qt::CaseInsensitive))
+      return;
+    denialShown = true;
+    warning->done(QMessageBox::Ok);
+  });
+  denialProbe.start();
+  openSelector->click();
+  QElapsedTimer denialWait;
+  denialWait.start();
+  while (!denialShown && denialWait.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  denialProbe.stop();
+  const bool selectorUnexpectedlyOpened =
+      window.findChild<QDialog *>("deviceSelectorDialog") != nullptr;
+  QFile deniedLog(logPath);
+  const bool deniedLogOpened = deniedLog.open(QIODevice::ReadOnly);
+  const QByteArray denialOutput =
+      deniedLogOpened ? deniedLog.readAll() : QByteArray{};
+  if (!denialShown || selectorUnexpectedlyOpened || !deniedLogOpened ||
+      !denialOutput.contains("result=1")) {
+    std::cerr << "denied preflight state: dialog=" << denialShown
+              << ", selector=" << selectorUnexpectedlyOpened
+              << ", log=" << deniedLogOpened
+              << ", result=" << denialOutput.toStdString() << '\n';
+    return 1;
+  }
+  const QByteArray deniedArguments = denialOutput;
+  const QByteArray processId =
+      QByteArray::number(QCoreApplication::applicationPid());
+  if (!deniedArguments.contains("result=1") ||
+      !deniedArguments.contains("--action-id") ||
+      !deniedArguments.contains("org.linuxapo.device-selector.open") ||
+      !deniedArguments.contains("--process") ||
+      !deniedArguments.contains(processId) ||
+      !deniedArguments.contains("--allow-user-interaction")) {
+    std::cerr << "Polkit preflight arguments were not narrowly scoped\n";
+    return 1;
+  }
+
+  qputenv("SKYAPO_UI_TEST_POLKIT_RESULT", "0");
+  bool selectorOpened = false;
+  QString successFailure;
+  int authorizedStep = 0;
+  QElapsedTimer verificationWait;
+  QTimer successProbe;
+  successProbe.setInterval(10);
+  QObject::connect(&successProbe, &QTimer::timeout, &window, [&] {
+    auto *warning =
+        window.findChild<QMessageBox *>("deviceSelectorAuthorizationError");
+    if (warning && warning->isVisible()) {
+      successFailure = warning->text();
+      warning->done(QMessageBox::Ok);
+      return;
+    }
+    auto *selector = window.findChild<QDialog *>("deviceSelectorDialog");
+    if (!selector)
+      return;
+    if (authorizedStep == 0) {
+      auto *status =
+          selector->findChild<QLabel *>("deviceSelectorRuntimeStatus");
+      auto *verify = selector->findChild<QPushButton *>("verifyAudioPath");
+      if (!status || !status->text().contains("Daemon: streaming"))
+        return;
+      if (!verify) {
+        successFailure = QStringLiteral("Device Selector does not expose the "
+                                        "audio-path verification action");
+        selector->reject();
+        return;
+      }
+      verify->click();
+      authorizedStep = 1;
+      verificationWait.start();
+      return;
+    }
+    auto *report = window.findChild<QDialog *>("deviceVerificationDialog");
+    if (!report) {
+      if (verificationWait.elapsed() > 8000) {
+        successFailure = QStringLiteral(
+            "verification dialog did not open after clicking its action");
+        selector->reject();
+      }
+      return;
+    }
+    auto *notice = report->findChild<QLabel *>("deviceVerificationNotice");
+    if (!notice ||
+        !notice->text().contains("unsaved editor changes are not included",
+                                 Qt::CaseInsensitive)) {
+      successFailure = QStringLiteral(
+          "verification did not disclose that unsaved editor changes are "
+          "excluded from the saved-config check");
+      report->reject();
+      selector->reject();
+      return;
+    }
+    auto *results =
+        report->findChild<QTableWidget *>("deviceVerificationResults");
+    auto *summary = report->findChild<QLabel *>("deviceVerificationSummary");
+    if (!results || !summary || results->rowCount() != 7) {
+      if (verificationWait.elapsed() > 8000) {
+        successFailure = QStringLiteral(
+            "verification report is missing its result table or summary");
+        report->reject();
+        selector->reject();
+      }
+      return;
+    }
+    if (!summary->text().contains("graph checks passed", Qt::CaseInsensitive)) {
+      if (verificationWait.elapsed() > 8000) {
+        QStringList observed;
+        for (int row = 0; row < results->rowCount(); ++row)
+          observed << QStringLiteral("%1=%2 (%3)")
+                          .arg(results->item(row, 0)
+                                   ? results->item(row, 0)->text()
+                                   : QStringLiteral("row %1").arg(row),
+                               results->item(row, 1)
+                                   ? results->item(row, 1)->text()
+                                   : QStringLiteral("missing"),
+                               results->item(row, 2)
+                                   ? results->item(row, 2)->text()
+                                   : QStringLiteral("no details"));
+        successFailure =
+            QStringLiteral("graph verification did not pass: %1; %2")
+                .arg(summary->text(), observed.join(" | "));
+        report->reject();
+        selector->reject();
+      }
+      return;
+    }
+    const auto rowStatus = [results](int row) {
+      return results->item(row, 1) ? results->item(row, 1)->text() : QString{};
+    };
+    if (rowStatus(0) != QStringLiteral("PASS") ||
+        rowStatus(1) != QStringLiteral("PASS") ||
+        rowStatus(2) != QStringLiteral("PASS") ||
+        rowStatus(3) != QStringLiteral("PASS") ||
+        rowStatus(4) != QStringLiteral("PASS") ||
+        rowStatus(5) != QStringLiteral("NOT TESTED") ||
+        rowStatus(6) != QStringLiteral("NOT TESTED") ||
+        !summary->text().contains("no test signal", Qt::CaseInsensitive)) {
+      successFailure = QStringLiteral(
+          "verification report misrepresented graph, DSP or hardware status");
+      report->reject();
+      selector->reject();
+      return;
+    }
+    selectorOpened = true;
+    report->accept();
+    auto *close = selector->findChild<QPushButton *>("closeDeviceSelector");
+    if (close)
+      close->click();
+    else
+      selector->reject();
+  });
+  successProbe.start();
+  openSelector->click();
+  QElapsedTimer successWait;
+  successWait.start();
+  while (!selectorOpened && successFailure.isEmpty() &&
+         successWait.elapsed() < 10000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  successProbe.stop();
+  QFile authorizedLog(logPath);
+  if (!selectorOpened || !successFailure.isEmpty() ||
+      !authorizedLog.open(QIODevice::ReadOnly) ||
+      !authorizedLog.readAll().contains("result=0")) {
+    std::cerr << "authorized preflight did not open Device Selector";
+    if (!successFailure.isEmpty())
+      std::cerr << ": " << successFailure.toStdString();
+    std::cerr << '\n';
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_VERIFY_BROKEN", "1");
+  qunsetenv("SKYAPO_UI_TEST_VERIFY_SCENARIO");
+  bool failedPathVerified = false;
+  QString failedPathError;
+  int failedPathStep = 0;
+  QElapsedTimer failedPathWait;
+  QTimer failedPathProbe;
+  failedPathProbe.setInterval(10);
+  QObject::connect(&failedPathProbe, &QTimer::timeout, &window, [&] {
+    auto *selector = window.findChild<QDialog *>("deviceSelectorDialog");
+    if (!selector)
+      return;
+    if (failedPathStep == 0) {
+      auto *verify = selector->findChild<QPushButton *>("verifyAudioPath");
+      if (!verify)
+        return;
+      verify->click();
+      failedPathStep = 1;
+      failedPathWait.start();
+      return;
+    }
+    auto *report = window.findChild<QDialog *>("deviceVerificationDialog");
+    if (report) {
+      auto *results =
+          report->findChild<QTableWidget *>("deviceVerificationResults");
+      auto *summary = report->findChild<QLabel *>("deviceVerificationSummary");
+      if (failedPathStep == 2) {
+        if (results && summary && results->rowCount() == 7 &&
+            results->item(4, 1) &&
+            results->item(4, 1)->text() == QStringLiteral("UNKNOWN") &&
+            results->item(4, 2) &&
+            results->item(4, 2)->text().contains(
+                "fixture playback query permission denied",
+                Qt::CaseInsensitive)) {
+          failedPathVerified = true;
+        } else if (failedPathWait.elapsed() > 8000) {
+          failedPathError = QStringLiteral(
+              "playback query failure was not shown with actionable command "
+              "details");
+        }
+        if (!failedPathVerified && failedPathError.isEmpty())
+          return;
+        report->reject();
+        if (auto *close =
+                selector->findChild<QPushButton *>("closeDeviceSelector"))
+          close->click();
+        else
+          selector->reject();
+        return;
+      }
+      if (results && summary &&
+          summary->text().contains("graph checks failed",
+                                   Qt::CaseInsensitive)) {
+        const auto rowStatus = [results](int row) {
+          return results->item(row, 1) ? results->item(row, 1)->text()
+                                       : QString{};
+        };
+        if (results->rowCount() == 7 &&
+            rowStatus(0) == QStringLiteral("FAIL") &&
+            rowStatus(1) == QStringLiteral("FAIL") &&
+            rowStatus(2) == QStringLiteral("FAIL") &&
+            rowStatus(3) == QStringLiteral("FAIL") &&
+            rowStatus(4) == QStringLiteral("FAIL") &&
+            rowStatus(5) == QStringLiteral("NOT TESTED") &&
+            rowStatus(6) == QStringLiteral("NOT TESTED") &&
+            results->item(0, 2) &&
+            results->item(0, 2)->text().contains(
+                "does not match the config loaded by skyapod",
+                Qt::CaseInsensitive)) {
+          failedPathStep = 2;
+          qputenv("SKYAPO_UI_TEST_VERIFY_BROKEN", "0");
+          qputenv("SKYAPO_UI_TEST_VERIFY_SCENARIO", "playback-command-failure");
+          report->reject();
+          if (auto *verify =
+                  selector->findChild<QPushButton *>("verifyAudioPath")) {
+            failedPathWait.restart();
+            verify->click();
+            return;
+          }
+          failedPathError = QStringLiteral(
+              "Device Selector does not expose retry verification");
+        } else {
+          failedPathError = QStringLiteral(
+              "failed graph state was misreported in verification rows");
+        }
+        report->reject();
+        auto *close = selector->findChild<QPushButton *>("closeDeviceSelector");
+        if (close)
+          close->click();
+        else
+          selector->reject();
+        return;
+      }
+    }
+    if (failedPathWait.isValid() && failedPathWait.elapsed() > 8000) {
+      failedPathError = QStringLiteral(
+          "verification did not report the injected failed graph state");
+      if (report)
+        report->reject();
+      selector->reject();
+    }
+  });
+  failedPathProbe.start();
+  openSelector->click();
+  QElapsedTimer failedPathDeadline;
+  failedPathDeadline.start();
+  while (!failedPathVerified && failedPathError.isEmpty() &&
+         failedPathDeadline.elapsed() < 10000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  failedPathProbe.stop();
+  if (!failedPathVerified && failedPathError.isEmpty())
+    failedPathError = QStringLiteral(
+        "timed out waiting for the failed-graph verification flow");
+  if (!failedPathVerified || !failedPathError.isEmpty()) {
+    std::cerr << "failed audio-path verification case failed";
+    if (!failedPathError.isEmpty())
+      std::cerr << ": " << failedPathError.toStdString();
+    std::cerr << '\n';
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_VERIFY_BROKEN", "0");
+  const auto runVerificationScenario = [&](const QByteArray &scenario,
+                                           auto validate) {
+    qputenv("SKYAPO_UI_TEST_VERIFY_SCENARIO", scenario);
+    bool completed = false;
+    QString scenarioError;
+    int step = 0;
+    QElapsedTimer scenarioWait;
+    QTimer scenarioProbe;
+    scenarioProbe.setInterval(10);
+    QObject::connect(&scenarioProbe, &QTimer::timeout, &window, [&] {
+      auto *selector = window.findChild<QDialog *>("deviceSelectorDialog");
+      if (!selector)
+        return;
+      if (step == 0) {
+        auto *verify = selector->findChild<QPushButton *>("verifyAudioPath");
+        if (!verify) {
+          scenarioError =
+              QStringLiteral("Device Selector lacks the verification action");
+          selector->reject();
+          return;
+        }
+        verify->click();
+        scenarioWait.start();
+        step = 1;
+        return;
+      }
+      auto *report = window.findChild<QDialog *>("deviceVerificationDialog");
+      auto *results =
+          report
+              ? report->findChild<QTableWidget *>("deviceVerificationResults")
+              : nullptr;
+      auto *summary =
+          report ? report->findChild<QLabel *>("deviceVerificationSummary")
+                 : nullptr;
+      if (!report || !results || !summary || results->rowCount() != 7) {
+        if (scenarioWait.elapsed() > 8000) {
+          scenarioError =
+              QStringLiteral("verification report did not finish loading");
+          if (report)
+            report->reject();
+          selector->reject();
+        }
+        return;
+      }
+      for (int row = 0; row < results->rowCount(); ++row) {
+        if (!results->item(row, 1) ||
+            results->item(row, 1)->text() == QStringLiteral("CHECKING"))
+          return;
+      }
+      if (!validate(results, summary, scenarioError) && scenarioError.isEmpty())
+        scenarioError = QStringLiteral("unexpected verification result state");
+      completed = scenarioError.isEmpty();
+      report->reject();
+      selector->reject();
+    });
+    scenarioProbe.start();
+    openSelector->click();
+    QElapsedTimer deadline;
+    deadline.start();
+    while (!completed && scenarioError.isEmpty() &&
+           deadline.elapsed() < 10000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    scenarioProbe.stop();
+    if (!completed && scenarioError.isEmpty())
+      scenarioError = QStringLiteral("timed out waiting for scenario results");
+    if (!completed) {
+      std::cerr << "verification scenario " << scenario.toStdString()
+                << " failed: " << scenarioError.toStdString() << '\n';
+      return false;
+    }
+    return true;
+  };
+  const auto resultAt = [](QTableWidget *results, int row, int column) {
+    const auto *item = results->item(row, column);
+    return item ? item->text() : QString{};
+  };
+  const auto failedSummary = [](QLabel *summary) {
+    return summary->text().contains("graph checks failed", Qt::CaseInsensitive);
+  };
+  if (!runVerificationScenario(
+          "stopped",
+          [=](QTableWidget *results, QLabel *summary, QString &error) {
+            const bool expected =
+                failedSummary(summary) &&
+                resultAt(results, 1, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 1, 2).contains("stopped") &&
+                resultAt(results, 2, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 2, 2).contains("0/2") &&
+                resultAt(results, 4, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 5, 1) == QStringLiteral("NOT TESTED") &&
+                resultAt(results, 6, 1) == QStringLiteral("NOT TESTED");
+            if (!expected)
+              error = QStringLiteral(
+                  "stopped daemon was not distinguished from active audio");
+            return expected;
+          }) ||
+      !runVerificationScenario(
+          "initializing",
+          [=](QTableWidget *results, QLabel *summary, QString &error) {
+            const bool expected =
+                failedSummary(summary) &&
+                resultAt(results, 1, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 1, 2).contains("initializing") &&
+                resultAt(results, 2, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 4, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 5, 1) == QStringLiteral("NOT TESTED") &&
+                resultAt(results, 6, 1) == QStringLiteral("NOT TESTED");
+            if (!expected)
+              error = QStringLiteral(
+                  "initializing DSP was reported as an active audio path");
+            return expected;
+          }) ||
+      !runVerificationScenario(
+          "disconnected",
+          [=](QTableWidget *results, QLabel *summary, QString &error) {
+            const bool expected =
+                failedSummary(summary) &&
+                resultAt(results, 1, 1) == QStringLiteral("PASS") &&
+                resultAt(results, 2, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 2, 2).contains("0/2") &&
+                resultAt(results, 3, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 4, 1) == QStringLiteral("FAIL") &&
+                resultAt(results, 4, 2).contains("unconnected") &&
+                resultAt(results, 5, 1) == QStringLiteral("NOT TESTED") &&
+                resultAt(results, 6, 1) == QStringLiteral("NOT TESTED");
+            if (!expected)
+              error = QStringLiteral(
+                  "disconnected routes were not identified independently");
+            return expected;
+          }) ||
+      !runVerificationScenario(
+          "unknown",
+          [=](QTableWidget *results, QLabel *summary, QString &error) {
+            const bool expected =
+                failedSummary(summary) &&
+                resultAt(results, 0, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 1, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 1, 2).contains("unknown") &&
+                resultAt(results, 2, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 2, 2).contains("unknown") &&
+                resultAt(results, 3, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 4, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 4, 2).contains("unavailable") &&
+                resultAt(results, 5, 1) == QStringLiteral("NOT TESTED") &&
+                resultAt(results, 6, 1) == QStringLiteral("NOT TESTED");
+            if (!expected)
+              error = QStringLiteral(
+                  "unknown runtime data was presented as verified");
+            return expected;
+          }) ||
+      !runVerificationScenario(
+          "malformed-node",
+          [=](QTableWidget *results, QLabel *summary, QString &error) {
+            const bool expected =
+                failedSummary(summary) &&
+                resultAt(results, 0, 1) == QStringLiteral("PASS") &&
+                resultAt(results, 1, 1) == QStringLiteral("PASS") &&
+                resultAt(results, 2, 1) == QStringLiteral("PASS") &&
+                resultAt(results, 3, 1) == QStringLiteral("UNKNOWN") &&
+                resultAt(results, 3, 2).contains("not-a-pipewire-node") &&
+                resultAt(results, 4, 1) == QStringLiteral("PASS");
+            if (!expected)
+              error = QStringLiteral(
+                  "malformed virtual-node identity was reported as verified "
+                  "or definitely absent");
+            return expected;
+          }))
+    return 1;
+  QFile verificationLog(verificationLogPath);
+  if (!verificationLog.open(QIODevice::ReadOnly)) {
+    std::cerr << "audio-path verification did not invoke the CLI fixture\n";
+    return 1;
+  }
+  const auto verificationCommands = verificationLog.readAll().split('\n');
+  if (verificationCommands.size() < 6 ||
+      std::any_of(verificationCommands.cbegin(), verificationCommands.cend(),
+                  [](const QByteArray &command) {
+                    return !command.isEmpty() && command != "status" &&
+                           command != "device current" &&
+                           command != "device list" &&
+                           command != "device output current" &&
+                           command != "device output list" &&
+                           !command.startsWith("config check ");
+                  })) {
+    std::cerr << "audio-path verification issued a non-read-only CLI command\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_POLKIT_LOG");
+  qunsetenv("SKYAPO_UI_TEST_POLKIT_RESULT");
+  qunsetenv("SKYAPO_UI_TEST_VERIFY_LOG");
+  qunsetenv("SKYAPO_UI_TEST_VERIFY_BROKEN");
+  qunsetenv("SKYAPO_UI_TEST_VERIFY_SCENARIO");
+  qunsetenv("SKYAPO_UI_TEST_CONFIG_PATH");
+  return 0;
+}
 } // namespace
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+#ifdef SKYAPO_HAVE_BRANDED_APP_ICON
+  const QIcon applicationIcon(QStringLiteral(":/icons/skyapo.png"));
+  if (!QFile::exists(QStringLiteral(":/icons/skyapo.png")) ||
+      applicationIcon.isNull() || applicationIcon.availableSizes().isEmpty()) {
+    std::cerr << "application icon resource is missing or unreadable\n";
+    return 1;
+  }
+#else
+  // QIcon may create a non-null engine for a missing resource path, depending
+  // on the Qt version. QFile::exists checks whether the resource is embedded.
+  if (QFile::exists(QStringLiteral(":/icons/skyapo.png"))) {
+    std::cerr << "unlicensed branded application icon was embedded\n";
+    return 1;
+  }
+#endif
   application.setQuitOnLastWindowClosed(false);
   const QPalette initialPalette = application.palette();
   QPalette forcedPalette = initialPalette;
@@ -246,6 +989,254 @@ int main(int argc, char **argv) {
   application.setPalette(initialPalette);
   QCoreApplication::setOrganizationName(QStringLiteral("SkyAPOTests"));
   QCoreApplication::setApplicationName(QStringLiteral("SkyAPOUITests"));
+  if (argc == 3 && QString::fromLocal8Bit(argv[1]) ==
+                       QStringLiteral("--device-selector-polkit"))
+    return runDeviceSelectorPolkitPreflightTest(
+        QString::fromLocal8Bit(argv[2]));
+  if (argc == 5 && QString::fromLocal8Bit(argv[1]) ==
+                       QStringLiteral("--device-selector-live")) {
+    const QString configPath = QString::fromLocal8Bit(argv[2]);
+    const QString cliPath = QString::fromLocal8Bit(argv[3]);
+    const QString targetName = QString::fromLocal8Bit(argv[4]);
+    QTemporaryDir settingsDirectory;
+    if (!settingsDirectory.isValid()) {
+      std::cerr << "could not create isolated live-selector settings\n";
+      return 1;
+    }
+    const QString polkitFixturePath =
+        settingsDirectory.filePath(QStringLiteral("pkcheck-fixture"));
+    if (!writePolkitPreflightFixture(polkitFixturePath)) {
+      std::cerr << "could not create live-selector Polkit fixture\n";
+      return 1;
+    }
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       settingsDirectory.path());
+    MainWindow window(configPath, cliPath, polkitFixturePath);
+    window.show();
+    auto *openSelector = window.findChild<QPushButton *>("openDeviceSelector");
+    if (!openSelector) {
+      std::cerr << "Configuration Editor did not expose Device Selector\n";
+      return 1;
+    }
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    QTimer probe;
+    probe.setInterval(25);
+    int step = 0;
+    bool passed = false;
+    QString failure;
+    QString captureNodeBefore;
+    QElapsedTimer verificationWait;
+    QObject::connect(&probe, &QTimer::timeout, &window, [&] {
+      auto *selector = window.findChild<QDialog *>("deviceSelectorDialog");
+      if (!selector) {
+        if (elapsed.elapsed() > 15000 && !passed) {
+          failure = QStringLiteral("Device Selector did not open in time");
+          if (auto *modal = QApplication::activeModalWidget())
+            modal->close();
+          probe.stop();
+        }
+        return;
+      }
+      auto *table = selector->findChild<QTableWidget *>("playbackDevicesTable");
+      auto *status =
+          selector->findChild<QLabel *>("deviceSelectorRuntimeStatus");
+      auto *feedback = selector->findChild<QLabel *>("deviceSelectionFeedback");
+      auto *apply = selector->findChild<QPushButton *>("selectPlaybackDevice");
+      auto *close = selector->findChild<QPushButton *>("closeDeviceSelector");
+      if (!table || !status || !feedback || !apply || !close)
+        return;
+      if (elapsed.elapsed() > 30000) {
+        failure = QStringLiteral("live Device Selector timed out (rows=%1, "
+                                 "status=%2, feedback=%3)")
+                      .arg(table->rowCount())
+                      .arg(status->text())
+                      .arg(feedback->text());
+        selector->reject();
+        probe.stop();
+        return;
+      }
+      if (step == 0) {
+        if (table->rowCount() < 2 ||
+            !status->text().contains(QStringLiteral("Daemon: streaming")))
+          return;
+        const QRegularExpression capturePattern(
+            QStringLiteral("Capture node: ([0-9]+)"));
+        const auto captureMatch = capturePattern.match(status->text());
+        if (!captureMatch.hasMatch()) {
+          failure =
+              QStringLiteral(
+                  "runtime status did not expose the active capture node: %1")
+                  .arg(status->text());
+          selector->reject();
+          probe.stop();
+          return;
+        }
+        captureNodeBefore = captureMatch.captured(1);
+        int targetRow = -1;
+        for (int row = 0; row < table->rowCount(); ++row) {
+          if (table->item(row, 2) &&
+              table->item(row, 2)->data(Qt::UserRole).toString() ==
+                  targetName) {
+            targetRow = row;
+            break;
+          }
+        }
+        if (targetRow < 0) {
+          failure =
+              QStringLiteral("PipeWire target %1 was not listed by the UI")
+                  .arg(targetName);
+          selector->reject();
+          probe.stop();
+          return;
+        }
+        table->selectRow(targetRow);
+        if (!apply->isEnabled())
+          return;
+        apply->click();
+        step = 1;
+        return;
+      }
+
+      if (step == 1) {
+        const QRegularExpression capturePattern(
+            QStringLiteral("Capture node: ([0-9]+)"));
+        const auto captureMatch = capturePattern.match(status->text());
+        const bool targetSelected = [&] {
+          for (int row = 0; row < table->rowCount(); ++row)
+            if (table->item(row, 2) &&
+                table->item(row, 2)->data(Qt::UserRole).toString() ==
+                    targetName &&
+                table->item(row, 0) &&
+                table->item(row, 0)->text() == QStringLiteral("Selected"))
+              return true;
+          return false;
+        }();
+        if (!feedback->text().contains(
+                QStringLiteral("without restarting capture")) ||
+            !status->text().contains(targetName) || !targetSelected ||
+            !captureMatch.hasMatch())
+          return;
+        if (captureMatch.captured(1) != captureNodeBefore) {
+          failure =
+              QStringLiteral("playback selection changed capture node %1 to %2")
+                  .arg(captureNodeBefore, captureMatch.captured(1));
+          selector->reject();
+          probe.stop();
+          return;
+        }
+        auto *verify = selector->findChild<QPushButton *>("verifyAudioPath");
+        if (!verify) {
+          failure = QStringLiteral(
+              "live Device Selector does not expose audio-path verification");
+          selector->reject();
+          probe.stop();
+          return;
+        }
+        verify->click();
+        verificationWait.start();
+        step = 2;
+        return;
+      }
+
+      auto *report = window.findChild<QDialog *>("deviceVerificationDialog");
+      if (!report) {
+        if (verificationWait.elapsed() > 10000) {
+          failure = QStringLiteral(
+              "audio-path verification dialog did not open in live graph test");
+          selector->reject();
+          probe.stop();
+        }
+        return;
+      }
+      auto *results =
+          report->findChild<QTableWidget *>("deviceVerificationResults");
+      auto *summary = report->findChild<QLabel *>("deviceVerificationSummary");
+      if (!results || !summary || results->rowCount() != 7) {
+        if (verificationWait.elapsed() > 10000) {
+          failure = QStringLiteral(
+              "live audio-path verification result table is incomplete");
+          report->reject();
+          selector->reject();
+          probe.stop();
+        }
+        return;
+      }
+      const auto rowStatus = [results](int row) {
+        return results->item(row, 1) ? results->item(row, 1)->text()
+                                     : QString{};
+      };
+      if (!summary->text().contains(QStringLiteral("graph checks passed"),
+                                    Qt::CaseInsensitive)) {
+        if (verificationWait.elapsed() > 10000) {
+          QStringList observed;
+          for (int row = 0; row < results->rowCount(); ++row)
+            observed << QStringLiteral("%1=%2 (%3)")
+                            .arg(results->item(row, 0)
+                                     ? results->item(row, 0)->text()
+                                     : QStringLiteral("row %1").arg(row),
+                                 rowStatus(row),
+                                 results->item(row, 2)
+                                     ? results->item(row, 2)->text()
+                                     : QStringLiteral("no details"));
+          failure =
+              QStringLiteral("live graph verification did not pass: %1; %2")
+                  .arg(summary->text(), observed.join(" | "));
+          report->reject();
+          selector->reject();
+          probe.stop();
+        }
+        return;
+      }
+      if (rowStatus(0) != QStringLiteral("PASS") ||
+          rowStatus(1) != QStringLiteral("PASS") ||
+          rowStatus(2) != QStringLiteral("PASS") ||
+          rowStatus(3) != QStringLiteral("PASS") ||
+          rowStatus(4) != QStringLiteral("PASS") ||
+          rowStatus(5) != QStringLiteral("NOT TESTED") ||
+          rowStatus(6) != QStringLiteral("NOT TESTED") ||
+          !summary->text().contains(QStringLiteral("no test signal"),
+                                    Qt::CaseInsensitive)) {
+        failure = QStringLiteral(
+            "live verification misreported graph, DSP, or hardware state");
+        report->reject();
+        selector->reject();
+        probe.stop();
+        return;
+      }
+      report->accept();
+      passed = true;
+      close->click();
+      probe.stop();
+    });
+    probe.start();
+    openSelector->click();
+    QElapsedTimer waitForSelector;
+    waitForSelector.start();
+    while (!passed && failure.isEmpty() && waitForSelector.elapsed() < 32000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    probe.stop();
+    if (!passed) {
+      std::cerr
+          << (failure.isEmpty()
+                  ? "Device Selector did not apply the live PipeWire target"
+                  : failure.toStdString())
+          << '\n';
+      return 1;
+    }
+    std::cout << "Live Device Selector selected " << targetName.toStdString()
+              << " through skyapo, retained capture node "
+              << captureNodeBefore.toStdString()
+              << ", and reported an in-place "
+                 "playback target switch. Audio-path verification reported "
+                 "5/5 graph checks passed; numerical DSP and physical hardware "
+                 "were correctly marked NOT TESTED.\n";
+    return 0;
+  }
   ConfigFile file;
   const QByteArray original =
       "Preamp: -6 dB\r\n; keep this comment exactly\r\nInclude: child.txt";
@@ -549,9 +1540,11 @@ int main(int argc, char **argv) {
       analyzeConfigResponse(defaultConfigPath, 44100, 1, 128);
   if (!shortResponse.error.isEmpty() || shortResponse.curves.size() != 1 ||
       shortResponse.curves.front().points.size() != 64 ||
-      std::abs(shortResponse.curves.front().points.front().y() + 6.0) > 0.01) {
+      std::abs(shortResponse.curves.front().points.front().y() + 6.0) > 0.01 ||
+      !shortResponse.peakGainDb ||
+      std::abs(*shortResponse.peakGainDb + 6.0) > 0.01) {
     std::cerr << "128-sample response analysis did not process a partial "
-                 "Engine block correctly: "
+                 "Engine block or peak gain correctly: "
               << shortResponse.error.toStdString() << '\n';
     return 1;
   }
@@ -581,9 +1574,58 @@ int main(int argc, char **argv) {
     return 1;
   }
   responseConfig.close();
+  const QString delayResponsePath = temporary.filePath("delay-response.txt");
+  QFile delayResponseConfig(delayResponsePath);
+  if (!delayResponseConfig.open(QIODevice::WriteOnly) ||
+      delayResponseConfig.write("Delay: 1 Samples\n") < 0) {
+    std::cerr << "could not create phase-response delay fixture\n";
+    return 1;
+  }
+  delayResponseConfig.close();
+  const auto delayResponse =
+      analyzeConfigResponse(delayResponsePath, 48000, 1, 16384);
+  if (!delayResponse.error.isEmpty() || delayResponse.curves.size() != 1 ||
+      delayResponse.curves.front().points.size() !=
+          delayResponse.curves.front().phasePoints.size()) {
+    std::cerr << "response analysis did not return aligned magnitude and "
+                 "phase curves: "
+              << delayResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  auto delayedPhase = delayResponse.curves.front().phasePoints.cbegin();
+  for (auto point = delayResponse.curves.front().phasePoints.cbegin();
+       point != delayResponse.curves.front().phasePoints.cend(); ++point)
+    if (std::abs(point->x() - 1000.0) < std::abs(delayedPhase->x() - 1000.0))
+      delayedPhase = point;
+  const double expectedDelayPhase =
+      -360.0 * delayedPhase->x() / static_cast<double>(48000);
+  if (!std::isfinite(delayedPhase->y()) ||
+      std::abs(delayedPhase->y() - expectedDelayPhase) > 0.02) {
+    std::cerr << "one-sample EAPO Delay response phase mismatch near 1 kHz: "
+              << "measured " << delayedPhase->y() << " degrees, expected "
+              << expectedDelayPhase << " degrees\n";
+    return 1;
+  }
+  const QString quietResponsePath = temporary.filePath("quiet-response.txt");
+  QFile quietResponseConfig(quietResponsePath);
+  if (!quietResponseConfig.open(QIODevice::WriteOnly) ||
+      quietResponseConfig.write("Preamp: -300 dB\n") < 0) {
+    std::cerr << "could not create low-level phase response fixture\n";
+    return 1;
+  }
+  quietResponseConfig.close();
+  const auto quietResponse =
+      analyzeConfigResponse(quietResponsePath, 48000, 1, 16384);
+  if (!quietResponse.error.isEmpty() || quietResponse.curves.size() != 1 ||
+      !std::isnan(quietResponse.curves.front().phasePoints.front().y())) {
+    std::cerr << "phase below the documented response floor must be marked "
+                 "undefined\n";
+    return 1;
+  }
   const auto response = analyzeConfigResponse(responseConfigPath);
-  if (!response.error.isEmpty() || response.curves.size() != 4) {
-    std::cerr << "actual Engine response analysis failed: "
+  if (!response.error.isEmpty() || response.curves.size() != 4 ||
+      !response.peakGainDb || std::abs(*response.peakGainDb) > 0.1) {
+    std::cerr << "actual Engine response curves or peak-gain result failed: "
               << response.error.toStdString() << '\n';
     return 1;
   }
@@ -730,8 +1772,11 @@ int main(int argc, char **argv) {
   bool responseDialogOpened = false;
   bool responseDialogFailed = false;
   double responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
+  double responsePhaseAt1kHz = std::numeric_limits<double>::quiet_NaN();
   qlonglong responseBinCount = -1;
+  double responsePlotMaxFrequency = std::numeric_limits<double>::quiet_NaN();
   QString responseFormatLabel;
+  QString responsePeakGainText;
   QString responseFailureText;
   QTimer responseDialogCloser;
   responseDialogCloser.setInterval(10);
@@ -745,11 +1790,17 @@ int main(int argc, char **argv) {
         if (auto *plot = dialog->findChild<QWidget *>("responsePlot")) {
           responseGainAt1kHz =
               plot->property("responseAt1000HzLtoLDb").toDouble();
+          responsePhaseAt1kHz =
+              plot->property("responsePhaseAt1000HzLtoLDeg").toDouble();
           responseBinCount = plot->property("analysisBinCount").toLongLong();
+          responsePlotMaxFrequency =
+              plot->property("plotMaxFrequencyHz").toDouble();
         }
         for (auto *label : dialog->findChildren<QLabel *>())
           if (label->text().contains("FFT samples"))
             responseFormatLabel = label->text();
+        if (auto *peakGain = dialog->findChild<QLabel *>("analysisPeakGain"))
+          responsePeakGainText = peakGain->text();
         dialog->accept();
         responseDialogCloser.stop();
       } else if (dialog->windowTitle() == "Response analysis") {
@@ -804,8 +1855,11 @@ int main(int argc, char **argv) {
     responseDialogOpened = false;
     responseDialogFailed = false;
     responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
+    responsePhaseAt1kHz = std::numeric_limits<double>::quiet_NaN();
     responseBinCount = -1;
+    responsePlotMaxFrequency = std::numeric_limits<double>::quiet_NaN();
     responseFormatLabel.clear();
+    responsePeakGainText.clear();
     responseDialogCloser.start();
     responseButton->click();
     QElapsedTimer responseWait;
@@ -816,13 +1870,18 @@ int main(int argc, char **argv) {
       QThread::msleep(5);
     }
     return responseDialogOpened && !responseDialogFailed &&
-           std::isfinite(responseGainAt1kHz) && responseBinCount == 4096;
+           std::isfinite(responseGainAt1kHz) &&
+           std::isfinite(responsePhaseAt1kHz) &&
+           std::isfinite(responsePlotMaxFrequency) && responseBinCount == 4096;
   };
   responseSource->setCurrentIndex(0);
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 6.0) > 0.25 ||
+      std::abs(responsePhaseAt1kHz) > 0.02 ||
+      std::abs(responsePlotMaxFrequency - 22050.0) > 0.01 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
+      !responseFormatLabel.contains("1 channel") ||
+      !responsePeakGainText.contains("Peak gain (calculated): -6.00 dB")) {
     std::cerr << "analysis did not use the saved default config.txt; gain="
               << responseGainAt1kHz << " dB\n";
     return 1;
@@ -830,8 +1889,11 @@ int main(int argc, char **argv) {
   responseSource->setCurrentIndex(1);
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
+      std::abs(responsePhaseAt1kHz) > 0.02 ||
+      std::abs(responsePlotMaxFrequency - 22050.0) > 0.01 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
+      !responseFormatLabel.contains("1 channel") ||
+      !responsePeakGainText.contains("Peak gain (calculated): -3.00 dB")) {
     std::cerr << "analysis did not use the current editor document; gain="
               << responseGainAt1kHz << " dB\n";
     return 1;
@@ -858,6 +1920,7 @@ int main(int argc, char **argv) {
   if (analysisSampleRate->isEnabled() || analysisChannels->isEnabled() ||
       !runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
+      std::abs(responsePhaseAt1kHz) > 0.02 ||
       !responseFormatLabel.contains("96000 Hz") ||
       !responseFormatLabel.contains("2 channels")) {
     std::cerr << "response analysis did not use the daemon's negotiated "
@@ -873,7 +1936,6 @@ int main(int argc, char **argv) {
     std::cerr << "live validation changed the on-disk config\n";
     return 1;
   }
-
   const QString includeLiveConfigPath = temporary.filePath("include-live.txt");
   QFile includeLiveConfig(includeLiveConfigPath);
   QFile includeLiveChild(temporary.filePath("include-live-child.txt"));
@@ -1150,6 +2212,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 #endif
+
   QFile config(configPath);
   if (!config.open(QIODevice::WriteOnly) ||
       config.write(
@@ -1186,7 +2249,11 @@ int main(int argc, char **argv) {
       uiSettings.value(QStringLiteral("ui/geometry")).toByteArray();
   uiSettings.clear();
   uiSettings.setValue(QStringLiteral("ui/geometry"), savedWindowGeometry);
+  // Measure construction itself; the fixture preparation and nested config
+  // checker processes below must not count against the responsiveness limit.
+  construction.restart();
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
+
   if (window.size() != QSize(777, 555)) {
     std::cerr << "editor did not restore its saved window geometry\n";
     return 1;
@@ -1338,38 +2405,53 @@ int main(int argc, char **argv) {
     std::cerr << "Linux FilterTable row adapter was not created\n";
     return 1;
   }
-  const auto addActions = rowMenu->actions();
-  bool hasConvolutionTemplate = false;
-  bool hasPluginPicker = false;
-  bool hasIncludeTemplate = false;
-  for (const auto *action : addActions) {
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Convolution: impulse-response.wav") {
-      hasConvolutionTemplate = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "__SKYAPO_PICK_INSTALLED_PLUGIN__") {
-      hasPluginPicker = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Include: child.txt") {
-      hasIncludeTemplate = true;
-    }
-  }
-  if (addActions.isEmpty() ||
-      !addActions.first()->data().canConvert<FilterTemplate>() ||
-      addActions.first()->data().value<FilterTemplate>().getLine() !=
-          "Preamp: 0 dB" ||
-      !hasConvolutionTemplate || !hasPluginPicker || !hasIncludeTemplate) {
-    std::cerr
-        << "row add-menu did not preserve upstream and Convolution templates\n";
+  const QStringList expectedAddCategories{"Comment",
+                                          "Control",
+                                          "Basic filters",
+                                          "Parametric filters",
+                                          "Graphic equalizers",
+                                          "Advanced filters",
+                                          "Plugins"};
+  QStringList actualAddCategories;
+  for (const auto *action : rowMenu->actions())
+    actualAddCategories.push_back(action->text());
+  const auto submenu = [rowMenu](const char *name) {
+    return rowMenu->findChild<QMenu *>(QString::fromLatin1(name));
+  };
+  const auto containsTemplate = [](QMenu *menu, const QString &line) {
+    if (!menu)
+      return false;
+    for (const auto *action : menu->actions())
+      if (action->data().canConvert<FilterTemplate>() &&
+          action->data().value<FilterTemplate>().getLine() == line)
+        return true;
+    return false;
+  };
+  auto *controlMenu = submenu("addFilterControlMenu");
+  auto *basicMenu = submenu("addFilterBasicMenu");
+  auto *advancedMenu = submenu("addFilterAdvancedMenu");
+  auto *pluginsMenu = submenu("addFilterPluginsMenu");
+  const bool hasPluginChoices =
+      pluginsMenu && pluginsMenu->findChild<QAction *>("addLinuxVstPlugin") &&
+      pluginsMenu->findChild<QAction *>("addWindowsVstPlugin") &&
+      pluginsMenu->findChild<QAction *>("addInstalledPluginFromMenu");
+  if (actualAddCategories != expectedAddCategories ||
+      !containsTemplate(basicMenu, "Preamp: 0 dB") ||
+      !containsTemplate(basicMenu, "Delay: 0 ms") ||
+      !containsTemplate(basicMenu, "Copy: L=L") ||
+      !containsTemplate(controlMenu, "Include: child.txt") ||
+      !containsTemplate(advancedMenu, "Convolution: impulse-response.wav") ||
+      !containsTemplate(
+          advancedMenu,
+          "LoudnessCorrection: ReferenceLevel 0 ReferenceOffset 0") ||
+      !hasPluginChoices) {
+    std::cerr << "Add Filter menu does not match the required category order, "
+                 "filter groups, or explicit platform VST entries\n";
     return 1;
   }
   if (construction.elapsed() >= 1000) {
-    std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
+    std::cerr << "MainWindow blocked while starting delayed CLI requests ("
+              << construction.elapsed() << " ms)\n";
     return 1;
   }
   auto *table = window.findChild<FilterTable *>();
@@ -1433,6 +2515,7 @@ int main(int argc, char **argv) {
   QEventLoop loop;
   QTimer::singleShot(1500, &loop, &QEventLoop::quit);
   loop.exec();
+
   if (heartbeat < 50) {
     std::cerr << "GUI event loop stalled while CLI fixture was running\n";
     return 1;
@@ -1461,22 +2544,44 @@ int main(int argc, char **argv) {
                  "details\n";
     return 1;
   }
-  const QList<QPair<QString, QString>> statusCases{
-      {"streaming", "Streaming — audio processing active"},
-      {"connecting", "Waiting for PipeWire (filter state: connecting)"},
-      {"unconnected", "Waiting for PipeWire (filter state: unconnected)"},
-      {"paused", "PipeWire connected but paused (not streaming)"},
-      {"error", "PipeWire reported an error (recovery is not confirmed)"},
-      {"not reachable", "Daemon offline or unresponsive"},
-      {"future-state", "Daemon state unknown: future-state"},
-      {"", "Daemon offline or unresponsive"}};
+  struct StatusCase {
+    QString filterState;
+    QString dspState;
+    QString expectedSummary;
+    bool negotiatedFormat;
+  };
+  const QList<StatusCase> statusCases{
+      {"streaming", "running", "Streaming — audio processing active", true},
+      {"streaming", "initializing (awaiting negotiated format)",
+       "PipeWire connected — waiting for negotiated audio format", false},
+      {"streaming", "reconfiguring (format change; output silence)",
+       "PipeWire connected — rebuilding DSP for audio format (output silence)",
+       true},
+      {"streaming", "quiescing (output silence)",
+       "PipeWire connected — DSP transition in progress (output silence)",
+       true},
+      {"streaming", "paused (plugin latency refresh failed; output silence)",
+       "PipeWire streaming — DSP paused (output silence)", true},
+      {"connecting", "initializing",
+       "Waiting for PipeWire (filter state: connecting)", false},
+      {"unconnected", "initializing",
+       "Waiting for PipeWire (filter state: unconnected)", false},
+      {"paused", "quiescing", "PipeWire connected but paused (not streaming)",
+       false},
+      {"error", "initializing",
+       "PipeWire reported an error (recovery is not confirmed)", false},
+      {"not reachable", "initializing", "Daemon offline or unresponsive",
+       false},
+      {"future-state", "running", "Daemon state unknown: future-state", false},
+      {"", "initializing", "Daemon offline or unresponsive", false}};
   for (qsizetype stateIndex = 0; stateIndex < statusCases.size();
        ++stateIndex) {
-    const auto &[state, expectedSummary] = statusCases[stateIndex];
+    const auto &testCase = statusCases[stateIndex];
     const QString scriptPath =
         temporary.filePath(QStringLiteral("status-cli-%1.sh").arg(stateIndex));
-    const int exitCode = state.isEmpty() ? 1 : 0;
-    if (!writeStatusCliFixture(scriptPath, state, exitCode)) {
+    const int exitCode = testCase.filterState.isEmpty() ? 1 : 0;
+    if (!writeStatusCliFixture(scriptPath, testCase.filterState, exitCode,
+                               testCase.dspState, testCase.negotiatedFormat)) {
       std::cerr << "could not create PipeWire status fixture script\n";
       return 1;
     }
@@ -1485,17 +2590,19 @@ int main(int argc, char **argv) {
     QElapsedTimer statusWait;
     statusWait.start();
     while (statusWait.elapsed() < 1500 &&
-           (!label || !label->text().startsWith(expectedSummary))) {
+           (!label || !label->text().startsWith(testCase.expectedSummary))) {
       QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
       QThread::msleep(5);
     }
-    if (!label || !label->text().startsWith(expectedSummary) ||
+    if (!label || !label->text().startsWith(testCase.expectedSummary) ||
         (exitCode == 0 &&
-         (!label->text().contains("Sample rate: unknown (awaiting graph)") ||
+         (label->text().contains("Sample rate: unknown (awaiting graph)") ==
+              testCase.negotiatedFormat ||
           !label->text().contains("SkyAPO Virtual Mic") ||
           label->accessibleDescription() != label->text()))) {
       std::cerr << "UI did not accurately summarize PipeWire state '"
-                << state.toStdString() << "': "
+                << testCase.filterState.toStdString() << "' / DSP state '"
+                << testCase.dspState.toStdString() << "': "
                 << (label ? label->text().toStdString()
                           : "status label missing")
                 << '\n';
@@ -1521,6 +2628,7 @@ int main(int argc, char **argv) {
         << "device selector did not persist exactly one stable node name\n";
     return 1;
   }
+
   const QString dynamicDeviceListPath =
       temporary.filePath("dynamic-device-list.tsv");
   const auto writeDynamicDeviceList = [&](const QByteArray &contents) {
@@ -1542,6 +2650,7 @@ int main(int argc, char **argv) {
   qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE",
           dynamicDeviceListPath.toLocal8Bit());
   MainWindow dynamicDeviceWindow(configPath, QString::fromLocal8Bit(argv[1]));
+
   auto *dynamicDeviceCombo =
       dynamicDeviceWindow.findChild<QComboBox *>("inputDeviceCombo");
   auto *deviceRefreshTimer =
@@ -1571,12 +2680,13 @@ int main(int argc, char **argv) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
+  deviceRefreshTimer->stop();
   if (!dynamicDeviceCombo->currentText().contains(
           "Selected input unavailable") ||
       dynamicDeviceCombo->itemData(0, Qt::UserRole + 1).toString() !=
           "fixture.usb-mic" ||
       dynamicDeviceCombo->itemData(0).toString() != QString{} ||
-      dynamicDeviceCombo->count() != 2) {
+      dynamicDeviceCombo->count() != 2 || deviceRefreshTimer->isActive()) {
     std::cerr << "removed selected node was not retained as unavailable by "
                  "stable name\n";
     return 1;
@@ -1595,11 +2705,19 @@ int main(int argc, char **argv) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
-  if (dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic") {
+  deviceRefreshTimer->stop();
+  if (dynamicDeviceCombo->currentData().toString() != "fixture.usb-mic" ||
+      deviceRefreshTimer->isActive()) {
     std::cerr
         << "reappearing selected node was not restored by the daemon marker\n";
     return 1;
   }
+  deviceRefreshTimer->stop();
+  if (deviceRefreshTimer->isActive()) {
+    std::cerr << "device refresh timer remained active after the fixture\n";
+    return 1;
+  }
+
   qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
   const QString graphicConfigPath = temporary.filePath("graphic-eq.txt");
   QFile graphicConfig(graphicConfigPath);
@@ -1609,7 +2727,9 @@ int main(int argc, char **argv) {
     return 1;
   }
   graphicConfig.close();
+
   MainWindow graphicWindow(graphicConfigPath, QString::fromLocal8Bit(argv[1]));
+
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   auto *graphicEditor = graphicWindow.findChild<GraphicEQFilterGUI *>();
   auto *graphicTable =
@@ -1687,7 +2807,9 @@ int main(int argc, char **argv) {
     std::cerr << "plugin catalog action is missing from the UI\n";
     return 1;
   }
+
   pluginAction->trigger();
+
   if (pluginAction->isEnabled()) {
     std::cerr << "plugin catalog action was not disabled during discovery\n";
     return 1;
@@ -1708,6 +2830,7 @@ int main(int argc, char **argv) {
   auto *pluginCatalog =
       pluginDialog ? pluginDialog->findChild<QPlainTextEdit *>("pluginCatalog")
                    : nullptr;
+
   if (!pluginDialog || !pluginCatalog ||
       !pluginCatalog->toPlainText().contains(
           "https://example.test/plugins/gain") ||
@@ -1731,7 +2854,7 @@ int main(int argc, char **argv) {
         continue;
       auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
       auto *add = candidate->findChild<QPushButton *>("addPluginButton");
-      pickerWasValid = choices && choices->count() == 1 &&
+      pickerWasValid = choices && choices->count() == 2 &&
                        choices->item(0)->text().contains("Test Gain") && add;
       if (pickerWasValid) {
         add->click();
@@ -1740,7 +2863,9 @@ int main(int argc, char **argv) {
       break;
     }
   });
+
   addPluginAction->trigger();
+
   QElapsedTimer pickerWait;
   pickerWait.start();
   while (pickerWait.elapsed() < 2000 && !pickerWasAccepted) {
@@ -1748,7 +2873,12 @@ int main(int argc, char **argv) {
     QThread::msleep(5);
   }
   if (!pickerWasValid || !pickerWasAccepted) {
-    std::cerr << "plugin picker did not present discovered catalog entries\n";
+    auto *choices = window.findChild<QListWidget *>("pluginPickerList");
+    std::cerr << "plugin picker did not present discovered catalog entries; "
+              << "valid=" << pickerWasValid << " accepted=" << pickerWasAccepted
+              << " choices=" << (choices ? choices->count() : -1) << "\n";
+    for (auto *dialog : window.findChildren<QDialog *>())
+      std::cerr << "dialog: " << dialog->windowTitle().toStdString() << "\n";
     return 1;
   }
   bool insertedPluginDirective = false;
@@ -1760,6 +2890,44 @@ int main(int argc, char **argv) {
   if (!insertedPluginDirective) {
     std::cerr
         << "choosing a discovered plugin did not insert its config line\n";
+    return 1;
+  }
+
+  bool linuxVstPickerValid = false;
+  bool linuxVstPickerAccepted = false;
+  QTimer::singleShot(200, &window, [&] {
+    for (auto *candidate : window.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginPicker" ||
+          candidate->windowTitle() != "Add VST plugin (Linux)")
+        continue;
+      auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+      auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+      linuxVstPickerValid = choices && choices->count() == 1 && add &&
+                            choices->item(0)->text().contains("VST3") &&
+                            choices->item(0)->text().contains("test.vst3.uid");
+      if (linuxVstPickerValid) {
+        add->click();
+        linuxVstPickerAccepted = true;
+      }
+      break;
+    }
+  });
+  table->addLine("__SKYAPO_PICK_NATIVE_VST_PLUGIN__");
+  QElapsedTimer linuxVstPickerWait;
+  linuxVstPickerWait.start();
+  while (linuxVstPickerWait.elapsed() < 2000 && !linuxVstPickerAccepted) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  bool insertedNativeVstDirective = false;
+  for (int index = 0; table->itemAt(index); ++index)
+    insertedNativeVstDirective =
+        insertedNativeVstDirective ||
+        table->itemAt(index)->text == "Plugin: VST3 test.vst3.uid";
+  if (!linuxVstPickerValid || !linuxVstPickerAccepted ||
+      !insertedNativeVstDirective) {
+    std::cerr << "Linux VST menu flow did not restrict insertion to a "
+                 "discovered native VST3 plugin\n";
     return 1;
   }
 
@@ -1787,6 +2955,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   parameterTable->setSelection(parameterTable->itemAt(1));
+
   bool parameterDialogWasAccepted = false;
   QTimer::singleShot(250, &pluginParameterWindow, [&] {
     for (auto *candidate : pluginParameterWindow.findChildren<QDialog *>()) {
@@ -1808,6 +2977,7 @@ int main(int argc, char **argv) {
     }
   });
   parameterAction->trigger();
+
   QElapsedTimer parameterWait;
   parameterWait.start();
   while (parameterWait.elapsed() < 2000 && !parameterDialogWasAccepted) {
@@ -1868,7 +3038,9 @@ int main(int argc, char **argv) {
         break;
       }
     });
+
     formatAction->trigger();
+
     QElapsedTimer wait;
     wait.start();
     while (wait.elapsed() < 2000 && !accepted) {
@@ -1894,6 +3066,7 @@ int main(int argc, char **argv) {
     std::cerr << "CLAP name-based parameter configuration was not preserved\n";
     return 1;
   }
+
   if (!verifyPluginParameterFormat(QStringLiteral("plugin-vst3-parameters.txt"),
                                    "Plugin: VST3 test.vst3.uid 42=0.25\n",
                                    QStringLiteral("42"),
@@ -1902,6 +3075,281 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  const QString livePluginCli = temporary.filePath("live-plugin-cli.sh");
+  const QString livePluginLog = temporary.filePath("live-plugin-control.log");
+  const QString livePluginConfigPath =
+      temporary.filePath("live-plugin-config.txt");
+  QFile livePluginConfig(livePluginConfigPath);
+  const QByteArray livePluginConfigBytes =
+      "Plugin: LV2 test.gain.plugin gain=0.25 mix=1\n";
+  if (!writeLivePluginCliFixture(livePluginCli) ||
+      !livePluginConfig.open(QIODevice::WriteOnly) ||
+      livePluginConfig.write(livePluginConfigBytes) !=
+          livePluginConfigBytes.size()) {
+    std::cerr << "could not create live plugin GUI fixtures\n";
+    return 1;
+  }
+  livePluginConfig.close();
+  qunsetenv("SKYAPO_UI_TEST_PLUGIN_CONTROL_LOG");
+  qputenv("SKYAPO_UI_TEST_PLUGIN_CONTROL_LOG", livePluginLog.toLocal8Bit());
+  MainWindow livePluginWindow(livePluginConfigPath, livePluginCli);
+
+  auto *livePluginTable = livePluginWindow.findChild<FilterTable *>();
+  auto *livePluginParameters = livePluginWindow.findChild<QAction *>(
+      "configureSelectedPluginParameters");
+  auto *liveBypassOn =
+      livePluginWindow.findChild<QAction *>("setPluginBypassOn");
+  auto *liveBypassOff =
+      livePluginWindow.findChild<QAction *>("setPluginBypassOff");
+  if (!livePluginTable || !livePluginTable->itemAt(0) ||
+      !livePluginParameters || !liveBypassOn || !liveBypassOff) {
+    std::cerr << "live plugin parameter/bypass controls are missing\n";
+    return 1;
+  }
+  livePluginTable->setSelection(livePluginTable->itemAt(0));
+
+  auto dismissMessage = [&](const QString &title, QString &message) {
+    auto *poll = new QTimer(&livePluginWindow);
+    poll->setInterval(10);
+    QObject::connect(
+        poll, &QTimer::timeout, &livePluginWindow,
+        [&livePluginWindow, poll, &message, title] {
+          auto *active =
+              qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+          QList<QMessageBox *> candidates;
+          if (active)
+            candidates.push_back(active);
+          candidates.append(livePluginWindow.findChildren<QMessageBox *>());
+          for (auto *candidate : candidates) {
+            if (!candidate->windowTitle().contains(title))
+              continue;
+
+            message = candidate->text();
+            candidate->accept();
+
+            poll->stop();
+            poll->deleteLater();
+            QTimer::singleShot(0, &livePluginWindow, [&livePluginWindow] {
+              for (auto *dialog : livePluginWindow.findChildren<QDialog *>())
+                if (dialog->objectName() == "pluginParameterEditor") {
+                  dialog->reject();
+                  break;
+                }
+            });
+            return;
+          }
+        });
+    poll->start();
+  };
+  auto waitFor = [](const std::function<bool()> &condition) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (elapsed.elapsed() < 3000 && !condition()) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    return condition();
+  };
+  auto openLiveParameterDialog = [&] {
+    bool applied = false;
+    QString acknowledgement;
+    dismissMessage(QStringLiteral("Apply plugin parameters live"),
+                   acknowledgement);
+    auto *editorPoll = new QTimer(&livePluginWindow);
+    editorPoll->setInterval(10);
+    QObject::connect(editorPoll, &QTimer::timeout, &livePluginWindow, [&] {
+      for (auto *candidate : livePluginWindow.findChildren<QDialog *>()) {
+        if (candidate->objectName() != "pluginParameterEditor")
+          continue;
+        auto *gain =
+            candidate->findChild<QDoubleSpinBox *>("pluginParameter_gain");
+        auto *mix =
+            candidate->findChild<QDoubleSpinBox *>("pluginParameter_mix");
+        auto *apply =
+            candidate->findChild<QPushButton *>("applyPluginParametersLive");
+        if (gain && mix && apply) {
+
+          gain->setValue(0.75);
+          mix->setValue(0.5);
+
+          apply->click();
+
+          applied = true;
+        }
+        editorPoll->stop();
+        editorPoll->deleteLater();
+        return;
+      }
+    });
+    editorPoll->start();
+
+    livePluginParameters->trigger();
+
+    const bool dialogApplied = waitFor([&] { return applied; });
+
+    const bool messageDismissed =
+        waitFor([&] { return !acknowledgement.isEmpty(); });
+
+    return dialogApplied && messageDismissed && !acknowledgement.isEmpty();
+  };
+  if (!openLiveParameterDialog() || livePluginWindow.isWindowModified()) {
+    std::cerr << "live apply did not acknowledge updates or preserve the "
+                 "unsaved configuration distinction\n";
+    return 1;
+  }
+
+  QFile livePluginControlLog(livePluginLog);
+  const QByteArray expectedLiveParameterCalls =
+      "set\ttest.gain.plugin\tgain\t0.75\n"
+      "set\ttest.gain.plugin\tmix\t0.5\n";
+  if (!livePluginControlLog.open(QIODevice::ReadOnly) ||
+      livePluginControlLog.readAll() != expectedLiveParameterCalls) {
+    std::cerr << "live GUI apply did not issue exact plugin set CLI calls\n";
+    return 1;
+  }
+  QFile unchangedLivePluginConfig(livePluginConfigPath);
+  if (!unchangedLivePluginConfig.open(QIODevice::ReadOnly) ||
+      unchangedLivePluginConfig.readAll() != livePluginConfigBytes) {
+    std::cerr << "live plugin apply unexpectedly rewrote the configuration\n";
+    return 1;
+  }
+
+  QString bypassAcknowledgement;
+
+  dismissMessage(QStringLiteral("Plugin bypass"), bypassAcknowledgement);
+  liveBypassOn->trigger();
+
+  if (!waitFor([&] { return !bypassAcknowledgement.isEmpty(); }) ||
+      !bypassAcknowledgement.contains("bypass to on")) {
+    std::cerr << "GUI bypass-on did not show the daemon acknowledgement\n";
+    return 1;
+  }
+  QFile bypassLog(livePluginLog);
+  const QByteArray expectedBypassCalls =
+      expectedLiveParameterCalls + "bypass\ttest.gain.plugin\ton\n";
+  if (!bypassLog.open(QIODevice::ReadOnly) ||
+      bypassLog.readAll() != expectedBypassCalls) {
+    std::cerr << "GUI bypass-on did not issue the exact plugin bypass call\n";
+    return 1;
+  }
+
+  QString liveApplyError;
+
+  dismissMessage(QStringLiteral("Plugin parameter update failed"),
+                 liveApplyError);
+  bool failedApplyWasTriggered = false;
+  auto *failedEditorPoll = new QTimer(&livePluginWindow);
+  failedEditorPoll->setInterval(10);
+  QObject::connect(failedEditorPoll, &QTimer::timeout, &livePluginWindow, [&] {
+    for (auto *candidate : livePluginWindow.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginParameterEditor")
+        continue;
+      auto *gain =
+          candidate->findChild<QDoubleSpinBox *>("pluginParameter_gain");
+      auto *apply =
+          candidate->findChild<QPushButton *>("applyPluginParametersLive");
+      if (gain && apply) {
+
+        gain->setValue(0.66);
+        apply->click();
+
+        failedApplyWasTriggered = true;
+      }
+      failedEditorPoll->stop();
+      failedEditorPoll->deleteLater();
+      return;
+    }
+  });
+  failedEditorPoll->start();
+  livePluginParameters->trigger();
+
+  if (!waitFor([&] { return failedApplyWasTriggered; }) || !waitFor([&] {
+        return liveApplyError.contains("fixture live-set error");
+      })) {
+    std::cerr << "live plugin failure was not surfaced with CLI error detail\n";
+    return 1;
+  }
+
+  QString bypassError;
+
+  dismissMessage(QStringLiteral("Plugin bypass failed"), bypassError);
+  liveBypassOff->trigger();
+
+  if (!waitFor([&] { return bypassError.contains("fixture bypass error"); })) {
+    std::cerr << "plugin bypass failure was not surfaced with CLI error "
+                 "detail\n";
+    return 1;
+  }
+
+  const QString nonPluginConfigPath =
+      temporary.filePath("non-plugin-selection.txt");
+  QFile nonPluginConfig(nonPluginConfigPath);
+  const QByteArray nonPluginConfigBytes = "Preamp: -6 dB\n";
+  if (!nonPluginConfig.open(QIODevice::WriteOnly) ||
+      nonPluginConfig.write(nonPluginConfigBytes) !=
+          nonPluginConfigBytes.size()) {
+    std::cerr << "could not create non-plugin selection fixture\n";
+    return 1;
+  }
+  nonPluginConfig.close();
+  MainWindow nonPluginWindow(nonPluginConfigPath, livePluginCli);
+  auto *nonPluginTable = nonPluginWindow.findChild<FilterTable *>();
+  auto *nonPluginBypass =
+      nonPluginWindow.findChild<QAction *>("setPluginBypassOn");
+  if (!nonPluginTable || !nonPluginTable->itemAt(0) || !nonPluginBypass) {
+    std::cerr << "non-plugin validation fixture is invalid\n";
+    return 1;
+  }
+  nonPluginTable->setSelection(nonPluginTable->itemAt(0));
+  const QString expectedNonPluginMessage =
+      QStringLiteral("Select a native LV2, CLAP, or VST3 Plugin: row.");
+  QString invalidSelectionMessage;
+  QFile controlLogBeforeNonPlugin(livePluginLog);
+  if (!controlLogBeforeNonPlugin.open(QIODevice::ReadOnly)) {
+    std::cerr << "could not read plugin control log before non-plugin check\n";
+    return 1;
+  }
+  const QByteArray controlCallsBeforeNonPlugin =
+      controlLogBeforeNonPlugin.readAll();
+  auto *invalidSelectionPoll = new QTimer(&nonPluginWindow);
+  invalidSelectionPoll->setInterval(10);
+  QObject::connect(
+      invalidSelectionPoll, &QTimer::timeout, &nonPluginWindow, [&] {
+        QList<QMessageBox *> candidates;
+        if (auto *active =
+                qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+          candidates.push_back(active);
+        for (auto *widget : QApplication::topLevelWidgets()) {
+          if (auto *message = qobject_cast<QMessageBox *>(widget))
+            candidates.push_back(message);
+          candidates.append(widget->findChildren<QMessageBox *>());
+        }
+        for (auto *candidate : candidates) {
+          if (candidate->text().contains(expectedNonPluginMessage)) {
+            invalidSelectionMessage = candidate->text();
+            candidate->accept();
+            invalidSelectionPoll->stop();
+            break;
+          }
+        }
+      });
+  invalidSelectionPoll->start();
+  QTimer::singleShot(3000, &nonPluginWindow, [] {
+    if (auto *active =
+            qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+      active->reject();
+  });
+  nonPluginBypass->trigger();
+  invalidSelectionPoll->stop();
+  invalidSelectionPoll->deleteLater();
+  QFile controlLogAfterNonPlugin(livePluginLog);
+  if (!invalidSelectionMessage.contains(expectedNonPluginMessage) ||
+      !controlLogAfterNonPlugin.open(QIODevice::ReadOnly) ||
+      controlLogAfterNonPlugin.readAll() != controlCallsBeforeNonPlugin) {
+    std::cerr << "plugin bypass accepted a non-plugin selected row\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_PLUGIN_CONTROL_LOG");
   MainWindow stalledCliWindow(configPath, QString::fromLocal8Bit(argv[1]));
   auto cliTimeouts = stalledCliWindow.findChildren<QTimer *>("cliTimeout");
   if (cliTimeouts.isEmpty()) {
@@ -2287,12 +3735,413 @@ int main(int argc, char **argv) {
   auto *stagePostMix = stageWindow.findChild<QCheckBox *>("postMixCheckBox");
   auto *stageCapture = stageWindow.findChild<QCheckBox *>("captureCheckBox");
   if (!stagePreMix || !stagePostMix || !stageCapture ||
-      stagePreMix->isEnabled() || stagePostMix->isEnabled() ||
+      stagePreMix->isEnabled() || !stagePostMix->isEnabled() ||
       !stageCapture->isEnabled() ||
-      !stagePreMix->toolTip().contains("does not process") ||
-      !stagePostMix->toolTip().contains("does not process")) {
+      !stagePreMix->toolTip().contains("per-application pre-mix",
+                                       Qt::CaseInsensitive) ||
+      stagePostMix->toolTip().contains("does not process")) {
     std::cerr
-        << "Stage editor did not distinguish unsupported playback stages\n";
+        << "Stage editor did not expose supported post-mix and distinguish "
+           "unsupported per-application pre-mix (pre="
+        << (stagePreMix ? stagePreMix->isEnabled() : false)
+        << ", post=" << (stagePostMix ? stagePostMix->isEnabled() : false)
+        << ", capture=" << (stageCapture ? stageCapture->isEnabled() : false)
+        << ", pre tooltip="
+        << (stagePreMix ? stagePreMix->toolTip().toStdString() : "missing")
+        << ", post tooltip="
+        << (stagePostMix ? stagePostMix->toolTip().toStdString() : "missing")
+        << ")\n";
+    return 1;
+  }
+  stagePostMix->setChecked(true);
+  QPushButton *saveStageConfig = nullptr;
+  for (auto *button : stageWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save")
+      saveStageConfig = button;
+  if (!saveStageConfig) {
+    std::cerr << "Stage editor did not expose Save\n";
+    return 1;
+  }
+  saveStageConfig->click();
+  QFile savedStageConfig(stageConfigPath);
+  if (!savedStageConfig.open(QIODevice::ReadOnly) ||
+      savedStageConfig.readAll() != "Stage: pre-mix post-mix capture\n") {
+    std::cerr << "Stage post-mix checkbox did not serialize to the config\n";
+    return 1;
+  }
+
+  const QString outputDeviceLogPath =
+      temporary.filePath(QStringLiteral("selector-output-device.log"));
+  const QString restartLogPath =
+      temporary.filePath(QStringLiteral("selector-restart.log"));
+  const QString polkitLogPath =
+      temporary.filePath(QStringLiteral("selector-polkit.log"));
+  const QString polkitFixturePath =
+      temporary.filePath(QStringLiteral("pkcheck-fixture"));
+  if (!writePolkitPreflightFixture(polkitFixturePath)) {
+    std::cerr << "could not create the Polkit preflight fixture\n";
+    return 1;
+  }
+  QFile::remove(outputDeviceLogPath);
+  QFile::remove(restartLogPath);
+  QFile::remove(deviceLogPath);
+  QFile::remove(polkitLogPath);
+  qputenv("SKYAPO_UI_TEST_POLKIT_LOG", polkitLogPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_POLKIT_RESULT", "1");
+  qputenv("SKYAPO_UI_TEST_OUTPUT_DEVICE_LOG",
+          outputDeviceLogPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_RESTART_LOG", restartLogPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_DAEMON_RUNNING", "1");
+  qputenv("SKYAPO_UI_TEST_DEVICE_LOG", deviceLogPath.toLocal8Bit());
+  qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE",
+          dynamicDeviceListPath.toLocal8Bit());
+  MainWindow selectorWindow(configPath, QString::fromLocal8Bit(argv[1]),
+                            polkitFixturePath);
+  auto *openDeviceSelector =
+      selectorWindow.findChild<QPushButton *>("openDeviceSelector");
+  if (!openDeviceSelector) {
+    std::cerr << "Configuration Editor did not expose Device Selector\n";
+    return 1;
+  }
+
+  QElapsedTimer authorizationElapsed;
+  authorizationElapsed.start();
+  QTimer authorizationProbe;
+  authorizationProbe.setInterval(10);
+  bool authorizationDeniedShown = false;
+  QString authorizationFailure;
+  QObject::connect(&authorizationProbe, &QTimer::timeout, &selectorWindow, [&] {
+    if (authorizationElapsed.elapsed() > 5000) {
+      authorizationFailure =
+          QStringLiteral("Polkit denial dialog did not appear");
+      authorizationProbe.stop();
+      return;
+    }
+    auto *warning = selectorWindow.findChild<QMessageBox *>(
+        "deviceSelectorAuthorizationError");
+    if (!warning || !warning->isVisible())
+      return;
+    if (!warning->text().contains("not opened", Qt::CaseInsensitive)) {
+      authorizationFailure =
+          QStringLiteral("Polkit denial message was unclear");
+      warning->done(QMessageBox::Ok);
+      authorizationProbe.stop();
+      return;
+    }
+    authorizationDeniedShown = true;
+    warning->done(QMessageBox::Ok);
+    authorizationProbe.stop();
+  });
+  authorizationProbe.start();
+  openDeviceSelector->click();
+  QElapsedTimer authorizationWait;
+  authorizationWait.start();
+  while (!authorizationDeniedShown && authorizationFailure.isEmpty() &&
+         authorizationWait.elapsed() < 6000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  authorizationProbe.stop();
+  QFile polkitLog(polkitLogPath);
+  if (!authorizationDeniedShown || !authorizationFailure.isEmpty() ||
+      selectorWindow.findChild<QDialog *>("deviceSelectorDialog") ||
+      !polkitLog.open(QIODevice::ReadOnly)) {
+    std::cerr << (authorizationFailure.isEmpty()
+                      ? "Device Selector did not fail closed on denied Polkit "
+                        "authorization"
+                      : authorizationFailure.toStdString())
+              << '\n';
+    return 1;
+  }
+  const QByteArray deniedPolkitArguments = polkitLog.readAll();
+  if (!deniedPolkitArguments.contains("org.linuxapo.device-selector.open") ||
+      !deniedPolkitArguments.contains("--process") ||
+      !deniedPolkitArguments.contains(
+          QByteArray::number(QCoreApplication::applicationPid()))) {
+    std::cerr << "Polkit preflight did not use the fixed action and current UI "
+                 "process\n";
+    return 1;
+  }
+
+  qputenv("SKYAPO_UI_TEST_POLKIT_RESULT", "0");
+  QElapsedTimer selectorElapsed;
+  selectorElapsed.start();
+  QTimer selectorProbe;
+  selectorProbe.setInterval(25);
+  int selectorStep = 0;
+  bool selectorPassed = false;
+  QString selectorFailure;
+  QObject::connect(&selectorProbe, &QTimer::timeout, &selectorWindow, [&] {
+    if (selectorElapsed.elapsed() > 20000 && !selectorPassed &&
+        selectorFailure.isEmpty()) {
+      selectorFailure =
+          QStringLiteral(
+              "Device Selector integration timed out before completing step %1")
+              .arg(selectorStep);
+      auto *activeDialog =
+          qobject_cast<QDialog *>(QApplication::activeModalWidget());
+      if (activeDialog)
+        activeDialog->reject();
+      return;
+    }
+    auto *selector =
+        selectorWindow.findChild<QDialog *>("deviceSelectorDialog");
+    if (!selector)
+      return;
+    auto *captureTable =
+        selector->findChild<QTableWidget *>("captureDevicesTable");
+    auto *playbackTable =
+        selector->findChild<QTableWidget *>("playbackDevicesTable");
+    auto *status = selector->findChild<QLabel *>("deviceSelectorRuntimeStatus");
+    auto *troubleshooting = selector->findChild<QToolButton *>(
+        "deviceSelectorTroubleshootingToggle");
+    auto *selectCapture =
+        selector->findChild<QPushButton *>("selectCaptureDevice");
+    auto *selectPlayback =
+        selector->findChild<QPushButton *>("selectPlaybackDevice");
+    auto *closeSelector =
+        selector->findChild<QPushButton *>("closeDeviceSelector");
+    auto *refreshTimer =
+        selector->findChild<QTimer *>("deviceSelectorRefreshTimer");
+    if (!captureTable || !playbackTable || !status || !troubleshooting ||
+        !selectCapture || !selectPlayback || !closeSelector || !refreshTimer)
+      return;
+    if (refreshTimer->interval() != 250)
+      refreshTimer->setInterval(250);
+    if (selectorElapsed.elapsed() > 20000) {
+      selectorFailure =
+          QStringLiteral("Device Selector integration timed out (capture "
+                         "rows=%1, playback rows=%2, status=%3)")
+              .arg(captureTable->rowCount())
+              .arg(playbackTable->rowCount())
+              .arg(status->text());
+      selector->reject();
+      return;
+    }
+    if (selectorStep == 0) {
+      if (troubleshooting->isChecked() || status->isVisible()) {
+        selectorFailure = "Device Selector troubleshooting details are not "
+                          "collapsed by default";
+        selector->reject();
+        return;
+      }
+      troubleshooting->click();
+      if (!troubleshooting->isChecked() || !status->isVisible()) {
+        selectorFailure =
+            "Device Selector troubleshooting details did not expand";
+        selector->reject();
+        return;
+      }
+      troubleshooting->click();
+      if (captureTable->rowCount() != 2 || playbackTable->rowCount() != 2 ||
+          !status->text().contains("Daemon: streaming") ||
+          !status->text().contains("fixture.sink"))
+        return;
+      if (captureTable->currentRow() != 1 || playbackTable->currentRow() != 0 ||
+          captureTable->item(0, 2)->data(Qt::UserRole).toString() !=
+              "fixture.capture" ||
+          playbackTable->item(1, 2)->data(Qt::UserRole).toString() !=
+              "fixture.sink.alt") {
+        selectorFailure =
+            "Device Selector did not display capture/playback fixture state";
+        selector->reject();
+        return;
+      }
+      captureTable->selectRow(0);
+      selectCapture->click();
+      if (!writeDynamicDeviceList(
+              "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE "
+              "RATE\tSTABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA "
+              "PATH\tDEFAULT\n"
+              "41\tfixture.capture\tBuilt-in capture\tyes\t2\t48000\t"
+              "\t\t\t\tno\n"
+              "42\tfixture.usb-mic\tUSB microphone\t\t1\t44100\t"
+              "\t\t\t\tyes\n")) {
+        selectorFailure =
+            QStringLiteral("could not update the capture selection fixture");
+        selector->reject();
+        return;
+      }
+      selectorStep = 1;
+      return;
+    }
+    if (selectorStep == 1) {
+      QFile selectionLog(deviceLogPath);
+      if (!selectionLog.open(QIODevice::ReadOnly) ||
+          !selectionLog.readAll().contains("fixture.capture"))
+        return;
+      QFile restartLog(restartLogPath);
+      if (!restartLog.open(QIODevice::ReadOnly) ||
+          !restartLog.readAll().contains("restart"))
+        return;
+      playbackTable->selectRow(1);
+      selectPlayback->click();
+      selectorStep = 2;
+      return;
+    }
+    if (selectorStep == 2) {
+      QFile selectionLog(outputDeviceLogPath);
+      QFile restartLog(restartLogPath);
+      if (!selectionLog.open(QIODevice::ReadOnly) ||
+          !selectionLog.readAll().contains("fixture.sink.alt") ||
+          !restartLog.open(QIODevice::ReadOnly) ||
+          restartLog.readAll().split('\n').size() != 2 ||
+          playbackTable->currentRow() != 1 ||
+          playbackTable->item(1, 0)->text() != "Selected")
+        return;
+      if (!writeDynamicDeviceList(
+              "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE "
+              "RATE\tSTABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA "
+              "PATH\tDEFAULT\n"
+              "42\tfixture.usb-mic\tUSB microphone\t\t1\t44100\t"
+              "\t\t\t\tyes\n")) {
+        selectorFailure =
+            QStringLiteral("could not simulate selected capture hot-unplug");
+        selector->reject();
+        return;
+      }
+      selectorStep = 3;
+      return;
+    }
+    if (selectorStep == 3) {
+      if (captureTable->rowCount() != 2 ||
+          captureTable->item(0, 2)->data(Qt::UserRole).toString() !=
+              "fixture.usb-mic" ||
+          captureTable->currentRow() != 1 ||
+          captureTable->item(1, 0)->text() != "Unavailable" ||
+          selectCapture->isEnabled() ||
+          !status->text().contains("fixture.capture (unavailable)"))
+        return;
+      if (!writeDynamicDeviceList(
+              "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE "
+              "RATE\tSTABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA "
+              "PATH\tDEFAULT\n"
+              "41\tfixture.capture\tBuilt-in capture\tyes\t2\t48000\t"
+              "\t\t\t\tno\n"
+              "42\tfixture.usb-mic\tUSB microphone\t\t1\t44100\t"
+              "\t\t\t\tyes\n")) {
+        selectorFailure =
+            QStringLiteral("could not simulate selected capture reappearance");
+        selector->reject();
+        return;
+      }
+      selectorStep = 4;
+      return;
+    }
+    if (selectorStep == 4) {
+      if (captureTable->rowCount() != 2 || captureTable->currentRow() != 0 ||
+          captureTable->item(0, 0)->text() != "Selected")
+        return;
+      selectorPassed = true;
+      closeSelector->click();
+      selectorProbe.stop();
+    }
+  });
+  selectorProbe.start();
+  openDeviceSelector->click();
+  QElapsedTimer waitForSelector;
+  waitForSelector.start();
+  while (!selectorPassed && selectorFailure.isEmpty() &&
+         waitForSelector.elapsed() < 22000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  selectorProbe.stop();
+  if (!selectorPassed) {
+    std::cerr << (selectorFailure.isEmpty()
+                      ? "Device Selector failed to load or apply both endpoint "
+                        "selections"
+                      : selectorFailure.toStdString())
+              << '\n';
+    return 1;
+  }
+
+  qunsetenv("SKYAPO_UI_TEST_DAEMON_RUNNING");
+  qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
+  QFile::remove(outputDeviceLogPath);
+  MainWindow stoppedSelectorWindow(configPath, QString::fromLocal8Bit(argv[1]),
+                                   polkitFixturePath);
+  auto *openStoppedSelector =
+      stoppedSelectorWindow.findChild<QPushButton *>("openDeviceSelector");
+  if (!openStoppedSelector) {
+    std::cerr << "stopped-daemon Device Selector button is missing\n";
+    return 1;
+  }
+  QElapsedTimer stoppedSelectorElapsed;
+  stoppedSelectorElapsed.start();
+  QTimer stoppedSelectorProbe;
+  stoppedSelectorProbe.setInterval(25);
+  bool stoppedSelectorPassed = false;
+  bool stoppedSelectorCompleted = false;
+  QString stoppedSelectorFailure;
+  QObject::connect(
+      &stoppedSelectorProbe, &QTimer::timeout, &stoppedSelectorWindow, [&] {
+        auto *selector =
+            stoppedSelectorWindow.findChild<QDialog *>("deviceSelectorDialog");
+        if (!selector)
+          return;
+        auto *playbackTable =
+            selector->findChild<QTableWidget *>("playbackDevicesTable");
+        auto *status =
+            selector->findChild<QLabel *>("deviceSelectorRuntimeStatus");
+        auto *feedback =
+            selector->findChild<QLabel *>("deviceSelectionFeedback");
+        auto *selectPlayback =
+            selector->findChild<QPushButton *>("selectPlaybackDevice");
+        auto *closeSelector =
+            selector->findChild<QPushButton *>("closeDeviceSelector");
+        if (!playbackTable || !status || !feedback || !selectPlayback ||
+            !closeSelector)
+          return;
+        if (stoppedSelectorElapsed.elapsed() > 5000) {
+          stoppedSelectorFailure =
+              QStringLiteral("stopped-daemon Device Selector timed "
+                             "out (playback rows=%1, status=%2, "
+                             "feedback=%3, selected=%4)")
+                  .arg(playbackTable->rowCount())
+                  .arg(status->text())
+                  .arg(feedback->text())
+                  .arg(stoppedSelectorPassed);
+          selector->reject();
+          return;
+        }
+        if (!stoppedSelectorPassed) {
+          if (playbackTable->rowCount() != 2 ||
+              !status->text().contains("Daemon: not reachable"))
+            return;
+          playbackTable->selectRow(1);
+          selectPlayback->click();
+          stoppedSelectorPassed = true;
+          return;
+        }
+        QFile selectionLog(outputDeviceLogPath);
+        QFile restartLog(restartLogPath);
+        if (!selectionLog.open(QIODevice::ReadOnly) ||
+            !selectionLog.readAll().contains("fixture.sink.alt") ||
+            !feedback->text().contains("next time skyapod is started") ||
+            !restartLog.open(QIODevice::ReadOnly) ||
+            restartLog.readAll().split('\n').size() != 2)
+          return;
+        closeSelector->click();
+        stoppedSelectorCompleted = true;
+        stoppedSelectorProbe.stop();
+      });
+  stoppedSelectorProbe.start();
+  openStoppedSelector->click();
+  QElapsedTimer waitForStoppedSelector;
+  waitForStoppedSelector.start();
+  while (!stoppedSelectorCompleted && stoppedSelectorFailure.isEmpty() &&
+         waitForStoppedSelector.elapsed() < 7000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  stoppedSelectorProbe.stop();
+  if (!stoppedSelectorPassed || !stoppedSelectorCompleted ||
+      !stoppedSelectorFailure.isEmpty()) {
+    std::cerr << (stoppedSelectorFailure.isEmpty()
+                      ? "stopped-daemon selection did not save without restart"
+                      : stoppedSelectorFailure.toStdString())
+              << '\n';
     return 1;
   }
 
@@ -2301,9 +4150,13 @@ int main(int argc, char **argv) {
   qunsetenv("SKYAPO_UI_TEST_CONFIG_LOG");
   qunsetenv("SKYAPO_UI_TEST_CONFIG_GATE_DIR");
   qunsetenv("SKYAPO_UI_TEST_RELOAD_MARKER");
-  std::cout << "upstream editor widgets, selection/reordering, config "
-               "preservation, async UI, stable device selection, and "
-               "bounded CLI failure handling, and GraphicEQ serialization "
-               "tests passed\n";
+  qunsetenv("SKYAPO_UI_TEST_OUTPUT_DEVICE_LOG");
+  qunsetenv("SKYAPO_UI_TEST_RESTART_LOG");
+  qunsetenv("SKYAPO_UI_TEST_POLKIT_LOG");
+  qunsetenv("SKYAPO_UI_TEST_POLKIT_RESULT");
+  qunsetenv("SKYAPO_UI_TEST_DAEMON_RUNNING");
+  std::cout << "upstream editor widgets, capture/playback device selection, "
+               "config preservation, async UI, bounded CLI failure handling, "
+               "and GraphicEQ serialization tests passed\n";
   return 0;
 }

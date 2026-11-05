@@ -37,9 +37,11 @@ bool responseRejected(const std::string &frame, const std::string &reason) {
 int main() {
   using settings::ipc::Command;
   for (const auto &[frame, expected] : {
-           std::pair<std::string, Command>{"SKYAPO/1 STATUS\n", Command::Status},
+           std::pair<std::string, Command>{"SKYAPO/1 STATUS\n",
+                                           Command::Status},
            {"SKYAPO/1 RELOAD\n", Command::Reload},
            {"SKYAPO/1 STOP\n", Command::Stop},
+           {"SKYAPO/1 OUTPUT_REFRESH\n", Command::RefreshOutput},
        }) {
     if (settings::ipc::decodeRequest(frame).command != expected) {
       std::cerr << "valid IPC request rejected\n";

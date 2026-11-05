@@ -1,10 +1,18 @@
 #include "../src/platform/PlatformChannels.h"
 #include "../src/platform/RealtimeAudit.h"
+#include "../src/pipewire/PipeWireCallbackBoundary.h"
+#include "../src/pipewire/CallbackRecoveryGate.h"
+#include "../src/pipewire/PlaybackFaultRecovery.h"
+#include "../src/pipewire/RuntimeAudioGate.h"
 #include "Engine.h"
 #include "../src/pipewire/TransitionMetricsGeneration.h"
+#include "TestTemp.h"
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <new>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 #ifdef SKYAPO_TEST_CONVOLUTION
@@ -13,6 +21,301 @@
 extern "C" void *__wrap_malloc(size_t);
 extern "C" void __wrap_free(void *);
 int main() {
+  {
+    using skyapo::pipewire::audioOutputMustBeSilent;
+    using skyapo::pipewire::configReloadNeedsValidation;
+    using skyapo::pipewire::formatRebuildMustDefer;
+    using skyapo::pipewire::resumeRuntimeAudioGate;
+    using skyapo::pipewire::RuntimeAudioMode;
+    if (!configReloadNeedsValidation(false, false, true) ||
+        !formatRebuildMustDefer(false, false, true) ||
+        !formatRebuildMustDefer(true, false, false) ||
+        !formatRebuildMustDefer(false, true, false) ||
+        formatRebuildMustDefer(false, false, false) ||
+        resumeRuntimeAudioGate(RuntimeAudioMode::Quiescing, false, false,
+                               true) != RuntimeAudioMode::Quiescing ||
+        resumeRuntimeAudioGate(RuntimeAudioMode::Quiescing, true, false,
+                               false) != RuntimeAudioMode::Faulted ||
+        resumeRuntimeAudioGate(RuntimeAudioMode::Quiescing, false, false,
+                               false) != RuntimeAudioMode::Running ||
+        resumeRuntimeAudioGate(RuntimeAudioMode::Stopping, false, false,
+                               true) != RuntimeAudioMode::Stopping) {
+      std::cerr << "queued PDC validation was mistaken for permission to "
+                   "resume audio or skip config validation\n";
+      return 1;
+    }
+
+    // A control-thread resume can race the callback that publishes the PDC
+    // queue bit. Even if audioMode is momentarily Running, callback output
+    // must remain silent until that queued validation is handled.
+    if (!audioOutputMustBeSilent(RuntimeAudioMode::Running, true) ||
+        audioOutputMustBeSilent(RuntimeAudioMode::Running, false) ||
+        !audioOutputMustBeSilent(RuntimeAudioMode::Quiescing, false) ||
+        !audioOutputMustBeSilent(RuntimeAudioMode::Faulted, false)) {
+      std::cerr << "audio callback gate ignored unresolved PDC validation\n";
+      return 1;
+    }
+
+    std::atomic<bool> pluginLatencyEventQueued{false};
+    std::atomic<RuntimeAudioMode> audioMode{RuntimeAudioMode::Running};
+    const bool candidateBuildStartedWithFault =
+        configReloadNeedsValidation(false, false, false);
+    std::thread callback([&] {
+      pluginLatencyEventQueued.store(true, std::memory_order_release);
+      audioMode.store(RuntimeAudioMode::Quiescing, std::memory_order_seq_cst);
+    });
+    callback.join();
+    const bool commitNeedsValidation = configReloadNeedsValidation(
+        false, false, pluginLatencyEventQueued.load(std::memory_order_acquire));
+    const auto modeAfterResumeAttempt = resumeRuntimeAudioGate(
+        audioMode.load(std::memory_order_seq_cst), false, false,
+        pluginLatencyEventQueued.load(std::memory_order_acquire));
+    if (candidateBuildStartedWithFault || !commitNeedsValidation ||
+        modeAfterResumeAttempt != RuntimeAudioMode::Quiescing) {
+      std::cerr << "a PDC event queued after candidate construction was lost "
+                   "before config commit\n";
+      return 1;
+    }
+  }
+  {
+    using skyapo::pipewire::detail::PlaybackFaultRecovery;
+    std::atomic<bool> faulted{false};
+    std::atomic<bool> pluginLatencyFaulted{false};
+    std::atomic<bool> controlCallbackFailed{false};
+
+    const auto reload = PlaybackFaultRecovery::beginConfigReload(true, false);
+    std::thread realtimeCallback([&] {
+      pluginLatencyFaulted.store(true, std::memory_order_release);
+      faulted.store(true, std::memory_order_release);
+    });
+    realtimeCallback.join();
+
+    PlaybackFaultRecovery::finishConfigReload(reload, pluginLatencyFaulted,
+                                              faulted, controlCallbackFailed);
+    if (!faulted.load(std::memory_order_acquire) ||
+        !pluginLatencyFaulted.load(std::memory_order_acquire)) {
+      std::cerr << "an unvalidated config reload cleared a PDC fault raised "
+                   "while the candidate was being built\n";
+      return 1;
+    }
+
+    const auto validatedReload =
+        PlaybackFaultRecovery::beginConfigReload(true, true);
+    PlaybackFaultRecovery::finishConfigReload(
+        validatedReload, pluginLatencyFaulted, faulted, controlCallbackFailed);
+    if (faulted.load(std::memory_order_acquire) ||
+        pluginLatencyFaulted.load(std::memory_order_acquire)) {
+      std::cerr << "a validated replacement did not clear its recoverable "
+                   "PDC fault\n";
+      return 1;
+    }
+
+    faulted.store(true, std::memory_order_release);
+    pluginLatencyFaulted.store(true, std::memory_order_release);
+    controlCallbackFailed.store(true, std::memory_order_release);
+    PlaybackFaultRecovery::finishConfigReload(
+        validatedReload, pluginLatencyFaulted, faulted, controlCallbackFailed);
+    if (!faulted.load(std::memory_order_acquire) ||
+        pluginLatencyFaulted.load(std::memory_order_acquire)) {
+      std::cerr << "config reload cleared a permanent control-callback fault\n";
+      return 1;
+    }
+  }
+  {
+    using skyapo::pipewire::detail::CallbackRecoveryGate;
+    using skyapo::pipewire::detail::PlaybackFaultRecovery;
+    CallbackRecoveryGate gate;
+    std::atomic<bool> callbackEntered{false};
+    std::atomic<bool> publishFault{false};
+    std::atomic<bool> faulted{false};
+    std::atomic<bool> pluginLatencyFaulted{false};
+    std::atomic<bool> controlCallbackFailed{false};
+
+    std::thread callback([&] {
+      auto flight = gate.enterCallback();
+      callbackEntered.store(true, std::memory_order_release);
+      while (!publishFault.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      if (flight.mayProcess()) {
+        pluginLatencyFaulted.store(true, std::memory_order_release);
+        faulted.store(true, std::memory_order_release);
+      }
+    });
+    while (!callbackEntered.load(std::memory_order_acquire))
+      std::this_thread::yield();
+
+    gate.closeForRecovery();
+    publishFault.store(true, std::memory_order_release);
+    while (gate.callbacksInFlight() != 0)
+      std::this_thread::yield();
+    const auto reload = PlaybackFaultRecovery::beginConfigReload(
+        true, faulted.load(std::memory_order_acquire));
+    if (!reload.validatedForRecovery) {
+      callback.join();
+      std::cerr << "config commit did not observe a PDC fault from a callback "
+                   "that was drained at the recovery boundary\n";
+      return 1;
+    }
+    PlaybackFaultRecovery::finishConfigReload(reload, pluginLatencyFaulted,
+                                              faulted, controlCallbackFailed);
+    gate.finishRecovery();
+    callback.join();
+    if (faulted.load(std::memory_order_acquire) ||
+        pluginLatencyFaulted.load(std::memory_order_acquire) ||
+        gate.recoveryInProgress() || gate.callbacksInFlight() != 0) {
+      std::cerr << "validated recovery did not clear the drained PDC fault "
+                   "and reopen the callback gate\n";
+      return 1;
+    }
+  }
+  {
+    using skyapo::pipewire::detail::CallbackRecoveryGate;
+    CallbackRecoveryGate gate;
+    realtime::allocations = 0;
+    realtime::deallocations = 0;
+    {
+      realtime::Scope audit;
+      {
+        auto activeCallback = gate.enterCallback();
+        if (!activeCallback.mayProcess()) {
+          std::cerr << "open recovery gate rejected an audio callback\n";
+          return 1;
+        }
+        gate.closeForRecovery();
+        if (!gate.recoveryInProgress() || gate.callbacksInFlight() != 1) {
+          std::cerr << "recovery gate did not close and track an active "
+                       "callback\n";
+          return 1;
+        }
+      }
+      if (gate.callbacksInFlight() != 0) {
+        std::cerr << "recovery callback guard did not leave cleanly\n";
+        return 1;
+      }
+
+      {
+        auto callbackAfterDrain = gate.enterCallback();
+        if (callbackAfterDrain.mayProcess() || gate.callbacksInFlight() != 1) {
+          std::cerr << "callback entering after recovery drain was admitted\n";
+          return 1;
+        }
+        gate.finishRecovery();
+        if (gate.recoveryInProgress() || callbackAfterDrain.mayProcess()) {
+          std::cerr << "callback admitted while recovery was closed became "
+                       "active after the gate reopened\n";
+          return 1;
+        }
+      }
+      if (gate.callbacksInFlight() != 0) {
+        std::cerr << "recovery callback count underflowed after gate reopen\n";
+        return 1;
+      }
+      auto recoveredCallback = gate.enterCallback();
+      if (!recoveredCallback.mayProcess()) {
+        std::cerr << "validated recovered engine remained gated\n";
+        return 1;
+      }
+    }
+    if (realtime::allocations.load() != 0 ||
+        realtime::deallocations.load() != 0) {
+      std::cerr << "callback recovery gate allocated in realtime scope\n";
+      return 1;
+    }
+  }
+  {
+    using skyapo::pipewire::detail::CallbackRecoveryGate;
+    CallbackRecoveryGate gate;
+    std::atomic<bool> priorEntered{false};
+    std::atomic<bool> releasePrior{false};
+    std::atomic<bool> drainStarted{false};
+    std::atomic<bool> swapStarted{false};
+    std::atomic<bool> lateEntered{false};
+    std::atomic<bool> swapping{false};
+    std::atomic<bool> violation{false};
+
+    std::thread priorCallback([&] {
+      auto flight = gate.enterCallback();
+      if (!flight.mayProcess())
+        violation.store(true, std::memory_order_seq_cst);
+      priorEntered.store(true, std::memory_order_seq_cst);
+      while (!releasePrior.load(std::memory_order_seq_cst))
+        std::this_thread::yield();
+      if (swapping.load(std::memory_order_seq_cst))
+        violation.store(true, std::memory_order_seq_cst);
+    });
+    while (!priorEntered.load(std::memory_order_seq_cst))
+      std::this_thread::yield();
+
+    gate.closeForRecovery();
+    std::thread controlThread([&] {
+      drainStarted.store(true, std::memory_order_seq_cst);
+      while (gate.callbacksInFlight() != 0)
+        std::this_thread::yield();
+      swapping.store(true, std::memory_order_seq_cst);
+      swapStarted.store(true, std::memory_order_seq_cst);
+      while (!lateEntered.load(std::memory_order_seq_cst))
+        std::this_thread::yield();
+      swapping.store(false, std::memory_order_seq_cst);
+      gate.finishRecovery();
+    });
+    while (!drainStarted.load(std::memory_order_seq_cst))
+      std::this_thread::yield();
+    const bool drainedBeforePriorExit =
+        swapStarted.load(std::memory_order_seq_cst);
+    releasePrior.store(true, std::memory_order_seq_cst);
+    while (!swapStarted.load(std::memory_order_seq_cst))
+      std::this_thread::yield();
+
+    std::thread lateCallback([&] {
+      auto flight = gate.enterCallback();
+      if (flight.mayProcess() && swapping.load(std::memory_order_seq_cst))
+        violation.store(true, std::memory_order_seq_cst);
+      if (flight.mayProcess())
+        violation.store(true, std::memory_order_seq_cst);
+      lateEntered.store(true, std::memory_order_seq_cst);
+    });
+
+    priorCallback.join();
+    lateCallback.join();
+    controlThread.join();
+    if (drainedBeforePriorExit || violation.load(std::memory_order_seq_cst) ||
+        gate.recoveryInProgress() || gate.callbacksInFlight() != 0) {
+      std::cerr << "concurrent callback recovery admitted Engine access across "
+                   "the drain/swap boundary\n";
+      return 1;
+    }
+  }
+  {
+    std::atomic<bool> callbackFailed{false};
+    std::atomic<bool> faulted{false};
+    bool returnedFromCallback = false;
+    skyapo::pipewire::detail::invokeControlCallback(
+        [&] { returnedFromCallback = true; }, callbackFailed, faulted);
+    if (!returnedFromCallback || callbackFailed.load() || faulted.load()) {
+      std::cerr
+          << "successful PipeWire control callback changed failure state\n";
+      return 1;
+    }
+
+    callbackFailed.store(false);
+    faulted.store(false);
+    skyapo::pipewire::detail::invokeControlCallback(
+        [] { throw std::bad_alloc(); }, callbackFailed, faulted);
+    if (!callbackFailed.load() || !faulted.load()) {
+      std::cerr << "PipeWire control callback did not contain bad_alloc\n";
+      return 1;
+    }
+
+    callbackFailed.store(false);
+    faulted.store(false);
+    skyapo::pipewire::detail::invokeControlCallback([] { throw 7; },
+                                                    callbackFailed, faulted);
+    if (!callbackFailed.load() || !faulted.load()) {
+      std::cerr
+          << "PipeWire control callback did not contain unknown exception\n";
+      return 1;
+    }
+  }
   {
     skyapo::pipewire::TransitionMetricsGeneration generations;
     const auto first = generations.graphReplaced();
@@ -46,8 +349,8 @@ int main() {
   }
   realtime::allocations = 0;
   realtime::deallocations = 0;
-  char path[] = "/tmp/skyapo-rt-test-XXXXXX";
-  int fd = mkstemp(path);
+  std::string path = skyapo::test::temporaryPattern("skyapo-rt-test-");
+  int fd = mkstemp(path.data());
   if (fd < 0)
     return 1;
   close(fd);
@@ -117,8 +420,9 @@ int main() {
   }
   unlink(transitionPath.c_str());
   {
-    char routePath[] = "/tmp/skyapo-route-test-XXXXXX";
-    int routeFd = mkstemp(routePath);
+    std::string routePath =
+        skyapo::test::temporaryPattern("skyapo-route-test-");
+    int routeFd = mkstemp(routePath.data());
     if (routeFd < 0)
       return 1;
     close(routeFd);
@@ -139,12 +443,12 @@ int main() {
         route.process(audio.data(), frames);
       }
     }
-    unlink(routePath);
+    unlink(routePath.c_str());
   }
 #ifdef SKYAPO_TEST_LV2
   {
-    char pluginPath[] = "/tmp/skyapo-lv2-test-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath = skyapo::test::temporaryPattern("skyapo-lv2-test-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -170,11 +474,12 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
   {
-    char pluginPath[] = "/tmp/skyapo-lv2-latency-rt-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-lv2-latency-rt-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -206,13 +511,14 @@ int main() {
       if (plugin.pluginLatencyRefreshPending())
         plugin.refreshPluginLatencies();
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
 #endif
 #ifdef SKYAPO_TEST_CLAP
   {
-    char pluginPath[] = "/tmp/skyapo-clap-test-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-clap-test-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -233,11 +539,12 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
   {
-    char pluginPath[] = "/tmp/skyapo-clap-latency-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-clap-latency-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -258,13 +565,14 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
 #endif
 #ifdef SKYAPO_TEST_VST3
   {
-    char pluginPath[] = "/tmp/skyapo-vst3-test-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-vst3-test-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -290,11 +598,12 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
   {
-    char pluginPath[] = "/tmp/skyapo-vst3-latency-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-vst3-latency-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -316,13 +625,14 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    unlink(pluginPath);
+    unlink(pluginPath.c_str());
   }
 #endif
 #ifdef SKYAPO_TEST_VST2
   {
-    char pluginPath[] = "/tmp/skyapo-vst2-test-XXXXXX";
-    int pluginFd = mkstemp(pluginPath);
+    std::string pluginPath =
+        skyapo::test::temporaryPattern("skyapo-vst2-test-");
+    int pluginFd = mkstemp(pluginPath.data());
     if (pluginFd < 0)
       return 1;
     close(pluginFd);
@@ -345,8 +655,9 @@ int main() {
         plugin.process(audio.data(), frames);
       }
     }
-    char dynamicConfig[] = "/tmp/skyapo-vst2-dynamic-rt-XXXXXX";
-    int dynamicFd = mkstemp(dynamicConfig);
+    std::string dynamicConfig =
+        skyapo::test::temporaryPattern("skyapo-vst2-dynamic-rt-");
+    int dynamicFd = mkstemp(dynamicConfig.data());
     if (dynamicFd < 0)
       return 1;
     close(dynamicFd);
@@ -362,12 +673,14 @@ int main() {
       dynamicPlugin.process(dynamicAudio.data(), 64);
     }
     if (!dynamicPlugin.pluginLatencyRefreshPending()) {
-      std::cerr << "VST2 latency-change notification was not raised in RT test\n";
+      std::cerr
+          << "VST2 latency-change notification was not raised in RT test\n";
       return 1;
     }
-    unlink(dynamicConfig);
-    char monoConfig[] = "/tmp/skyapo-vst2-mono-XXXXXX";
-    int monoFd = mkstemp(monoConfig);
+    unlink(dynamicConfig.c_str());
+    std::string monoConfig =
+        skyapo::test::temporaryPattern("skyapo-vst2-mono-");
+    int monoFd = mkstemp(monoConfig.data());
     if (monoFd < 0)
       return 1;
     close(monoFd);
@@ -387,13 +700,13 @@ int main() {
         monoPlugin.process(monoAudio.data(), frames);
       }
     }
-    unlink(monoConfig);
-    unlink(pluginPath);
+    unlink(monoConfig.c_str());
+    unlink(pluginPath.c_str());
   }
 #endif
 #ifdef SKYAPO_TEST_CONVOLUTION
-  char irTemplate[] = "/tmp/skyapo-rt-ir-XXXXXX";
-  int irFd = mkstemp(irTemplate);
+  std::string irTemplate = skyapo::test::temporaryPattern("skyapo-rt-ir-");
+  int irFd = mkstemp(irTemplate.data());
   if (irFd < 0)
     return 1;
   close(irFd);
@@ -401,13 +714,13 @@ int main() {
   info.samplerate = 48000;
   info.channels = 1;
   info.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
-  SNDFILE *ir = sf_open(irTemplate, SFM_WRITE, &info);
+  SNDFILE *ir = sf_open(irTemplate.c_str(), SFM_WRITE, &info);
   if (!ir)
     return 1;
   const float taps[] = {1.0f, 0.25f, -0.125f, 0.0f};
   if (sf_writef_float(ir, taps, 4) != 4) {
     sf_close(ir);
-    unlink(irTemplate);
+    unlink(irTemplate.c_str());
     return 1;
   }
   sf_close(ir);
@@ -428,9 +741,9 @@ int main() {
     }
   }
   unlink(configPath.c_str());
-  unlink(irTemplate);
+  unlink(irTemplate.c_str());
 #endif
-  unlink(path);
+  unlink(path.c_str());
   if (realtime::allocations.load() || realtime::deallocations.load()) {
     std::cerr << "DSP process allocated/freed in realtime scope\n";
     return 1;

@@ -2,3 +2,13 @@
 # unreachable when the process-lifetime LV2 catalog is loaded. Suppress only
 # this known third-party allocation; other SkyAPO/LV2 allocations remain checked.
 leak:lilv_world_load_plugin_classes
+# Qt 6 / FreeType retain process-global font caches until QApplication teardown
+# in the offscreen editor test. The suppressed stack root is in Qt cleanup, not
+# a LinuxAPO-owned allocation.
+leak:QGuiApplicationPrivate::cleanupThreadData
+# Qt's offscreen response-plot paint path also populates Fontconfig's global
+# fallback-font cache. Those allocations remain rooted in Fontconfig/FreeType
+# after QApplication teardown; suppress only their font lookup/initialization
+# entry points, not general Qt or application allocations.
+leak:FcFontMatch
+leak:FT_Init_FreeType

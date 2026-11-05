@@ -6,11 +6,93 @@
 #include <thread>
 
 int main(int argc, char **argv) {
+  const auto selectedOutput = [] {
+    const char *log = std::getenv("SKYAPO_UI_TEST_OUTPUT_DEVICE_LOG");
+    if (log) {
+      std::ifstream input(log);
+      std::string line, selected;
+      while (std::getline(input, line))
+        if (!line.empty())
+          selected = line;
+      if (!selected.empty())
+        return selected;
+    }
+    return std::string("fixture.sink");
+  };
+  const auto selectedInput = [] {
+    const char *log = std::getenv("SKYAPO_UI_TEST_DEVICE_LOG");
+    if (log) {
+      std::ifstream input(log);
+      std::string line, selected;
+      while (std::getline(input, line))
+        if (!line.empty())
+          selected = line;
+      if (!selected.empty())
+        return selected;
+    }
+    return std::string("fixture.usb-mic");
+  };
+  if (argc == 4 && std::string(argv[1]) == "device" &&
+      std::string(argv[2]) == "output" && std::string(argv[3]) == "list") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    const auto selected = selectedOutput();
+    std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+                 "STABLE PROPERTY\tDEFAULT\n"
+                 "51\tfixture.sink\tSelected Test Playback\t"
+              << (selected == "fixture.sink" ? "yes" : "")
+              << "\t2\t48000\tdevice.serial\tyes\n"
+                 "52\tfixture.sink.alt\tAlternate Test Playback\t"
+              << (selected == "fixture.sink.alt" ? "yes" : "")
+              << "\t2\t44100\tdevice.serial\tno\n";
+    return 0;
+  }
+  if (argc == 4 && std::string(argv[1]) == "device" &&
+      std::string(argv[2]) == "output" && std::string(argv[3]) == "current") {
+    std::cout << selectedOutput()
+              << " (system default; fixture daemon not running)\n"
+                 "Daemon: not running; preference applies at next start.\n";
+    return 0;
+  }
+  if (argc == 3 && std::string(argv[1]) == "device" &&
+      std::string(argv[2]) == "current") {
+    const auto selected = selectedInput();
+    if (const char *fixture = std::getenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE")) {
+      std::ifstream input(fixture);
+      const std::string contents((std::istreambuf_iterator<char>(input)),
+                                 std::istreambuf_iterator<char>());
+      if (contents.find("\t" + selected + "\t") == std::string::npos) {
+        std::cout << selected << " (unavailable)\n";
+        return 0;
+      }
+    }
+    std::cout << selected << '\n';
+    return 0;
+  }
+  if (argc == 5 && std::string(argv[1]) == "device" &&
+      std::string(argv[2]) == "output" && std::string(argv[3]) == "set") {
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    if (const char *log = std::getenv("SKYAPO_UI_TEST_OUTPUT_DEVICE_LOG")) {
+      std::ofstream output(log, std::ios::app);
+      output << argv[4] << '\n';
+    }
+    std::cout << "Saved output preference " << argv[4]
+              << ". It will apply after the daemon restarts its audio graph.\n";
+    return 0;
+  }
+  if (argc == 2 && std::string(argv[1]) == "restart") {
+    if (const char *log = std::getenv("SKYAPO_UI_TEST_RESTART_LOG")) {
+      std::ofstream output(log, std::ios::app);
+      output << "restart\n";
+    }
+    std::cout << "skyapod restarted\n";
+    return 0;
+  }
   if (argc == 3 && std::string(argv[1]) == "plugin" &&
       std::string(argv[2]) == "list") {
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
     std::cout << "LV2 plugins discovered: 1\n"
-                 "LV2\thttps://example.test/plugins/gain\tTest Gain\n";
+                 "LV2\thttps://example.test/plugins/gain\tTest Gain\n"
+                 "VST3\ttest.vst3.uid\tTest VST3 Gain\n";
     return 0;
   }
   if (argc == 4 && std::string(argv[1]) == "plugin" &&
@@ -88,6 +170,11 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && std::string(argv[1]) == "status") {
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    if (const char *running = std::getenv("SKYAPO_UI_TEST_DAEMON_RUNNING");
+        running && std::string(running) == "1") {
+      std::cout << "Daemon: streaming\nSample rate: 48000 Hz\nChannels: 2\n";
+      return 0;
+    }
     if (const char *format = std::getenv("SKYAPO_UI_TEST_STREAMING_FORMAT")) {
       const std::string value(format);
       const auto separator = value.find(':');

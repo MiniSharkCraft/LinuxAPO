@@ -26,9 +26,9 @@ _CPack_Packages/
 *.gcno
 *.profraw
 *.profdata
-core
-core.*
-*.core
+/core
+/core.*
+/*.core
 
 # Local package staging and generated release archives
 /packaging/skyapo/
@@ -39,6 +39,9 @@ core.*
 /packaging/*.rpm
 /packaging/*.tar.zst
 /release-artifacts/
+# Owner-supplied application artwork pending redistribution clearance
+/src/ui/resources/icons/hicolor/
+/example-windows/
 /*.pkg.tar.*
 /*.deb
 /*.rpm

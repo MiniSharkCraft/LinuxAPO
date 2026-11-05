@@ -89,6 +89,7 @@ enum class Command {
   Stop,
   SetPluginParameter,
   SetPluginBypass,
+  RefreshOutput,
   Invalid
 };
 struct DecodedRequest {
@@ -106,7 +107,7 @@ struct DecodedResponse {
 
 inline std::string requestFrame(const std::string &command) {
   if (command != "STATUS" && command != "RELOAD" && command != "STOP" &&
-      command.rfind("PLUGIN_SET ", 0) != 0 &&
+      command != "OUTPUT_REFRESH" && command.rfind("PLUGIN_SET ", 0) != 0 &&
       command.rfind("PLUGIN_BYPASS ", 0) != 0)
     throw std::runtime_error("unsupported daemon command");
   const std::string frame = "SKYAPO/" + std::to_string(ProtocolVersion) +
@@ -162,6 +163,8 @@ inline DecodedRequest decodeRequest(const std::string &frame) {
     return {Command::Reload, {}};
   if (command == "STOP")
     return {Command::Stop, {}};
+  if (command == "OUTPUT_REFRESH")
+    return {Command::RefreshOutput, {}};
   constexpr std::string_view pluginPrefix = "PLUGIN_SET ";
   if (command.rfind(pluginPrefix.data(), 0) == 0) {
     const auto payload = command.substr(pluginPrefix.size());
@@ -324,6 +327,13 @@ inline DeviceSelection deviceSelection() {
   std::getline(f, selection.stableProperty);
   return selection;
 }
+inline DeviceSelection outputDeviceSelection() {
+  std::ifstream f(configDir() / "output-device");
+  DeviceSelection selection;
+  std::getline(f, selection.name);
+  std::getline(f, selection.stableProperty);
+  return selection;
+}
 inline std::string device() {
   return deviceSelection().name;
 }
@@ -347,6 +357,38 @@ inline void select(const std::string &name,
       throw std::runtime_error("cannot save device");
   }
   std::filesystem::rename(temp, path);
+}
+inline void selectOutput(const std::string &name,
+                         const std::string &stableProperty = {}) {
+  if (name.empty() || name.find_first_of("\r\n") != std::string::npos ||
+      stableProperty.find_first_of("\r\n") != std::string::npos)
+    throw std::runtime_error("output device selection is invalid");
+  if (stableProperty.size() > 4096)
+    throw std::runtime_error("output device identity is too long to persist");
+  std::filesystem::create_directories(configDir());
+  auto path = configDir() / "output-device";
+  auto temp = path.string() + ".tmp." + std::to_string(getpid());
+  {
+    std::ofstream f(temp);
+    f << name << '\n' << stableProperty << '\n';
+    if (!f)
+      throw std::runtime_error("cannot save output device");
+  }
+  std::filesystem::rename(temp, path);
+}
+inline void restoreOutputSelection(const DeviceSelection &selection) {
+  if (selection.name.empty()) {
+    if (!selection.stableProperty.empty())
+      throw std::runtime_error(
+          "cannot restore an output identity without a node name");
+    std::error_code error;
+    std::filesystem::remove(configDir() / "output-device", error);
+    if (error)
+      throw std::runtime_error("cannot clear output device selection: " +
+                               error.message());
+    return;
+  }
+  selectOutput(selection.name, selection.stableProperty);
 }
 inline std::string config() {
   auto dir = configDir();

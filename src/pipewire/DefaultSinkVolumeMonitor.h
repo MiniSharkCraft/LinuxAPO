@@ -58,6 +58,11 @@ public:
 
   const DefaultSinkVolumeSnapshot &snapshot() const noexcept;
 
+  /** Override the metadata-selected sink, e.g. the physical target behind a
+   * SkyAPO virtual playback node. Empty restores tracking the system default.
+   */
+  void setSinkOverride(std::string stableName);
+
   /** Parse an SPA_PARAM_Props pod. Public for isolated native-pod tests. */
   static bool parseProps(const spa_pod *pod,
                          DefaultSinkVolumeSnapshot &snapshot) noexcept;

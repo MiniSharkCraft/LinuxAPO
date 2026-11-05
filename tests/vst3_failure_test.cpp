@@ -1,5 +1,6 @@
 #include "VST3PluginHost.h"
 #include "Engine.h"
+#include "TestTemp.h"
 
 #include <array>
 #include <cstdlib>
@@ -7,10 +8,9 @@
 #include <string>
 #include <unistd.h>
 
-static bool engineReportsFailure() {
-  constexpr const char *uid = "534B5941504F00010000000000000002";
-  char path[] = "/tmp/skyapo-vst3-failure-XXXXXX";
-  const int fd = mkstemp(path);
+static bool engineReportsFailure(const char *uid) {
+  std::string path = skyapo::test::temporaryPattern("skyapo-vst3-failure-");
+  const int fd = mkstemp(path.data());
   if (fd < 0)
     return false;
   const std::string config =
@@ -18,13 +18,13 @@ static bool engineReportsFailure() {
   const auto written = write(fd, config.data(), config.size());
   close(fd);
   if (written != static_cast<ssize_t>(config.size())) {
-    unlink(path);
+    unlink(path.c_str());
     return false;
   }
 
   Engine engine(48000, 2, 64, {L"L", L"R"});
   engine.loadConfig(path);
-  unlink(path);
+  unlink(path.c_str());
   std::array<float, 128> block{};
   block.fill(0.25f);
   engine.process(block.data(), 64);
@@ -68,8 +68,37 @@ int main() {
         std::cerr << "latched VST3 error did not silence subsequent block\n";
         return 1;
       }
-  if (!engineReportsFailure()) {
+  if (!engineReportsFailure("534B5941504F00010000000000000002")) {
     std::cerr << "Engine did not report the failed VST3 plugin/config line\n";
+    return 1;
+  }
+
+  auto throwing =
+      host.create("534B5941504F00010000000000000005", 48000, 64, {L"L", L"R"});
+  outputLeft.fill(9.0f);
+  outputRight.fill(9.0f);
+  throwing->process(output, input, 8);
+  if (!throwing->processingFailed()) {
+    std::cerr << "VST3 process exception was not contained and latched\n";
+    return 1;
+  }
+  for (const auto *channel : {&outputLeft, &outputRight})
+    for (float sample : *channel)
+      if (sample != 0.0f) {
+        std::cerr << "VST3 process exception did not silence current block\n";
+        return 1;
+      }
+  outputLeft.fill(9.0f);
+  outputRight.fill(9.0f);
+  throwing->process(output, input, 8);
+  for (const auto *channel : {&outputLeft, &outputRight})
+    for (float sample : *channel)
+      if (sample != 0.0f) {
+        std::cerr << "latched VST3 exception did not silence later blocks\n";
+        return 1;
+      }
+  if (!engineReportsFailure("534B5941504F00010000000000000005")) {
+    std::cerr << "Engine did not report the thrown VST3 plugin/config line\n";
     return 1;
   }
   std::cout << "VST3 error latched; current and subsequent blocks are silent\n";

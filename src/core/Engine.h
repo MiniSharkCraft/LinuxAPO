@@ -4,12 +4,17 @@
 #include "helpers/MemoryHelper.h"
 #include <filesystem>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+struct ConfigSourceSnapshot {
+  std::map<std::filesystem::path, std::vector<std::string>> files;
+};
 
 class FilterConfiguration;
 namespace mup {
@@ -20,12 +25,15 @@ class Engine {
 public:
   struct KnownAudioBufferPayload {
     uint64_t filterConfigurationScratchBytes{};
+    uint64_t iirFilterBytes{};
+    uint64_t convolutionEstimatedBytes{};
     uint64_t eapoDelayRingBytes{};
     uint64_t pdcRingCapacityBytes{};
     uint64_t pluginBypassRingCapacityBytes{};
 
     uint64_t totalBytes() const noexcept {
-      return filterConfigurationScratchBytes + eapoDelayRingBytes +
+      return filterConfigurationScratchBytes + iirFilterBytes +
+             convolutionEstimatedBytes + eapoDelayRingBytes +
              pdcRingCapacityBytes + pluginBypassRingCapacityBytes;
     }
   };
@@ -60,9 +68,22 @@ public:
          std::vector<std::wstring> channelNames = {},
          bool allowPendingEndpointVolume = false,
          bool enablePluginFilters = true, std::wstring deviceMatchText = {},
-         std::wstring deviceName = {}, std::wstring connectionName = {});
+         std::wstring deviceName = {}, std::wstring connectionName = {},
+         std::wstring processingStage = L"capture");
   void loadConfig(const std::string &path);
+  // Runtime graphs may retain the exact accepted config sources so a later
+  // PipeWire format rebuild does not re-read a broken or half-edited file.
+  void loadConfig(const std::string &path, bool captureSources);
+  void loadConfig(const std::string &path,
+                  std::shared_ptr<const ConfigSourceSnapshot> sources);
+  std::shared_ptr<const ConfigSourceSnapshot>
+  configSourceSnapshot() const noexcept {
+    return configSources;
+  }
   void process(float *interleaved, unsigned frames);
+  // Control-thread only. Run a detached candidate on silence and service any
+  // initial/dynamic plugin latency notifications before publishing it.
+  void validateForActivation();
   // Run both upstream configurations on the same unmodified input and apply
   // Equalizer APO's native cosine graph transition. The valid path allocates
   // no memory; callers must prevalidate matching formats and buffer bounds.
@@ -81,10 +102,15 @@ public:
   unsigned maxFrames() const {
     return maxFrameCount;
   }
-  // Control-thread diagnostic. Reports known float-sample payload owned by
-  // FilterConfiguration, upstream DelayFilter, Linux PDC rings, and
-  // SkyAPO-owned plugin dry-bypass rings; excludes plugin-private buffers,
-  // allocator/object overhead, and PipeWire/runtime scratch.
+  bool supportsFrameCount(unsigned frames) const noexcept {
+    return frames != 0 && frames <= maxFrameCount &&
+           (!fixedBlock || frames == maxFrameCount);
+  }
+  // Control-thread diagnostic. Reports known buffer allocations owned by
+  // FilterConfiguration, upstream IIR/Delay filters, estimated convolution
+  // storage, Linux PDC rings, and SkyAPO-owned plugin dry-bypass rings;
+  // excludes plugin-private buffers, allocator/object overhead, and
+  // PipeWire/runtime scratch.
   KnownAudioBufferPayload knownAudioBufferPayload() const noexcept;
   bool requiresFixedBlock() const {
     return fixedBlock;
@@ -123,6 +149,7 @@ private:
     unsigned line;
     std::string directive;
     std::vector<IncludeSite> includeChain;
+    unsigned iirOrder{};
   };
   using FilterList = std::vector<ParsedFilter>;
   struct FilterNode {
@@ -138,6 +165,9 @@ private:
     // Float samples allocated by fixed-latency filters; shares the graph ring
     // budget with plugin bypass rings and PDC compensation.
     uint64_t fixedBufferSamples{};
+    // Estimated upstream IIR coefficient and per-channel state allocations.
+    uint64_t iirMemoryBytes{};
+    uint64_t convolutionEstimatedBytes{};
     // Host-owned dry-bypass rings also consume the graph's shared ring budget.
     uint64_t pluginBypassBufferSamples{};
     bool inPlace;
@@ -149,7 +179,14 @@ private:
                        std::vector<std::filesystem::path> &attemptedFiles,
                        std::vector<IncludeSite> &includeChain,
                        bool &stageActive, mup::ParserX *expressionParser,
-                       std::vector<ConfigNotice> &notices);
+                       std::vector<ConfigNotice> &notices,
+                       uint64_t &parsedIirCoefficientBytes,
+                       const ConfigSourceSnapshot *sourceSnapshot,
+                       ConfigSourceSnapshot *capturedSources);
+  void
+  loadConfigImpl(const std::string &path,
+                 std::shared_ptr<const ConfigSourceSnapshot> sourceSnapshot,
+                 bool captureSources);
   std::vector<FilterNode>
   buildGraph(FilterList &candidate,
              std::vector<std::unique_ptr<IFilter, FilterDeleter>> &generated);
@@ -160,12 +197,18 @@ private:
   std::wstring deviceMatchText;
   std::wstring deviceName;
   std::wstring connectionName;
+  std::wstring processingStage;
   std::vector<std::string> descriptions;
   std::vector<std::filesystem::path> loadedConfigFiles;
   std::vector<ConfigNotice> loadedConfigNotices;
+  std::shared_ptr<const ConfigSourceSnapshot> configSources;
   std::vector<std::unique_ptr<IFilterFactory>> factories;
   std::vector<std::wstring> channelNames;
   std::vector<FilterNode> graph;
+  // A failed dynamic-latency refresh may have changed plugin internals even
+  // though the PDC schedule itself is transactional. Do not process that graph
+  // again; a successfully loaded configuration creates the recovery boundary.
+  bool latencyPlanValid{true};
   unsigned allChannelCount{};
   std::unique_ptr<FilterConfiguration, ConfigurationDeleter> configuration;
 };

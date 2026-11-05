@@ -31,7 +31,8 @@ jobs:
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
             libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
-            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev wireplumber \
+            dbus-daemon
 
       - name: Configure
         run: >-
@@ -60,7 +61,7 @@ jobs:
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
             libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
-            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev wireplumber
 
       - name: Configure ASan/UBSan core suite
         run: >-
@@ -92,7 +93,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             cmake git libsndfile pipewire fftw lilv muparser lv2 \
-            qt6-base pkgconf hicolor-icon-theme wireplumber namcap
+            qt6-base pkgconf hicolor-icon-theme polkit wireplumber namcap
 
       - name: Build and test Arch packages
         run: |
@@ -112,8 +113,6 @@ jobs:
           fi
           namcap "$GITHUB_WORKSPACE/packaging/PKGBUILD"
           namcap "$GITHUB_WORKSPACE/packaging/${package[0]}"
-          python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
-            --render-test-binary "$render_test" "${package[0]}"
 
       - name: Stage package and renderer harness for clean-root test
         run: |
@@ -159,7 +158,11 @@ jobs:
           path: artifacts
 
       - name: Install only clean-root test tooling
-        run: pacman -Syu --noconfirm --needed python systemd
+        # Keep the hicolor runtime dependency absent until SkyAPO is installed.
+        run: >-
+          pacman -Syu --noconfirm --needed
+          --assume-installed hicolor-icon-theme=1
+          python systemd gtk-update-icon-cache desktop-file-utils
 
       - name: Confirm SkyAPO runtime dependencies are initially absent
         run: |
@@ -186,5 +189,6 @@ jobs:
             exit 1
           fi
           chmod +x "$render_test"
-          python packaging/container_fresh_install_test.py \
+          SKYAPO_ALLOW_DISPOSABLE_PACMAN_TEST=1 \
+            python packaging/container_fresh_install_test.py \
             --render-test-binary "$render_test" "${package[0]}"

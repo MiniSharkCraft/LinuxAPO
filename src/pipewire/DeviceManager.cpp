@@ -15,6 +15,7 @@
 namespace {
 constexpr const char *DefaultMetadataName = "default";
 constexpr const char *DefaultSourceKey = "default.audio.source";
+constexpr const char *DefaultSinkKey = "default.audio.sink";
 
 std::string prop(const spa_dict *p, const char *k) {
   auto *v = spa_dict_lookup(p, k);
@@ -27,12 +28,15 @@ struct State {
     pw_node *node{};
     spa_hook hook{};
     State *state{};
+    bool sink{};
   };
   pw_registry *registry{};
   pw_metadata *metadata{};
   uint32_t metadataId{SPA_ID_INVALID};
   std::string defaultSourceName;
   bool defaultSourceMetadataSeen = false;
+  std::string defaultSinkName;
+  bool defaultSinkMetadataSeen = false;
   std::vector<std::unique_ptr<NodeBinding>> nodeBindings;
   spa_hook metadataHook{};
   int done = -1;
@@ -42,15 +46,19 @@ int defaultSourceMetadataProperty(void *metadataData, uint32_t subject,
                                   const char *key, const char *,
                                   const char *value) {
   auto &state = *static_cast<State *>(metadataData);
-  if (subject != 0 || !key || std::strcmp(key, DefaultSourceKey) != 0)
+  if (subject != 0 || !key)
     return 0;
-  state.defaultSourceMetadataSeen = true;
   std::string name;
-  if (skyapo::pipewire::DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
-          value, name))
-    state.defaultSourceName = std::move(name);
-  else
-    state.defaultSourceName.clear();
+  const bool valid =
+      skyapo::pipewire::DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
+          value, name);
+  if (std::strcmp(key, DefaultSourceKey) == 0) {
+    state.defaultSourceMetadataSeen = true;
+    state.defaultSourceName = valid ? std::move(name) : std::string{};
+  } else if (std::strcmp(key, DefaultSinkKey) == 0) {
+    state.defaultSinkMetadataSeen = true;
+    state.defaultSinkName = valid ? std::move(name) : std::string{};
+  }
   return 0;
 }
 const pw_metadata_events metadataEvents = {PW_VERSION_METADATA_EVENTS,
@@ -60,11 +68,12 @@ void nodeInfo(void *data, const pw_node_info *info) {
   if (!info || !info->props)
     return;
   auto &binding = *static_cast<State::NodeBinding *>(data);
-  auto &sources = binding.state->devices.sources;
+  auto &devices = binding.sink ? binding.state->devices.sinks
+                               : binding.state->devices.sources;
   const auto device = std::find_if(
-      sources.begin(), sources.end(),
+      devices.begin(), devices.end(),
       [&](const AudioDevice &candidate) { return candidate.id == binding.id; });
-  if (device == sources.end())
+  if (device == devices.end())
     return;
   const auto identity = skyapo::pipewire::deviceIdentityFromProps(info->props);
   if (!identity.serial.empty())
@@ -98,8 +107,10 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
     }
     return;
   }
-  if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
-      prop(props, PW_KEY_MEDIA_CLASS) == "Audio/Source") {
+  const auto mediaClass = prop(props, PW_KEY_MEDIA_CLASS);
+  const bool isSource = mediaClass == "Audio/Source";
+  const bool isSink = mediaClass == "Audio/Sink";
+  if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0 && (isSource || isSink)) {
     AudioDevice device{id, prop(props, PW_KEY_NODE_NAME),
                        prop(props, PW_KEY_NODE_DESCRIPTION), 0, 0, {}};
     device.identity = skyapo::pipewire::deviceIdentityFromProps(props);
@@ -114,9 +125,11 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
       // Some session managers publish nonnumeric metadata; port enumeration
       // below supplies a reliable channel count fallback.
     }
-    s.devices.sources.push_back(std::move(device));
+    auto &devices = isSink ? s.devices.sinks : s.devices.sources;
+    devices.push_back(std::move(device));
     auto binding = std::make_unique<State::NodeBinding>();
     binding->id = id;
+    binding->sink = isSink;
     binding->state = &s;
     binding->node = static_cast<pw_node *>(pw_registry_bind(
         s.registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0));
@@ -133,10 +146,9 @@ void global(void *data, uint32_t id, uint32_t, const char *type, uint32_t,
     const auto nodeId = skyapo::pipewire::parseNodeId(
         prop(props, PW_KEY_NODE_ID));
     if (nodeId)
-      s.devices.ports.push_back({id, *nodeId,
-                                 prop(props, PW_KEY_PORT_DIRECTION),
-                                 prop(props, PW_KEY_AUDIO_CHANNEL),
-                                 prop(props, PW_KEY_PORT_NAME)});
+      s.devices.ports.push_back(
+          {id, *nodeId, prop(props, PW_KEY_PORT_DIRECTION),
+           prop(props, PW_KEY_AUDIO_CHANNEL), prop(props, PW_KEY_PORT_NAME)});
   }
 }
 void done(void *d, uint32_t id, int seq) {
@@ -219,16 +231,24 @@ Devices enumerateDevices() {
   pw_deinit();
   if (!ok)
     throw std::runtime_error("PipeWire enumeration failed or timed out");
-  for (auto &device : s.devices.sources)
-    if (!device.channels)
-      device.channels = std::count_if(
-          s.devices.ports.begin(), s.devices.ports.end(),
-          [&](const AudioPort &port) {
-            return port.node == device.id && port.direction == "out";
-          });
+  const auto fillChannelCount = [&](auto &devices, const char *direction) {
+    for (auto &device : devices)
+      if (!device.channels)
+        device.channels = std::count_if(
+            s.devices.ports.begin(), s.devices.ports.end(),
+            [&](const AudioPort &port) {
+              return port.node == device.id && port.direction == direction;
+            });
+  };
+  fillChannelCount(s.devices.sources, "out");
+  fillChannelCount(s.devices.sinks, "in");
   markDefaultCaptureSource(
       s.devices, s.defaultSourceMetadataSeen && !s.defaultSourceName.empty()
                      ? std::optional<std::string>(s.defaultSourceName)
+                     : std::nullopt);
+  markDefaultPlaybackSink(
+      s.devices, s.defaultSinkMetadataSeen && !s.defaultSinkName.empty()
+                     ? std::optional<std::string>(s.defaultSinkName)
                      : std::nullopt);
   return s.devices;
 }

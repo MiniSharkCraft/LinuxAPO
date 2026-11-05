@@ -197,6 +197,9 @@ void printUsage(std::ostream &out) {
          "  device list                    List PipeWire capture devices\n"
          "  device set <id-or-name>        Select a capture device\n"
          "  device current                 Show the selected capture device\n"
+         "  device output list             List PipeWire playback sinks\n"
+         "  device output set <id-or-name> Select a playback sink\n"
+         "  device output current          Show selected playback sink\n"
          "  config show                    Print the active configuration\n"
          "  config check <file>            Validate a configuration\n"
          "  config check --json <file>     Validate and emit JSON diagnostics\n"
@@ -632,12 +635,26 @@ void stopDaemon() {
     return;
   }
   std::cout << settings::daemonRequest("STOP\n");
+  std::string lastProbeError;
   for (unsigned attempt = 0; attempt < 30; ++attempt) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (!daemonReachable())
-      return;
+    try {
+      if (!daemonReachable())
+        return;
+      lastProbeError.clear();
+    } catch (const std::exception &error) {
+      // A probe can connect in the short interval after STOP was acknowledged
+      // but before the daemon has closed and unlinked its socket. Treat this as
+      // an in-progress shutdown and keep waiting; report it only if the daemon
+      // still has not stopped at the deadline.
+      lastProbeError = error.what();
+    }
   }
-  throw std::runtime_error("skyapod did not stop within 3 seconds");
+  throw std::runtime_error(lastProbeError.empty()
+                               ? "skyapod did not stop within 3 seconds"
+                               : "skyapod did not stop within 3 seconds; last "
+                                 "status probe failed: " +
+                                     lastProbeError);
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -859,6 +876,114 @@ int main(int argc, char **argv) {
       }
 #ifdef SKYAPO_HAVE_PIPEWIRE
       auto ds = enumerateDevices();
+      if (action == "output" && argc == 4 && std::string(argv[3]) == "list") {
+        const auto selection = settings::outputDeviceSelection();
+        std::cout
+            << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+               "STABLE PROPERTY\tDEFAULT\n";
+        for (const auto &sink : ds.sinks) {
+          std::cout
+              << sink.id << '\t' << sink.name << '\t' << sink.description
+              << '\t'
+              << (isSelectedDevice(sink, selection.name,
+                                   selection.stableProperty)
+                      ? "yes"
+                      : "")
+              << '\t'
+              << (sink.channels ? std::to_string(sink.channels) : "unknown")
+              << '\t'
+              << (sink.sampleRate ? std::to_string(sink.sampleRate) : "unknown")
+              << '\t' << sink.identity.stableProperty() << '\t'
+              << (sink.isDefault.has_value() ? (*sink.isDefault ? "yes" : "no")
+                                             : "unknown")
+              << '\n';
+        }
+        return 0;
+      }
+      if (action == "output" && argc == 4 &&
+          std::string(argv[3]) == "current") {
+        const auto selection = settings::outputDeviceSelection();
+        const auto status = settings::queryStatus();
+        const bool daemonRunning =
+            !status.empty() &&
+            status.find("Daemon: not reachable") == std::string::npos;
+        const auto printRuntimePlayback = [&] {
+          if (!daemonRunning)
+            return;
+          for (const auto *label :
+               {"Playback node", "Playback target", "Playback graph",
+                "Playback format", "Playback filters", "Playback error"}) {
+            if (const auto value = statusValue(status, label))
+              std::cout << label << ": " << *value << '\n';
+          }
+        };
+        if (selection.name.empty()) {
+          if (daemonRunning) {
+            if (const auto target = statusValue(status, "Playback target")) {
+              std::cout << *target << " (runtime target)\n";
+              printRuntimePlayback();
+              return 0;
+            }
+          }
+          const auto defaultSink = std::find_if(
+              ds.sinks.begin(), ds.sinks.end(), [](const AudioDevice &sink) {
+                return sink.isDefault == std::optional<bool>(true) &&
+                       sink.name != "skyapo.playback";
+              });
+          if (defaultSink != ds.sinks.end())
+            std::cout << defaultSink->name << " (system default)\n";
+          else
+            std::cout << "No playback sink selected; system default unknown\n";
+          if (!daemonRunning)
+            std::cout << "Daemon: not running; current/default sink applies "
+                         "at next start.\n";
+          else
+            printRuntimePlayback();
+          return 0;
+        }
+        const auto *selected =
+            findSelectedSink(ds, selection.name, selection.stableProperty);
+        std::cout << (selected ? selected->name
+                               : selection.name + " (unavailable)")
+                  << '\n';
+        if (!daemonRunning)
+          std::cout
+              << "Daemon: not running; preference applies at next start.\n";
+        else
+          printRuntimePlayback();
+        return 0;
+      }
+      if (action == "output" && argc == 5 && std::string(argv[3]) == "set") {
+        for (const auto &sink : ds.sinks)
+          if (sink.name == argv[4] || std::to_string(sink.id) == argv[4]) {
+            const auto previousSelection = settings::outputDeviceSelection();
+            const auto runtimeStatus = settings::queryStatus();
+            if (runtimeStatus.find("Daemon: not reachable") ==
+                std::string::npos) {
+              settings::selectOutput(sink.name, sink.identity.stableProperty());
+              try {
+                std::cout << settings::daemonRequest("OUTPUT_REFRESH\n");
+              } catch (const std::exception &error) {
+                try {
+                  settings::restoreOutputSelection(previousSelection);
+                } catch (const std::exception &restoreError) {
+                  throw std::runtime_error(
+                      std::string(error.what()) +
+                      "; additionally could not restore the previous output "
+                      "preference: " +
+                      restoreError.what());
+                }
+                throw;
+              }
+            } else {
+              settings::selectOutput(sink.name, sink.identity.stableProperty());
+              std::cout << "Saved output preference " << sink.name
+                        << ". It will apply when skyapod starts.\n";
+            }
+            return 0;
+          }
+        throw std::runtime_error("playback sink not found");
+      }
       if (action == "list") {
         const auto selection = settings::deviceSelection();
         std::cout << "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\t"

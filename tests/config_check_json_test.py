@@ -45,7 +45,7 @@ def main():
 
         staged = root / "staged.txt"
         staged.write_text(
-            "Stage: post-mix\nPreamp: 48 dB\n"
+            "Stage: pre-mix\nPreamp: 48 dB\n"
             "Stage: capture\nPreamp: -6 dB\n"
         )
         staged_json = run_check(executable, staged)
@@ -58,10 +58,8 @@ def main():
             {
                 "file": str(staged.resolve()),
                 "line": 1,
-                "message": (
-                    "pre-mix/post-mix processing is unavailable in the "
-                    "PipeWire capture graph; filters in those stages are ignored"
-                ),
+                "message": "pre-mix processing is unavailable in the PipeWire "
+                "graph; filters in that stage are ignored",
             }
         ]
         staged_text = subprocess.run(
@@ -72,7 +70,7 @@ def main():
         )
         assert "Valid config: 1 filters\n" == staged_text.stdout
         assert "Warning: " + str(staged.resolve()) + ":1:" in staged_text.stderr
-        assert "filters in those stages are ignored" in staged_text.stderr
+        assert "filters in that stage are ignored" in staged_text.stderr
 
         bad = root / 'bad "config" \\ file.txt'
         bad.write_text('Preamp: 0 dB\nUnknownCommand: "bad" \\\n')
