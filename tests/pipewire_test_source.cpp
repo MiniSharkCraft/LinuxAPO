@@ -287,7 +287,7 @@ struct Source {
     pw_core_add_listener(core, &coreHook, &coreEvents, this);
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGINT, signal, this);
     pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGTERM, signal, this);
-    struct sigaction userSignalAction{};
+    struct sigaction userSignalAction {};
     userSignalAction.sa_handler = userSignalHandler;
     sigemptyset(&userSignalAction.sa_mask);
     if (sigaction(SIGUSR1, &userSignalAction, nullptr) < 0 ||
