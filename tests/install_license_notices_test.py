@@ -47,6 +47,10 @@ def main():
             qt_license = licenses / "Qt-LGPL-3.0-License.txt"
             if not qt_license.is_file() or "GNU LESSER GENERAL PUBLIC LICENSE" not in qt_license.read_text(errors="replace"):
                 raise RuntimeError(f"missing/incorrect Qt LGPL license: {qt_license}")
+            policy = prefix / "share/polkit-1/actions/org.linuxapo.device-selector.policy"
+            policy_text = policy.read_text(errors="replace") if policy.is_file() else ""
+            if 'id="org.linuxapo.device-selector.open"' not in policy_text or "auth_admin" not in policy_text:
+                raise RuntimeError(f"missing/incorrect Device Selector PolicyKit action: {policy}")
         notice = docs / "THIRD_PARTY_NOTICES.md"
         if not notice.is_file() or "FST-based VST2" not in notice.read_text():
             raise RuntimeError("third-party notice inventory was not installed")

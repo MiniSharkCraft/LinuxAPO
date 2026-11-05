@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -19,14 +20,19 @@ std::atomic<bool> lastProcessedBypass{false};
 
 class TestGain final : public SingleComponentEffect {
 public:
-  explicit TestGain(bool failFirstProcess = false)
-      : failFirstProcess(failFirstProcess) {}
+  explicit TestGain(bool failFirstProcess = false,
+                    bool throwFromProcess = false)
+      : failFirstProcess(failFirstProcess), throwFromProcess(throwFromProcess) {
+  }
 
   static FUnknown *create(void *) {
     return static_cast<IAudioProcessor *>(new TestGain);
   }
   static FUnknown *createErrorOnce(void *) {
     return static_cast<IAudioProcessor *>(new TestGain(true));
+  }
+  static FUnknown *createThrows(void *) {
+    return static_cast<IAudioProcessor *>(new TestGain(false, true));
   }
 
   tresult PLUGIN_API initialize(FUnknown *context) override {
@@ -81,6 +87,13 @@ public:
   }
 
   tresult PLUGIN_API process(ProcessData &data) override {
+    if (throwFromProcess) {
+      if (data.numOutputs > 0 && data.outputs &&
+          data.outputs[0].numChannels > 0 && data.outputs[0].channelBuffers32 &&
+          data.numSamples > 0)
+        data.outputs[0].channelBuffers32[0][0] = 123.0f;
+      throw std::runtime_error("fixture VST3 process exception");
+    }
     if (failFirstProcess && !failedOnce) {
       failedOnce = true;
       return kResultFalse;
@@ -122,6 +135,7 @@ private:
   float gain = 0.5f;
   bool bypassed{};
   bool failFirstProcess = false;
+  bool throwFromProcess = false;
   bool failedOnce = false;
 };
 
@@ -175,8 +189,14 @@ private:
 
 class TestDynamicLatency final : public SingleComponentEffect {
 public:
+  explicit TestDynamicLatency(bool throwOnLatencyUpdate = false)
+      : throwOnLatencyUpdate(throwOnLatencyUpdate) {}
+
   static FUnknown *create(void *) {
     return static_cast<IAudioProcessor *>(new TestDynamicLatency);
+  }
+  static FUnknown *createNonstandardLatencyException(void *) {
+    return static_cast<IAudioProcessor *>(new TestDynamicLatency(true));
   }
 
   tresult PLUGIN_API initialize(FUnknown *context) override {
@@ -213,6 +233,8 @@ public:
   }
 
   uint32 PLUGIN_API getLatencySamples() override {
+    if (throwOnLatencyUpdate && latency == 64)
+      throw 7;
     return latency;
   }
 
@@ -241,6 +263,7 @@ private:
   uint32 cursor{};
   bool notified{};
   bool changeLatencyOnNextActivation{};
+  bool throwOnLatencyUpdate{};
 };
 } // namespace
 
@@ -257,6 +280,10 @@ DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000002),
            PClassInfo::kManyInstances, kVstAudioEffectClass,
            "SkyAPO Test Error Once", Vst::kDistributable, "Fx", "1.0.0",
            kVstVersionString, TestGain::createErrorOnce)
+DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000005),
+           PClassInfo::kManyInstances, kVstAudioEffectClass,
+           "SkyAPO Test Throws", Vst::kDistributable, "Fx", "1.0.0",
+           kVstVersionString, TestGain::createThrows)
 DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000003),
            PClassInfo::kManyInstances, kVstAudioEffectClass,
            "SkyAPO Test 64-Sample Delay", Vst::kDistributable, "Fx", "1.0.0",
@@ -265,4 +292,9 @@ DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000004),
            PClassInfo::kManyInstances, kVstAudioEffectClass,
            "SkyAPO Test Dynamic Latency", Vst::kDistributable, "Fx", "1.0.0",
            kVstVersionString, TestDynamicLatency::create)
+DEF_CLASS2(INLINE_UID(0x534B5941, 0x504F0001, 0x00000000, 0x00000006),
+           PClassInfo::kManyInstances, kVstAudioEffectClass,
+           "SkyAPO Test Nonstandard Latency Exception", Vst::kDistributable,
+           "Fx", "1.0.0", kVstVersionString,
+           TestDynamicLatency::createNonstandardLatencyException)
 END_FACTORY

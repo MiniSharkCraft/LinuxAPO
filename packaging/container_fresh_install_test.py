@@ -28,7 +28,6 @@ FIXED_FILES = (
     "usr/lib/systemd/user/skyapod.service",
     "usr/share/applications/skyapo.desktop",
     "usr/share/metainfo/org.skyapo.SkyAPO.metainfo.xml",
-    "usr/share/icons/hicolor/scalable/apps/skyapo.svg",
     "usr/share/licenses/skyapo/EqualizerAPO-License.txt",
     "usr/share/licenses/skyapo/Qt-LGPL-3.0-License.txt",
     "usr/share/licenses/skyapo/CLAP-License.txt",
@@ -39,7 +38,40 @@ FIXED_FILES = (
 )
 MAN_PAGES = ("skyapo.1", "skyapod.1", "skyapo-bench.1")
 MAN_PAGE_SUFFIXES = ("", ".gz", ".zst", ".xz", ".bz2")
+LICENSE_FILES = (
+    "EqualizerAPO-License.txt",
+    "Qt-LGPL-3.0-License.txt",
+    "CLAP-License.txt",
+    "Steinberg-VST3-base-License.txt",
+    "Steinberg-VST3-pluginterfaces-License.txt",
+    "Steinberg-VST3-public-sdk-License.txt",
+    "MuParserX-License.txt",
+)
+LICENSE_DIRECTORY_CANDIDATES = (
+    "usr/share/licenses/skyapo",
+    "usr/share/doc/skyapo/licenses",
+    "usr/share/doc/SkyAPO/licenses",
+)
 PACKAGE_FILES = tuple(f"usr/bin/{binary}" for binary in EXECUTABLES) + FIXED_FILES
+EXPECTED_PACKAGE_HOOKS = (
+    "Updating icon theme caches...",
+    "Updating the desktop file MIME type cache...",
+    "Reloading user manager configuration...",
+)
+ICON_THEME_CACHE = pathlib.Path("/usr/share/icons/hicolor/icon-theme.cache")
+
+
+def configure_temp_directory():
+    """Use the configured disk-backed temp area, not an incidental /tmp."""
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    configured = (
+        os.environ.get("SKYAPO_TEMP_DIRECTORY")
+        or os.environ.get("SKYAPO_TEST_TEMP_DIRECTORY")
+        or str(repo_root / "build" / "tmp")
+    )
+    pathlib.Path(configured).mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = configured
+    tempfile.tempdir = None
 
 
 def man_page_paths(root, page):
@@ -100,6 +132,28 @@ def run(command, env=None, expected=0):
     return result
 
 
+def require_package_hooks(transaction, output):
+    missing = [
+        description
+        for description in EXPECTED_PACKAGE_HOOKS
+        if description not in output
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Pacman {transaction} transaction did not invoke expected "
+            f"package hooks: {', '.join(missing)}"
+        )
+    print(f"Pacman {transaction} transaction invoked all SkyAPO-related hooks.")
+
+
+def require_icon_theme_cache(transaction):
+    if not ICON_THEME_CACHE.is_file():
+        raise RuntimeError(
+            f"Pacman {transaction} hook did not produce "
+            f"{ICON_THEME_CACHE}"
+        )
+
+
 def isolated_env(temp):
     temp = pathlib.Path(temp)
     env = os.environ.copy()
@@ -138,9 +192,48 @@ def validate_payload(
 ):
     root = pathlib.Path(root)
     for relative in PACKAGE_FILES:
+        if package_paths is None and relative.startswith(
+            "usr/share/licenses/skyapo/"
+        ):
+            # A staged CMake/CPack install may put notices under share/doc;
+            # the real Arch transaction below must still ship Arch's license path.
+            continue
         path = root / relative
         if not path.is_file():
             raise RuntimeError(f"installed package is missing {relative}")
+    desktop_entry = (root / "usr/share/applications/skyapo.desktop").read_text(
+        encoding="utf-8"
+    )
+    branded_icons = list(
+        (root / "usr/share/icons/hicolor").glob("*/apps/skyapo.png")
+    )
+    desktop_icon = next(
+        (line.partition("=")[2].strip() for line in desktop_entry.splitlines()
+         if line.startswith("Icon=")),
+        None,
+    )
+    if desktop_icon == "skyapo":
+        if not branded_icons:
+            raise RuntimeError("desktop entry references a missing branded icon")
+    elif desktop_icon is not None:
+        raise RuntimeError(f"package has an unexpected desktop icon: {desktop_icon!r}")
+    elif branded_icons:
+        raise RuntimeError(
+            "package contains unlicensed branded icons without a desktop reference"
+        )
+    license_directory = next(
+        (
+            root / relative
+            for relative in LICENSE_DIRECTORY_CANDIDATES
+            if all((root / relative / name).is_file() for name in LICENSE_FILES)
+        ),
+        None,
+    )
+    if license_directory is None:
+        raise RuntimeError(
+            "installed package is missing required license files under one of: "
+            + ", ".join(LICENSE_DIRECTORY_CANDIDATES)
+        )
     for binary in EXECUTABLES:
         path = root / "usr/bin" / binary
         if not os.access(path, os.X_OK):
@@ -202,10 +295,27 @@ def assert_package_payload_removed():
 
 
 def pacman_install_test(package, render_test_binary):
+    # This mode mutates the pacman's package database, runs system hooks, and
+    # removes package-owned files under /. Require both a container marker and
+    # an explicit opt-in so an accidental local invocation cannot install or
+    # remove SkyAPO on the developer's host.
+    container_markers = (pathlib.Path("/.dockerenv"),
+                         pathlib.Path("/run/.containerenv"))
+    if not any(marker.is_file() for marker in container_markers):
+        raise RuntimeError(
+            "refusing pacman install/remove outside a disposable container")
+    if os.environ.get("SKYAPO_ALLOW_DISPOSABLE_PACMAN_TEST") != "1":
+        raise RuntimeError(
+            "refusing pacman install/remove without explicit "
+            "SKYAPO_ALLOW_DISPOSABLE_PACMAN_TEST=1 opt-in")
     if os.geteuid() != 0:
         raise RuntimeError("pacman install/remove test must run as root in a disposable container")
     if package_is_installed():
         raise RuntimeError("expected a fresh container, but skyapo is already installed")
+    if ICON_THEME_CACHE.exists():
+        raise RuntimeError(
+            f"expected a clean icon-cache fixture, but {ICON_THEME_CACHE} exists"
+        )
 
     primary_error = None
     installed_files = []
@@ -213,6 +323,10 @@ def pacman_install_test(package, render_test_binary):
     try:
         installation = run(["pacman", "-U", "--noconfirm", str(package)])
         install_succeeded = True
+        require_package_hooks(
+            "install", installation.stdout + installation.stderr
+        )
+        require_icon_theme_cache("install")
         print("Pacman install transaction:")
         print(installation.stdout.rstrip())
         if installation.stderr.strip():
@@ -256,6 +370,11 @@ def pacman_install_test(package, render_test_binary):
                 print(removal.stdout.rstrip())
                 if removal.stderr.strip():
                     print(removal.stderr.rstrip(), file=sys.stderr)
+                if primary_error is None:
+                    require_package_hooks(
+                        "remove", removal.stdout + removal.stderr
+                    )
+                    require_icon_theme_cache("remove")
         if package_is_installed():
             detail = "pacman -Rns left the skyapo package installed"
             if primary_error is not None:
@@ -274,6 +393,7 @@ def pacman_install_test(package, render_test_binary):
 
 
 def main():
+    configure_temp_directory()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", nargs="?", help="Arch package archive to install")
     parser.add_argument(

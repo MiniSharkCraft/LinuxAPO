@@ -14,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <unordered_map>
+#include <utility>
 
 namespace skyapo::pipewire {
 namespace {
@@ -42,6 +43,8 @@ struct DefaultSinkVolumeMonitor::Impl {
   uint32_t nodeId = SPA_ID_INVALID;
   std::unordered_map<std::string, std::pair<uint32_t, uint32_t>> sinks;
   std::string wantedName;
+  std::string sinkOverride;
+  std::string defaultSinkName;
   DefaultSinkVolumeSnapshot current;
   spa_hook registryHook{};
   spa_hook metadataHook{};
@@ -199,9 +202,10 @@ struct DefaultSinkVolumeMonitor::Impl {
     std::string name;
     if (!value ||
         !DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(value, name))
-      self.select({});
-    else
-      self.select(name);
+      name.clear();
+    self.defaultSinkName = name;
+    self.select(self.sinkOverride.empty() ? self.defaultSinkName
+                                          : self.sinkOverride);
     return 0;
   }
 
@@ -272,6 +276,15 @@ DefaultSinkVolumeMonitor::~DefaultSinkVolumeMonitor() {
 const DefaultSinkVolumeSnapshot &
 DefaultSinkVolumeMonitor::snapshot() const noexcept {
   return impl_->current;
+}
+
+void DefaultSinkVolumeMonitor::setSinkOverride(std::string stableName) {
+  impl_->sinkOverride = std::move(stableName);
+  if (!impl_->sinkOverride.empty()) {
+    impl_->select(impl_->sinkOverride);
+    return;
+  }
+  impl_->select(impl_->defaultSinkName);
 }
 
 bool DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(

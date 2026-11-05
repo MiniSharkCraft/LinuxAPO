@@ -767,7 +767,16 @@ public:
     }
     data.numSamples = static_cast<int32_t>(frames);
     buildParameterChanges();
-    if (processor->process(data) != Steinberg::kResultOk) {
+    try {
+      if (processor->process(data) == Steinberg::kResultOk)
+        return;
+    } catch (...) {
+      // A malformed in-process VST3 may throw through the C++ SDK boundary.
+      // Catch it inside this noexcept realtime adapter, latch the instance
+      // failed, and silence this and all later blocks. Native crashes/hangs
+      // still require process isolation and are not recoverable here.
+    }
+    {
       processingError.store(true, std::memory_order_release);
       for (size_t c = 0; c < channelCount; ++c)
         std::fill_n(output[c], frames, 0.0f);

@@ -1,4 +1,5 @@
 #include "../src/platform/linux/ConfigSource.h"
+#include "TestTemp.h"
 
 #include <algorithm>
 #include <array>
@@ -14,9 +15,8 @@ namespace {
 class TemporaryDirectory {
 public:
   TemporaryDirectory() {
-    std::array<char, 40> pattern{};
-    const std::string prefix = "/tmp/skyapo-config-source-XXXXXX";
-    std::copy(prefix.begin(), prefix.end(), pattern.begin());
+    std::string pattern =
+        skyapo::test::temporaryPattern("skyapo-config-source-");
     char *created = mkdtemp(pattern.data());
     if (!created)
       throw std::runtime_error("could not create config-source test directory");

@@ -24,7 +24,8 @@ class QThread;
 class MainWindow final : public QMainWindow {
   Q_OBJECT
 public:
-  explicit MainWindow(QString path = {}, QString cliExecutable = {});
+  explicit MainWindow(QString path = {}, QString cliExecutable = {},
+                      QString polkitExecutable = {});
   ~MainWindow() override;
 
 protected:
@@ -34,8 +35,12 @@ private:
   void openConfig(const QString &path);
   void rebuildRows();
   void addFilter(const QString &line);
-  void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {});
+  void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {},
+                                QString formatFilter = {});
+  void activateFilterTemplate(const QString &line,
+                              std::optional<qsizetype> beforeIndex = {});
   void configureSelectedPluginParameters();
+  void setSelectedPluginBypass(bool bypassed);
   void markModified();
   bool saveConfig();
   Q_INVOKABLE bool saveConfigAsPath(const QString &path);
@@ -44,6 +49,9 @@ private:
   void reloadConfig();
   void refreshStatus();
   void refreshDevices();
+  void openDeviceSelector();
+  void showDeviceSelectorDialog();
+  void showDeviceSelectorAuthorizationFailure(const QString &detail);
   void selectDevice(int index);
   void scheduleLiveValidation();
   void validateLiveConfig();
@@ -65,6 +73,7 @@ private:
 
   QString configPath;
   QString cliExecutable;
+  QString polkitExecutable;
   ConfigFile document;
   bool modified{};
   QLineEdit *pathEdit{};
@@ -88,6 +97,7 @@ private:
   bool statusRequestPending{};
   bool deviceRequestPending{};
   bool deviceSetPending{};
+  bool deviceSelectorAuthorizationPending{};
   bool daemonControlPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};

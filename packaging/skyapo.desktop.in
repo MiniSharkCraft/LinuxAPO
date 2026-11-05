@@ -3,7 +3,7 @@ Type=Application
 Name=SkyAPO Configuration Editor
 Comment=Edit Equalizer APO-compatible audio processing configuration
 Exec=skyapo-ui
-Icon=skyapo
+@SKYAPO_DESKTOP_ICON_LINE@
 Terminal=false
 StartupNotify=true
 Categories=AudioVideo;AudioVideoEditing;

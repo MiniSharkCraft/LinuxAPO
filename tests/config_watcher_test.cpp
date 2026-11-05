@@ -1,4 +1,5 @@
 #include "../src/platform/ConfigWatcher.h"
+#include "TestTemp.h"
 
 #include <filesystem>
 #include <fstream>
@@ -34,8 +35,9 @@ bool hasEvent(skyapo::platform::ConfigWatcher &watcher) {
 }
 
 int main() {
-  char temporary[] = "/tmp/skyapo-config-watcher-XXXXXX";
-  const char *directoryName = mkdtemp(temporary);
+  std::string temporary =
+      skyapo::test::temporaryPattern("skyapo-config-watcher-");
+  const char *directoryName = mkdtemp(temporary.data());
   if (!directoryName) {
     std::cerr << "could not create config watcher test directory\n";
     return 1;

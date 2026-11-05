@@ -1,5 +1,7 @@
 # Qt editor license/resource audit
 
+Release artwork redistribution status: EXCLUDED
+
 Audit performed against the current CMake target, pinned official
 `upstream/equalizerapo` checkout, staged-install rules and the Linux runtime
 linker output. This is an engineering inventory, not legal advice.
@@ -34,6 +36,25 @@ no per-icon author/license metadata; none of its icon artwork is now
 redistributed by these qrc files. `skyapo-ui-resource-audit` verifies qrc paths
 against selected source references, ensures payloads are project-authored SVGs,
 and rejects unused translation/audio resources.
+
+## LinuxAPO application icon
+
+The hicolor PNGs and Qt application icon are converted from WebP artwork
+supplied locally by the project owner during development.
+The original image remains unmodified. Its authorship, license, and explicit
+redistribution permission could not be verified from the local file metadata
+or the repository. The PNGs are present in the current uncommitted worktree for
+integration/testing, but **must not be committed or included in a public
+package/release until redistribution rights are confirmed and recorded**.
+`SKYAPO_BUNDLE_BRANDED_APP_ICON` is therefore OFF by default; when disabled,
+the editor embeds no application artwork, the installed desktop entry omits
+the `Icon` key, and package smoke tests reject stray branded PNGs. Enabling the
+option is reserved for builds where redistribution permission has been
+confirmed independently. Release automation accepts this explicit exclusion
+only while the CMake default remains OFF and no branded PNG is tracked; use
+`CLEARED` instead only after recording the rights holder and redistribution
+grant.
+They are not “project-authored” merely because SkyAPO resized/converted them.
 
 ## Qt runtime dependency
 

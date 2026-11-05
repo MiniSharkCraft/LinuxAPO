@@ -1,14 +1,19 @@
 #include "Engine.h"
+#include "PdcAllocationTestHook.h"
 #include "BiQuad.h"
+#include "helpers/GainIterator.h"
 #include "LoudnessVolumeProvider.h"
+#include "TestTemp.h"
 #ifdef SKYAPO_TEST_CLAP
 #include "CLAPPluginHost.h"
 #include "IPluginParameterControl.h"
 #include <dlfcn.h>
 #endif
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -18,6 +23,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <thread>
 #include <sndfile.h>
 #include <sys/stat.h>
@@ -54,11 +60,19 @@ int main() {
 #endif
 
   const std::string path =
-      "/tmp/skyapo-test-" + std::to_string(getpid()) + ".txt";
+      skyapo::test::temporaryPath("skyapo-test-" + std::to_string(getpid()) +
+                                  ".txt")
+          .string();
   if (!write(path, "Preamp: -6 dB\n"))
     return 1;
   Engine e(48000, 2, 128);
   e.loadConfig(path);
+  if (!e.supportsFrameCount(1) || !e.supportsFrameCount(64) ||
+      !e.supportsFrameCount(128) || e.supportsFrameCount(0) ||
+      e.supportsFrameCount(129)) {
+    std::cerr << "variable-block Engine capacity policy is incorrect\n";
+    return 1;
+  }
   if (e.filterDescriptions().size() != 1 ||
       e.filterDescriptions()[0].find("Preamp") == std::string::npos ||
       e.filterDescriptions()[0].find(":1") == std::string::npos) {
@@ -374,6 +388,117 @@ int main() {
       std::cerr << "LV2 host bypass did not preserve reported latency\n";
       return 1;
     }
+  }
+
+  std::string rejectedDynamicPdc =
+      "Channel: L\n"
+      "Plugin: LV2 https://skyapo.example/plugins/test-latency-increase\n"
+      "Channel: L R\n"
+      "Copy: L2=L";
+  for (unsigned term = 0; term < 430; ++term)
+    rejectedDynamicPdc += "+R";
+  rejectedDynamicPdc += "\n";
+  if (!write(path, rejectedDynamicPdc))
+    return 1;
+  Engine rejectedDynamicPdcEngine(48000, 2, 128, {L"L", L"R"});
+  rejectedDynamicPdcEngine.loadConfig(path);
+  const auto originalPdcBytes =
+      rejectedDynamicPdcEngine.knownAudioBufferPayload().pdcRingCapacityBytes;
+  float triggerLatencyChange[16]{};
+  triggerLatencyChange[0] = 0.25f;
+  rejectedDynamicPdcEngine.process(triggerLatencyChange, 8);
+  bool rejectedDynamicPdcRefresh = false;
+  try {
+    (void)rejectedDynamicPdcEngine.refreshPluginLatencies();
+  } catch (const std::exception &error) {
+    rejectedDynamicPdcRefresh =
+        std::string(error.what())
+            .find("shared 16 MiB per-graph realtime ring-buffer budget") !=
+        std::string::npos;
+    if (!rejectedDynamicPdcRefresh)
+      std::cerr << "unexpected dynamic PDC refresh error: " << error.what()
+                << '\n';
+  }
+  if (!rejectedDynamicPdcRefresh || originalPdcBytes == 0 ||
+      rejectedDynamicPdcEngine.knownAudioBufferPayload().pdcRingCapacityBytes !=
+          originalPdcBytes) {
+    std::cerr << "failed dynamic PDC rebuild changed live ring allocations"
+              << " (before=" << originalPdcBytes << ", after="
+              << rejectedDynamicPdcEngine.knownAudioBufferPayload()
+                     .pdcRingCapacityBytes
+              << ")\n";
+    return 1;
+  }
+  bool rejectedEngineProcess = false;
+  try {
+    rejectedDynamicPdcEngine.process(triggerLatencyChange, 8);
+  } catch (const std::exception &error) {
+    rejectedEngineProcess =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!rejectedEngineProcess || triggerLatencyChange[0] != 0.25f) {
+    std::cerr << "Engine processed audio after an uncommittable latency plan\n";
+    return 1;
+  }
+
+  if (!write(path, "Channel: L\n"
+                   "Plugin: LV2 https://skyapo.example/plugins/"
+                   "test-latency-increase\n"
+                   "Channel: L R\n"
+                   "Copy: L2=L+R\n"
+                   "Copy: R2=R+L\n"))
+    return 1;
+  Engine allocationFailureEngine(48000, 2, 128, {L"L", L"R"});
+  allocationFailureEngine.loadConfig(path);
+  const auto originalAllocationFailurePdcBytes =
+      allocationFailureEngine.knownAudioBufferPayload().pdcRingCapacityBytes;
+  if (originalAllocationFailurePdcBytes == 0) {
+    std::cerr
+        << "PDC allocation-failure fixture did not create initial rings\n";
+    return 1;
+  }
+  float triggerAllocationFailure[16]{};
+  triggerAllocationFailure[0] = 0.375f;
+  allocationFailureEngine.process(triggerAllocationFailure, 8);
+  skyapo::testing::failPdcAllocationAfterForTesting(1);
+  bool caughtPdcAllocationFailure = false;
+  try {
+    (void)allocationFailureEngine.refreshPluginLatencies();
+  } catch (const std::bad_alloc &) {
+    caughtPdcAllocationFailure = true;
+  } catch (const std::exception &error) {
+    skyapo::testing::clearPdcAllocationFailureForTesting();
+    std::cerr << "unexpected PDC allocation-failure error: " << error.what()
+              << '\n';
+    return 1;
+  }
+  const auto successfulPreparedPdcRings =
+      skyapo::testing::successfulPdcRingAllocationsForTesting();
+  skyapo::testing::clearPdcAllocationFailureForTesting();
+  if (!caughtPdcAllocationFailure || successfulPreparedPdcRings == 0 ||
+      allocationFailureEngine.knownAudioBufferPayload().pdcRingCapacityBytes !=
+          originalAllocationFailurePdcBytes) {
+    std::cerr << "PDC allocation failure did not preserve live rings after a "
+                 "successful replacement allocation (prepared="
+              << successfulPreparedPdcRings
+              << ", before=" << originalAllocationFailurePdcBytes << ", after="
+              << allocationFailureEngine.knownAudioBufferPayload()
+                     .pdcRingCapacityBytes
+              << ")\n";
+    return 1;
+  }
+  bool allocationFailureEngineClosed = false;
+  try {
+    allocationFailureEngine.process(triggerAllocationFailure, 8);
+  } catch (const std::exception &error) {
+    allocationFailureEngineClosed =
+        std::string(error.what()).find("reload the configuration") !=
+        std::string::npos;
+  }
+  if (!allocationFailureEngineClosed || triggerAllocationFailure[0] != 0.375f) {
+    std::cerr << "Engine did not fail closed after PDC allocation failure\n";
+    return 1;
   }
 
   if (!write(path, "Copy: L2=L R2=R\n"
@@ -958,8 +1083,9 @@ int main() {
     return 1;
   }
 
-  char vst2StateHomeTemplate[] = "/tmp/skyapo-vst2-state-XXXXXX";
-  char *vst2StateHomeRaw = mkdtemp(vst2StateHomeTemplate);
+  std::string vst2StateHomeTemplate =
+      skyapo::test::temporaryPattern("skyapo-vst2-state-");
+  char *vst2StateHomeRaw = mkdtemp(vst2StateHomeTemplate.data());
   if (!vst2StateHomeRaw) {
     std::cerr << "cannot create isolated VST2 state test directory\n";
     return 1;
@@ -1059,8 +1185,8 @@ int main() {
 #ifdef SKYAPO_TEST_VST3
   const std::string vst3Uid = "534B5941504F00010000000000000001";
 
-  const fs::path vst3StateHome =
-      fs::path("/tmp") / ("skyapo-vst3-state-" + std::to_string(getpid()));
+  const fs::path vst3StateHome = skyapo::test::temporaryPath(
+      "skyapo-vst3-state-" + std::to_string(getpid()));
   fs::remove_all(vst3StateHome);
   fs::create_directories(vst3StateHome);
   const char *oldVst3StateHome = std::getenv("XDG_STATE_HOME");
@@ -1103,7 +1229,7 @@ int main() {
       std::cerr << "VST3 state sidecar was not created\n";
       return 1;
     }
-    struct stat sidecarStatus{};
+    struct stat sidecarStatus {};
     if (stat(sidecar.c_str(), &sidecarStatus) < 0 ||
         sidecarStatus.st_uid != geteuid() || (sidecarStatus.st_mode & 0077)) {
       std::cerr << "VST3 state sidecar permissions/owner are not private\n";
@@ -1601,8 +1727,9 @@ int main() {
   // fixture payload bytes, then restore it into a fresh Engine and measure the
   // resulting audio. Corrupt state must reject the candidate graph without
   // replacing the already active graph; a missing sidecar means plugin default.
-  char stateHomeTemplate[] = "/tmp/skyapo-clap-state-XXXXXX";
-  char *stateHomeRaw = mkdtemp(stateHomeTemplate);
+  std::string stateHomeTemplate =
+      skyapo::test::temporaryPattern("skyapo-clap-state-");
+  char *stateHomeRaw = mkdtemp(stateHomeTemplate.data());
   if (!stateHomeRaw) {
     std::cerr << "cannot create isolated CLAP state test directory\n";
     return 1;
@@ -1651,13 +1778,13 @@ int main() {
     std::cerr << "expected exactly one CLAP state sidecar\n";
     return 1;
   }
-  struct stat stateStat{};
+  struct stat stateStat {};
   if (stat(sidecars.front().c_str(), &stateStat) < 0 ||
       (stateStat.st_mode & 0077) != 0) {
     std::cerr << "CLAP state sidecar is not private (mode 0600)\n";
     return 1;
   }
-  struct stat stateDirStat{};
+  struct stat stateDirStat {};
   if (stat(stateStore.c_str(), &stateDirStat) < 0 ||
       (stateDirStat.st_mode & 0077) != 0) {
     std::cerr << "CLAP state directory is not private (mode 0700)\n";
@@ -1899,63 +2026,182 @@ int main() {
     double frequency;
     double bandwidthOrQ;
     bool isBandwidth;
+    std::array<double, 4> responseFrequencies;
   };
   const BiQuadGolden biquadGoldens[] = {
-      {"PK Fc 1000 Hz Gain 6 dB BW Oct 1.0", BiQuad::PEAKING, 6, 1000, 1.0,
-       true},
-      {"LP Fc 1200 Hz Q 0.70710678", BiQuad::LOW_PASS, 0, 1200, 0.70710678,
-       false},
-      {"HP Fc 200 Hz BW Oct 1.5", BiQuad::HIGH_PASS, 0, 200, 1.5, true},
-      {"BP Fc 4000 Hz Q 0.8", BiQuad::BAND_PASS, 0, 4000, 0.8, false},
-      {"LSC Fc 250 Hz Gain 6 dB Q 0.9", BiQuad::LOW_SHELF, 6, 250, 0.9, false},
-      {"HSC Fc 6000 Hz Gain -4 dB Q 0.9", BiQuad::HIGH_SHELF, -4, 6000, 0.9,
-       false},
-      {"NO Fc 1500 Hz Q 30", BiQuad::NOTCH, 0, 1500, 30, false},
-      {"AP Fc 800 Hz Q 0.70710678", BiQuad::ALL_PASS, 0, 800, 0.70710678,
-       false},
+      {"PK Fc 1000 Hz Gain 6 dB BW Oct 1.0",
+       BiQuad::PEAKING,
+       6,
+       1000,
+       1.0,
+       true,
+       {96, 480, 1000, 4000}},
+      {"LP Fc 1200 Hz Q 0.70710678",
+       BiQuad::LOW_PASS,
+       0,
+       1200,
+       0.70710678,
+       false,
+       {96, 600, 1200, 6000}},
+      {"HP Fc 200 Hz BW Oct 1.5",
+       BiQuad::HIGH_PASS,
+       0,
+       200,
+       1.5,
+       true,
+       {32, 100, 200, 2000}},
+      {"BP Fc 4000 Hz Q 0.8",
+       BiQuad::BAND_PASS,
+       0,
+       4000,
+       0.8,
+       false,
+       {200, 2000, 4000, 10000}},
+      {"LSC Fc 250 Hz Gain 6 dB Q 0.9",
+       BiQuad::LOW_SHELF,
+       6,
+       250,
+       0.9,
+       false,
+       {40, 124, 252, 1000}},
+      {"HSC Fc 6000 Hz Gain -4 dB Q 0.9",
+       BiQuad::HIGH_SHELF,
+       -4,
+       6000,
+       0.9,
+       false,
+       {40, 3000, 6000, 16000}},
+      {"NO Fc 1500 Hz Q 30",
+       BiQuad::NOTCH,
+       0,
+       1500,
+       30,
+       false,
+       {100, 748, 1500, 3004}},
+      {"AP Fc 800 Hz Q 0.70710678",
+       BiQuad::ALL_PASS,
+       0,
+       800,
+       0.70710678,
+       false,
+       {40, 400, 800, 4000}},
   };
+  constexpr unsigned biquadRates[] = {44100, 48000, 96000, 192000};
+  for (const auto &golden : biquadGoldens) {
+    for (const unsigned sampleRate : biquadRates) {
+      if (!write(path, std::string("Filter: ON ") + golden.parameters + "\n"))
+        return 1;
+      Engine variant(sampleRate, 2, 256);
+      variant.loadConfig(path);
+      BiQuad referenceLeft(golden.type, golden.gain, golden.frequency,
+                           sampleRate, golden.bandwidthOrQ, golden.isBandwidth);
+      BiQuad referenceRight(golden.type, golden.gain, golden.frequency,
+                            sampleRate, golden.bandwidthOrQ,
+                            golden.isBandwidth);
+      constexpr unsigned frameCount = 257;
+      std::vector<float> samples(frameCount * 2);
+      std::vector<float> expected(frameCount * 2);
+      for (unsigned frame = 0; frame < frameCount; ++frame) {
+        samples[frame * 2] = static_cast<float>(0.3 * std::sin(frame * 0.37) +
+                                                0.1 * std::cos(frame * 0.11));
+        samples[frame * 2 + 1] = static_cast<float>(
+            0.2 * std::cos(frame * 0.23) - 0.15 * std::sin(frame * 0.07));
+        expected[frame * 2] =
+            static_cast<float>(referenceLeft.process(samples[frame * 2]));
+        expected[frame * 2 + 1] =
+            static_cast<float>(referenceRight.process(samples[frame * 2 + 1]));
+      }
+      constexpr unsigned blocks[] = {1, 17, 128, 111};
+      unsigned frame = 0;
+      for (const auto block : blocks) {
+        if (frame >= frameCount)
+          break;
+        const auto count = std::min(block, frameCount - frame);
+        variant.process(samples.data() + frame * 2, count);
+        frame += count;
+      }
+      for (; frame < frameCount;) {
+        const auto count = std::min(13u, frameCount - frame);
+        variant.process(samples.data() + frame * 2, count);
+        frame += count;
+      }
+      for (size_t sample = 0; sample < samples.size(); ++sample)
+        if (std::abs(samples[sample] - expected[sample]) > 2e-6f) {
+          std::cerr
+              << "upstream BiQuad variant differs from its reference for: "
+              << golden.parameters << " at " << sampleRate << " Hz, sample "
+              << sample << '\n';
+          return 1;
+        }
+    }
+  }
+
+  // Measure the Engine's steady-state magnitude response for every upstream
+  // BiQuad type, including the stop-band/corner/pass-band neighborhoods. The
+  // upstream gainAt() calculation is the independent analytical reference;
+  // all probes are multiples of 4 Hz so the post-settle interval contains an
+  // integer number of cycles at 48 kHz.
+  constexpr unsigned responseRate = 48000;
+  constexpr unsigned responseFrames = responseRate;
+  constexpr unsigned responseSettleFrames = responseRate / 4;
   for (const auto &golden : biquadGoldens) {
     if (!write(path, std::string("Filter: ON ") + golden.parameters + "\n"))
       return 1;
-    Engine variant(48000, 2, 256);
-    variant.loadConfig(path);
-    BiQuad referenceLeft(golden.type, golden.gain, golden.frequency, 48000,
-                         golden.bandwidthOrQ, golden.isBandwidth);
-    BiQuad referenceRight(golden.type, golden.gain, golden.frequency, 48000,
-                          golden.bandwidthOrQ, golden.isBandwidth);
-    constexpr unsigned frameCount = 257;
-    std::vector<float> samples(frameCount * 2);
-    std::vector<float> expected(frameCount * 2);
-    for (unsigned frame = 0; frame < frameCount; ++frame) {
-      samples[frame * 2] = static_cast<float>(0.3 * std::sin(frame * 0.37) +
-                                              0.1 * std::cos(frame * 0.11));
-      samples[frame * 2 + 1] = static_cast<float>(
-          0.2 * std::cos(frame * 0.23) - 0.15 * std::sin(frame * 0.07));
-      expected[frame * 2] =
-          static_cast<float>(referenceLeft.process(samples[frame * 2]));
-      expected[frame * 2 + 1] =
-          static_cast<float>(referenceRight.process(samples[frame * 2 + 1]));
-    }
-    constexpr unsigned blocks[] = {1, 17, 128, 111};
-    unsigned frame = 0;
-    for (const auto block : blocks) {
-      if (frame >= frameCount)
-        break;
-      const auto count = std::min(block, frameCount - frame);
-      variant.process(samples.data() + frame * 2, count);
-      frame += count;
-    }
-    for (; frame < frameCount;) {
-      const auto count = std::min(13u, frameCount - frame);
-      variant.process(samples.data() + frame * 2, count);
-      frame += count;
-    }
-    for (size_t sample = 0; sample < samples.size(); ++sample)
-      if (std::abs(samples[sample] - expected[sample]) > 2e-6f) {
-        std::cerr << "upstream BiQuad variant differs from its reference for: "
-                  << golden.parameters << " at sample " << sample << '\n';
+    BiQuad reference(golden.type, golden.gain, golden.frequency, responseRate,
+                     golden.bandwidthOrQ, golden.isBandwidth);
+    for (const double frequency : golden.responseFrequencies) {
+      if (frequency <= 0.0 || frequency >= responseRate / 2.0 ||
+          std::fmod(frequency, 4.0) != 0.0) {
+        std::cerr << "invalid BiQuad response probe frequency: " << frequency
+                  << " Hz for " << golden.parameters << '\n';
         return 1;
       }
+      Engine response(responseRate, 2, 256);
+      response.loadConfig(path);
+      if (response.filterCount() != 1) {
+        std::cerr << "BiQuad response fixture did not create one filter: "
+                  << golden.parameters << '\n';
+        return 1;
+      }
+      std::vector<float> tone(static_cast<size_t>(responseFrames) * 2);
+      constexpr double twoPi = 6.28318530717958647692;
+      for (unsigned frame = 0; frame < responseFrames; ++frame) {
+        const float sample = static_cast<float>(
+            std::sin(twoPi * frequency * frame / responseRate));
+        tone[2 * frame] = sample;
+        tone[2 * frame + 1] = sample;
+      }
+      for (unsigned frame = 0; frame < responseFrames;) {
+        const unsigned count = std::min(256u, responseFrames - frame);
+        response.process(tone.data() + 2 * frame, count);
+        frame += count;
+      }
+
+      double inputEnergy = 0.0;
+      double outputEnergy = 0.0;
+      for (unsigned frame = responseSettleFrames; frame < responseFrames;
+           ++frame) {
+        const double input = std::sin(twoPi * frequency * frame / responseRate);
+        inputEnergy += input * input;
+        outputEnergy += static_cast<double>(tone[2 * frame]) * tone[2 * frame];
+        if (std::abs(tone[2 * frame] - tone[2 * frame + 1]) > 1e-6f) {
+          std::cerr << "stereo BiQuad response mismatch for "
+                    << golden.parameters << " at " << frequency << " Hz\n";
+          return 1;
+        }
+      }
+      const double measuredGainDb =
+          20.0 * std::log10(std::sqrt(outputEnergy / inputEnergy));
+      const double expectedGainDb = reference.gainAt(frequency, responseRate);
+      if (!std::isfinite(measuredGainDb) ||
+          std::abs(measuredGainDb - expectedGainDb) > 0.05) {
+        std::cerr << "upstream BiQuad frequency response mismatch for "
+                  << golden.parameters << " at " << frequency
+                  << " Hz: " << "measured " << measuredGainDb
+                  << " dB, expected " << expectedGainDb << " dB\n";
+        return 1;
+      }
+    }
   }
 
   if (!write(path, "NotACommand: 1\n"))
@@ -2026,6 +2272,277 @@ int main() {
                 << feedbackImpulse[i] << '\n';
       return 1;
     }
+
+  for (const auto &invalidIir : {
+           "Filter: ON IIR Order 1 Coefficients 1 0 0 -0.5\n",
+           "Filter: ON IIR Order 1 Coefficients 1e999 0 1 -0.5\n",
+           "Filter: ON IIR Order 1 Coefficients 1 0 1e-320 0\n",
+       }) {
+    if (!write(path, invalidIir))
+      return 1;
+    bool rejected = false;
+    try {
+      Engine invalid(48000, 2, 128);
+      invalid.loadConfig(path);
+    } catch (const std::exception &error) {
+      const std::string message(error.what());
+      rejected = message.find(path + ":1:") != std::string::npos &&
+                 (message.find("IIR coefficients must be finite") !=
+                      std::string::npos ||
+                  message.find("IIR a0 coefficient must be nonzero") !=
+                      std::string::npos ||
+                  message.find("normalized IIR coefficients must be finite") !=
+                      std::string::npos);
+    }
+    if (!rejected) {
+      std::cerr << "unsafe IIR coefficients were not rejected: " << invalidIir;
+      return 1;
+    }
+  }
+
+  if (!write(path, "Filter: ON IIR Order 65537 Coefficients\n"))
+    return 1;
+  bool excessiveIirOrderRejected = false;
+  try {
+    Engine excessiveOrder(48000, 2, 128);
+    excessiveOrder.loadConfig(path);
+  } catch (const std::exception &error) {
+    const std::string message(error.what());
+    excessiveIirOrderRejected =
+        message.find(path + ":1:") != std::string::npos &&
+        message.find("IIR order exceeds SkyAPO's maximum order of 65536") !=
+            std::string::npos;
+  }
+  if (!excessiveIirOrderRejected) {
+    std::cerr
+        << "excessive IIR order was not rejected during config preflight\n";
+    return 1;
+  }
+
+  std::vector<std::wstring> manyIirChannels;
+  manyIirChannels.reserve(256);
+  for (unsigned channel = 0; channel < 256; ++channel)
+    manyIirChannels.push_back(L"CH" + std::to_wstring(channel));
+  std::ostringstream largeIirGraph;
+  for (unsigned filter = 0; filter < 8; ++filter) {
+    largeIirGraph << "Filter: ON IIR Order 2048 Coefficients";
+    for (unsigned tap = 0; tap <= 2048; ++tap)
+      largeIirGraph << (tap ? " 0" : " 1");
+    for (unsigned tap = 0; tap <= 2048; ++tap)
+      largeIirGraph << (tap ? " 0" : " 1");
+    largeIirGraph << '\n';
+  }
+  if (!write(path, largeIirGraph.str()))
+    return 1;
+  bool excessiveIirMemoryRejected = false;
+  try {
+    Engine excessiveIirMemory(48000, 256, 1, manyIirChannels);
+    excessiveIirMemory.loadConfig(path);
+  } catch (const std::exception &error) {
+    const std::string message(error.what());
+    excessiveIirMemoryRejected =
+        message.find(path + ":8:") != std::string::npos &&
+        message.find("IIR coefficients and per-channel state exceed") !=
+            std::string::npos;
+  }
+  if (!excessiveIirMemoryRejected) {
+    std::cerr
+        << "over-budget IIR graph was not rejected before state allocation\n";
+    return 1;
+  }
+
+  if (!write(path,
+             "Filter: ON IIR Order 2 Coefficients 1 0.5 -0.25 2 -0.5 0.25\n"))
+    return 1;
+  Engine secondOrderIir(48000, 2, 128);
+  secondOrderIir.loadConfig(path);
+  if (secondOrderIir.knownAudioBufferPayload().iirFilterBytes != 96) {
+    std::cerr << "IIR coefficient/state memory estimate was incorrect\n";
+    return 1;
+  }
+  constexpr unsigned iirFrames = 19;
+  std::vector<float> iirSamples(iirFrames * 2);
+  std::vector<float> iirExpected(iirFrames * 2);
+  for (unsigned frame = 0; frame < iirFrames; ++frame) {
+    iirSamples[2 * frame] = frame == 0 ? 1.0f : 0.03125f * frame;
+    iirSamples[2 * frame + 1] = frame == 3 ? -0.75f : -0.015625f * frame;
+  }
+  for (unsigned channel = 0; channel < 2; ++channel) {
+    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+    for (unsigned frame = 0; frame < iirFrames; ++frame) {
+      const double input = iirSamples[2 * frame + channel];
+      const double output =
+          0.5 * input + 0.25 * x1 - 0.125 * x2 + 0.25 * y1 - 0.125 * y2;
+      iirExpected[2 * frame + channel] = static_cast<float>(output);
+      x2 = x1;
+      x1 = input;
+      y2 = y1;
+      y1 = output;
+    }
+  }
+  constexpr unsigned iirBlocks[] = {1, 4, 2, 7, 5};
+  unsigned iirOffset = 0;
+  for (const unsigned block : iirBlocks) {
+    secondOrderIir.process(iirSamples.data() + 2 * iirOffset, block);
+    iirOffset += block;
+  }
+  for (size_t sample = 0; sample < iirSamples.size(); ++sample)
+    if (std::abs(iirSamples[sample] - iirExpected[sample]) > 1e-6f) {
+      std::cerr << "upstream second-order IIR normalization/state mismatch at "
+                << sample << ": expected " << iirExpected[sample] << ", got "
+                << iirSamples[sample] << '\n';
+      return 1;
+    }
+
+  // Check the steady-state transfer magnitude of the same second-order IIR
+  // independently of the sample-by-sample recurrence above.
+  constexpr unsigned iirResponseRate = 48000;
+  constexpr unsigned iirResponseFrames = iirResponseRate;
+  constexpr unsigned iirResponseSettleFrames = iirResponseRate / 4;
+  constexpr double iirTwoPi = 6.28318530717958647692;
+  for (const double frequency : {100.0, 1000.0, 6000.0, 12000.0}) {
+    if (!write(path, "Filter: ON IIR Order 2 Coefficients 1 0.5 -0.25 2 -0.5 "
+                     "0.25\n"))
+      return 1;
+    Engine iirResponse(iirResponseRate, 2, 256);
+    iirResponse.loadConfig(path);
+    std::vector<float> tone(static_cast<size_t>(iirResponseFrames) * 2);
+    for (unsigned frame = 0; frame < iirResponseFrames; ++frame) {
+      const float sample = static_cast<float>(
+          std::sin(iirTwoPi * frequency * frame / iirResponseRate));
+      tone[2 * frame] = sample;
+      tone[2 * frame + 1] = sample;
+    }
+    constexpr unsigned iirResponseBlocks[] = {1, 17, 128, 256};
+    unsigned blockIndex = 0;
+    for (unsigned frame = 0; frame < iirResponseFrames;) {
+      const unsigned block = std::min(
+          iirResponseBlocks[blockIndex++ % std::size(iirResponseBlocks)],
+          iirResponseFrames - frame);
+      iirResponse.process(tone.data() + 2 * frame, block);
+      frame += block;
+    }
+
+    const double omega = iirTwoPi * frequency / iirResponseRate;
+    const std::complex<double> z1 = std::polar(1.0, -omega);
+    const std::complex<double> z2 = z1 * z1;
+    const std::complex<double> transfer =
+        (0.5 + 0.25 * z1 - 0.125 * z2) / (1.0 - 0.25 * z1 + 0.125 * z2);
+    double inputEnergy = 0.0;
+    double outputEnergy = 0.0;
+    for (unsigned frame = iirResponseSettleFrames; frame < iirResponseFrames;
+         ++frame) {
+      const double input =
+          std::sin(iirTwoPi * frequency * frame / iirResponseRate);
+      inputEnergy += input * input;
+      outputEnergy += static_cast<double>(tone[2 * frame]) * tone[2 * frame];
+      if (std::abs(tone[2 * frame] - tone[2 * frame + 1]) > 1e-6f) {
+        std::cerr << "stereo IIR response differed at " << frequency << " Hz\n";
+        return 1;
+      }
+    }
+    const double measuredGainDb =
+        20.0 * std::log10(std::sqrt(outputEnergy / inputEnergy));
+    const double expectedGainDb = 20.0 * std::log10(std::abs(transfer));
+    if (!std::isfinite(measuredGainDb) ||
+        std::abs(measuredGainDb - expectedGainDb) > 0.02) {
+      std::cerr << "upstream IIR frequency response mismatch at " << frequency
+                << " Hz: measured " << measuredGainDb << " dB, expected "
+                << expectedGainDb << " dB\n";
+      return 1;
+    }
+  }
+
+  // Check the upstream IIR transfer function for orders 1 through 8. The
+  // coefficients are intentionally nontrivial but stable; the complex
+  // polynomial below is independent of the upstream sample-by-sample state
+  // recurrence and catches order-dependent coefficient indexing mistakes.
+  for (unsigned order = 1; order <= 8; ++order) {
+    std::vector<double> numerator(order + 1);
+    std::vector<double> denominator(order + 1);
+    numerator[0] = 1.0;
+    denominator[0] = 1.5;
+    for (unsigned tap = 1; tap <= order; ++tap) {
+      const double coefficient = std::ldexp(0.125, 1 - static_cast<int>(tap));
+      numerator[tap] = tap % 2 ? coefficient : -coefficient;
+      denominator[tap] = tap % 2 ? -coefficient : coefficient;
+    }
+
+    std::ostringstream config;
+    config << std::setprecision(17) << "Filter: ON IIR Order " << order
+           << " Coefficients";
+    for (const double coefficient : numerator)
+      config << ' ' << coefficient;
+    for (const double coefficient : denominator)
+      config << ' ' << coefficient;
+    config << '\n';
+    if (!write(path, config.str()))
+      return 1;
+
+    for (const unsigned rate : {44100u, 48000u, 96000u, 192000u}) {
+      const unsigned responseFrames = rate;
+      const unsigned settleFrames = rate / 4;
+      for (const double frequency : {100.0, 1000.0, 6000.0, 12000.0}) {
+        Engine response(rate, 2, 256);
+        response.loadConfig(path);
+        std::vector<float> tone(static_cast<size_t>(responseFrames) * 2);
+        for (unsigned frame = 0; frame < responseFrames; ++frame) {
+          const float sample =
+              static_cast<float>(std::sin(iirTwoPi * frequency * frame / rate));
+          tone[2 * frame] = sample;
+          tone[2 * frame + 1] = sample;
+        }
+        constexpr unsigned blocks[] = {1, 17, 128, 256};
+        unsigned blockIndex = 0;
+        for (unsigned frame = 0; frame < responseFrames;) {
+          const unsigned block = std::min(
+              blocks[blockIndex++ % std::size(blocks)], responseFrames - frame);
+          response.process(tone.data() + 2 * frame, block);
+          frame += block;
+        }
+
+        const double omega = iirTwoPi * frequency / rate;
+        const auto z1 = std::polar(1.0, -omega);
+        std::complex<double> zPower{1.0, 0.0};
+        std::complex<double> expectedTransfer{0.0, 0.0};
+        std::complex<double> denominatorTransfer{1.0, 0.0};
+        for (unsigned tap = 0; tap <= order; ++tap) {
+          if (tap > 0)
+            zPower *= z1;
+          expectedTransfer += (numerator[tap] / denominator[0]) * zPower;
+          if (tap > 0)
+            denominatorTransfer += (denominator[tap] / denominator[0]) * zPower;
+        }
+        expectedTransfer /= denominatorTransfer;
+
+        double inputEnergy = 0.0;
+        double outputEnergy = 0.0;
+        for (unsigned frame = settleFrames; frame < responseFrames; ++frame) {
+          const double input = std::sin(iirTwoPi * frequency * frame / rate);
+          inputEnergy += input * input;
+          outputEnergy +=
+              static_cast<double>(tone[2 * frame]) * tone[2 * frame];
+          if (std::abs(tone[2 * frame] - tone[2 * frame + 1]) > 1e-6f) {
+            std::cerr << "stereo IIR response differed at order " << order
+                      << ", " << frequency << " Hz / " << rate << " Hz\n";
+            return 1;
+          }
+        }
+        const double measuredGainDb =
+            20.0 * std::log10(std::sqrt(outputEnergy / inputEnergy));
+        const double expectedGainDb =
+            20.0 * std::log10(std::abs(expectedTransfer));
+        if (!std::isfinite(measuredGainDb) ||
+            std::abs(measuredGainDb - expectedGainDb) > 0.03) {
+          std::cerr << "upstream IIR order " << order
+                    << " frequency response mismatch at " << frequency
+                    << " Hz / " << rate << " Hz: measured " << measuredGainDb
+                    << " dB, expected " << expectedGainDb << " dB\n";
+          return 1;
+        }
+      }
+    }
+  }
 
   if (!write(path, "Delay: 1 Samples\n"))
     return 1;
@@ -2225,8 +2742,8 @@ int main() {
     return 1;
   }
 
-  char dirTemplate[] = "/tmp/skyapo-include-XXXXXX";
-  char *dirName = mkdtemp(dirTemplate);
+  std::string dirTemplate = skyapo::test::temporaryPattern("skyapo-include-");
+  char *dirName = mkdtemp(dirTemplate.data());
   if (!dirName)
     return 1;
   fs::path dir(dirName);
@@ -2299,8 +2816,23 @@ int main() {
     return 1;
   Engine convolution(48000, 2, 256);
   convolution.loadConfig(convolutionConfig.string());
+  const auto convolutionPayload = convolution.knownAudioBufferPayload();
+  if (!convolutionPayload.convolutionEstimatedBytes ||
+      convolutionPayload.convolutionEstimatedBytes >
+          64ULL * 1024ULL * 1024ULL ||
+      convolutionPayload.totalBytes() <
+          convolutionPayload.convolutionEstimatedBytes) {
+    std::cerr << "convolution memory estimate was not reported\n";
+    return 1;
+  }
   if (!convolution.requiresFixedBlock())
     return 1;
+  if (!convolution.supportsFrameCount(256) ||
+      convolution.supportsFrameCount(255) ||
+      convolution.supportsFrameCount(0)) {
+    std::cerr << "fixed-block convolution frame policy is incorrect\n";
+    return 1;
+  }
   bool rejectedVariableBlock = false;
   try {
     float rejectedBlock[510]{};
@@ -2338,6 +2870,155 @@ int main() {
       }
     }
   }
+
+  const auto checkLongConvolution = [&](unsigned longIrTaps) {
+    const unsigned longIrBlocks = (longIrTaps + 255) / 256 + 1;
+    const unsigned longIrFrames = longIrBlocks * 256;
+    std::vector<float> longImpulseResponse(longIrTaps);
+    for (unsigned tap = 0; tap < longIrTaps; ++tap) {
+      const int centered = static_cast<int>(tap % 7) - 3;
+      longImpulseResponse[tap] = tap == 0 ? 0.5f : centered * 0.001f;
+    }
+    SF_INFO longIrInfo{};
+    longIrInfo.samplerate = 48000;
+    longIrInfo.channels = 1;
+    longIrInfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+    const auto irFilename =
+        "long-impulse-" + std::to_string(longIrTaps) + ".wav";
+    const auto longIrPath = dir / irFilename;
+    SNDFILE *longIrFile = sf_open(longIrPath.c_str(), SFM_WRITE, &longIrInfo);
+    if (!longIrFile)
+      return false;
+    const auto longIrWritten =
+        sf_writef_float(longIrFile, longImpulseResponse.data(), longIrTaps);
+    sf_close(longIrFile);
+    if (longIrWritten != longIrTaps)
+      return false;
+    const auto longConvolutionConfig =
+        dir / ("long-convolution-" + std::to_string(longIrTaps) + ".txt");
+    if (!write(longConvolutionConfig, "Convolution: " + irFilename + "\n"))
+      return false;
+    Engine longConvolution(48000, 2, 256);
+    longConvolution.loadConfig(longConvolutionConfig.string());
+    std::vector<float> longInput(longIrFrames * 2);
+    std::vector<float> longExpected(longInput.size());
+    for (unsigned frame = 0; frame < longIrFrames; ++frame) {
+      longInput[2 * frame] =
+          0.08f * static_cast<float>(static_cast<int>(frame % 23) - 11);
+      longInput[2 * frame + 1] =
+          -0.06f * static_cast<float>(static_cast<int>(frame % 17) - 8);
+      for (unsigned tap = 0; tap < longIrTaps && tap <= frame; ++tap) {
+        for (unsigned channel = 0; channel < 2; ++channel) {
+          longExpected[2 * frame + channel] +=
+              longImpulseResponse[tap] * longInput[2 * (frame - tap) + channel];
+        }
+      }
+    }
+    const float tolerance = longIrTaps > 1024 ? 1e-3f : 3e-4f;
+    for (unsigned block = 0; block < longIrBlocks; ++block) {
+      float convBlock[512];
+      std::copy_n(longInput.data() + block * 512, 512, convBlock);
+      longConvolution.process(convBlock, 256);
+      for (unsigned sample = 0; sample < 512; ++sample) {
+        const float expected = longExpected[block * 512 + sample];
+        if (std::abs(convBlock[sample] - expected) > tolerance) {
+          std::cerr << "upstream " << longIrTaps
+                    << "-tap Convolution differs from direct FIR reference at "
+                       "block "
+                    << block << ", sample " << sample << ": got "
+                    << convBlock[sample] << ", expected " << expected << '\n';
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  for (const unsigned taps : {257u, 4097u})
+    if (!checkLongConvolution(taps))
+      return 1;
+
+  // Equalizer APO does not resample convolution IRs: the IR sample rate must
+  // match the active graph. Verify that contract and actual FIR output at
+  // representative PipeWire rates, using independent direct sample-domain
+  // references for every output block and channel.
+  for (const unsigned rate : {44100u, 96000u, 192000u}) {
+    SF_INFO rateIrInfo{};
+    rateIrInfo.samplerate = static_cast<int>(rate);
+    rateIrInfo.channels = 1;
+    rateIrInfo.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+    const auto rateIrName = "impulse-" + std::to_string(rate) + ".wav";
+    const auto rateIrPath = dir / rateIrName;
+    SNDFILE *rateIrFile = sf_open(rateIrPath.c_str(), SFM_WRITE, &rateIrInfo);
+    if (!rateIrFile)
+      return 1;
+    const std::array<float, 4> rateImpulse = {0.5f, -0.25f, 0.125f, 0.0625f};
+    const auto rateIrWritten =
+        sf_writef_float(rateIrFile, rateImpulse.data(), rateImpulse.size());
+    sf_close(rateIrFile);
+    if (rateIrWritten != static_cast<sf_count_t>(rateImpulse.size()))
+      return 1;
+    const auto rateConfig =
+        dir / ("convolution-" + std::to_string(rate) + ".txt");
+    if (!write(rateConfig, "Convolution: " + rateIrName + "\n"))
+      return 1;
+    Engine rateConvolution(rate, 2, 256);
+    rateConvolution.loadConfig(rateConfig.string());
+    std::array<float, 4 * 256 * 2> rateInput{};
+    for (size_t sample = 0; sample < rateInput.size(); ++sample)
+      rateInput[sample] =
+          0.025f * static_cast<float>(static_cast<int>(sample % 29) - 14);
+    for (unsigned block = 0; block < 4; ++block) {
+      float actual[512];
+      std::copy_n(rateInput.data() + block * 512, 512, actual);
+      rateConvolution.process(actual, 256);
+      for (unsigned frame = 0; frame < 256; ++frame) {
+        const size_t absoluteFrame = block * 256 + frame;
+        for (unsigned channel = 0; channel < 2; ++channel) {
+          double expected = 0.0;
+          for (size_t tap = 0; tap < rateImpulse.size() && tap <= absoluteFrame;
+               ++tap)
+            expected += rateImpulse[tap] *
+                        rateInput[2 * (absoluteFrame - tap) + channel];
+          if (std::abs(actual[2 * frame + channel] - expected) > 1e-4f) {
+            std::cerr << "upstream " << rate
+                      << " Hz Convolution differs from direct FIR reference "
+                         "at block "
+                      << block << ", frame " << frame << ", channel " << channel
+                      << '\n';
+            return 1;
+          }
+        }
+      }
+    }
+  }
+
+  const auto validBeforeRateMismatch = dir / "valid-before-rate-mismatch.txt";
+  if (!write(validBeforeRateMismatch, "Preamp: -6 dB\n"))
+    return 1;
+  Engine retainedAfterRateMismatch(44100, 2, 256);
+  retainedAfterRateMismatch.loadConfig(validBeforeRateMismatch.string());
+  bool convolutionRateMismatchRejected = false;
+  try {
+    retainedAfterRateMismatch.loadConfig(convolutionConfig.string());
+  } catch (const std::exception &error) {
+    convolutionRateMismatchRejected =
+        std::string(error.what())
+            .find("sample rate does not match the active audio rate") !=
+        std::string::npos;
+  }
+  if (!convolutionRateMismatchRejected) {
+    std::cerr << "convolution accepted an IR with a mismatched sample rate\n";
+    return 1;
+  }
+  float retainedAfterMismatchSamples[] = {1.0f, -1.0f};
+  retainedAfterRateMismatch.process(retainedAfterMismatchSamples, 1);
+  if (std::abs(retainedAfterMismatchSamples[0] - gain) > 1e-5f ||
+      std::abs(retainedAfterMismatchSamples[1] + gain) > 1e-5f) {
+    std::cerr
+        << "mismatched convolution reload replaced the last valid graph\n";
+    return 1;
+  }
+
   auto graphicConfig = dir / "graphic-eq.txt";
   if (!write(graphicConfig, "GraphicEQ: 100 0 1000 0\n"))
     return 1;
@@ -2389,6 +3070,119 @@ int main() {
     std::cerr << "upstream GraphicEQ 1 kHz gain mismatch: " << graphicGainDb
               << " dB (expected -6 dB)\n";
     return 1;
+  }
+
+  const std::vector<FilterNode> graphicNodes = {
+      {100, 0}, {1000, -6}, {10000, 0}};
+  GainIterator graphicReference(graphicNodes);
+  if (!write(graphicConfig, "GraphicEQ: 100 0 1000 -6 10000 0\n"))
+    return 1;
+  for (const unsigned rate : {44100u, 48000u, 96000u, 192000u}) {
+    constexpr unsigned graphicBlockFrames = 256;
+    const unsigned requestedFrames = rate * 2;
+    const unsigned graphicResponseFrames =
+        ((requestedFrames + graphicBlockFrames - 1) / graphicBlockFrames) *
+        graphicBlockFrames;
+    const unsigned graphicResponseSettle = rate;
+    for (const double frequency : {100.0, 500.0, 1000.0, 5000.0, 10000.0}) {
+      Engine graphicResponse(rate, 2, 256);
+      graphicResponse.loadConfig(graphicConfig.string());
+      double inputEnergy = 0.0;
+      double outputEnergy = 0.0;
+      for (unsigned frame = 0; frame < graphicResponseFrames;) {
+        float block[512];
+        const unsigned count = graphicBlockFrames;
+        for (unsigned offset = 0; offset < count; ++offset) {
+          const float sample = static_cast<float>(
+              0.2 * std::sin(2.0 * 3.141592653589793 * frequency *
+                             (frame + offset) / rate));
+          block[2 * offset] = block[2 * offset + 1] = sample;
+          if (frame + offset >= graphicResponseSettle)
+            inputEnergy += 2.0 * sample * sample;
+        }
+        graphicResponse.process(block, count);
+        if (frame + count > graphicResponseSettle) {
+          const unsigned first =
+              frame < graphicResponseSettle ? graphicResponseSettle - frame : 0;
+          for (unsigned offset = first; offset < count; ++offset)
+            outputEnergy +=
+                static_cast<double>(block[2 * offset]) * block[2 * offset] +
+                static_cast<double>(block[2 * offset + 1]) *
+                    block[2 * offset + 1];
+        }
+        frame += count;
+      }
+      const double measuredDb =
+          20.0 * std::log10(std::sqrt(outputEnergy / inputEnergy));
+      const double expectedDb = graphicReference.gainAt(frequency);
+      if (!std::isfinite(measuredDb) ||
+          std::abs(measuredDb - expectedDb) > 0.35) {
+        std::cerr << "upstream GraphicEQ response mismatch at " << frequency
+                  << " Hz / " << rate << " Hz sample rate: measured "
+                  << measuredDb << " dB, expected " << expectedDb << " dB\n";
+        return 1;
+      }
+    }
+  }
+
+  // Exercise independent left/right state with distinct tones. The response
+  // matrix above sends identical samples to both channels, which would not
+  // reveal accidental channel cross-feed in the GraphicEQ graph.
+  constexpr unsigned asymmetricGraphicRate = 48000;
+  constexpr unsigned asymmetricGraphicBlock = 256;
+  constexpr unsigned asymmetricGraphicFrames = asymmetricGraphicRate * 2;
+  constexpr unsigned asymmetricGraphicSettle = asymmetricGraphicRate;
+  constexpr double leftGraphicFrequency = 1000.0;
+  constexpr double rightGraphicFrequency = 5000.0;
+  Engine asymmetricGraphic(asymmetricGraphicRate, 2, asymmetricGraphicBlock);
+  asymmetricGraphic.loadConfig(graphicConfig.string());
+  std::array<double, 2> asymmetricGraphicInputEnergy{};
+  std::array<double, 2> asymmetricGraphicOutputEnergy{};
+  for (unsigned frame = 0; frame < asymmetricGraphicFrames;) {
+    float block[asymmetricGraphicBlock * 2];
+    const unsigned count =
+        std::min(asymmetricGraphicBlock, asymmetricGraphicFrames - frame);
+    for (unsigned offset = 0; offset < count; ++offset) {
+      const unsigned absoluteFrame = frame + offset;
+      block[2 * offset] = static_cast<float>(
+          0.2 * std::sin(2.0 * 3.141592653589793 * leftGraphicFrequency *
+                         absoluteFrame / asymmetricGraphicRate));
+      block[2 * offset + 1] = static_cast<float>(
+          0.13 * std::sin(2.0 * 3.141592653589793 * rightGraphicFrequency *
+                          absoluteFrame / asymmetricGraphicRate));
+      if (absoluteFrame >= asymmetricGraphicSettle) {
+        for (unsigned channel = 0; channel < 2; ++channel)
+          asymmetricGraphicInputEnergy[channel] +=
+              static_cast<double>(block[2 * offset + channel]) *
+              block[2 * offset + channel];
+      }
+    }
+    asymmetricGraphic.process(block, count);
+    if (frame + count > asymmetricGraphicSettle) {
+      const unsigned first =
+          frame < asymmetricGraphicSettle ? asymmetricGraphicSettle - frame : 0;
+      for (unsigned offset = first; offset < count; ++offset)
+        for (unsigned channel = 0; channel < 2; ++channel)
+          asymmetricGraphicOutputEnergy[channel] +=
+              static_cast<double>(block[2 * offset + channel]) *
+              block[2 * offset + channel];
+    }
+    frame += count;
+  }
+  for (unsigned channel = 0; channel < 2; ++channel) {
+    const double frequency =
+        channel == 0 ? leftGraphicFrequency : rightGraphicFrequency;
+    const double measuredDb =
+        20.0 * std::log10(std::sqrt(asymmetricGraphicOutputEnergy[channel] /
+                                    asymmetricGraphicInputEnergy[channel]));
+    const double expectedDb = graphicReference.gainAt(frequency);
+    if (!std::isfinite(measuredDb) ||
+        std::abs(measuredDb - expectedDb) > 0.35) {
+      std::cerr << "upstream GraphicEQ asymmetric channel " << channel
+                << " response mismatch at " << frequency << " Hz: measured "
+                << measuredDb << " dB, expected " << expectedDb << " dB\n";
+      return 1;
+    }
   }
 #endif
   fs::create_directories(dir / "sub#dir");
@@ -2466,7 +3260,7 @@ int main() {
   if (!write(stageRoot,
              "Stage: capture\nInclude: staged-child.txt\nPreamp: 6 dB\n") ||
       !write(dir / "staged-child.txt",
-             "Stage: post-mix\nUnsupportedInThisStage: ignored\n"
+             "Stage: pre-mix\nUnsupportedInThisStage: ignored\n"
              "Preamp: -60 dB\nStage: capture\nPreamp: -6 dB\n"))
     return 1;
   Engine staged(48000, 2, 128);
@@ -2474,8 +3268,8 @@ int main() {
   if (staged.filterCount() != 2 || staged.configNotices().size() != 1 ||
       staged.configNotices()[0].file != (dir / "staged-child.txt") ||
       staged.configNotices()[0].line != 1 ||
-      staged.configNotices()[0].message.find("processing is unavailable") ==
-          std::string::npos) {
+      staged.configNotices()[0].message.find(
+          "pre-mix processing is unavailable") == std::string::npos) {
     std::cerr << "Stage filtering, warning provenance, or Include-local stage "
                  "scope mismatch\n";
     return 1;
@@ -2627,6 +3421,52 @@ int main() {
       std::abs(contextSamples[1] + expectedConditionalGain) > 1e-5f) {
     std::cerr << "PipeWire-mapped EAPO string/stage expression variables "
                  "selected the wrong branch\n";
+    return 1;
+  }
+
+  if (!write(conditional, "If: stage == \"post-mix\"\n"
+                          "Preamp: -6 dB\n"
+                          "Else:\n"
+                          "Preamp: 0 dB\n"
+                          "EndIf:\n"))
+    return 1;
+  Engine captureStage(48000, 2, 128, {}, false, false);
+  Engine playbackStage(48000, 2, 128, {}, false, false, {}, {}, {},
+                       L"post-mix");
+  captureStage.loadConfig(conditional.string());
+  playbackStage.loadConfig(conditional.string());
+  float captureStageSamples[2] = {1.0f, -1.0f};
+  float playbackStageSamples[2] = {1.0f, -1.0f};
+  captureStage.process(captureStageSamples, 1);
+  playbackStage.process(playbackStageSamples, 1);
+  if (captureStage.filterCount() != 1 || playbackStage.filterCount() != 1 ||
+      std::abs(captureStageSamples[0] - 1.0f) > 1e-5f ||
+      std::abs(captureStageSamples[1] + 1.0f) > 1e-5f ||
+      std::abs(playbackStageSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(playbackStageSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr
+        << "capture/playback stage expressions selected the wrong branch\n";
+    return 1;
+  }
+
+  if (!write(conditional, "Stage: post-mix\n"
+                          "Preamp: -6 dB\n"
+                          "Stage: capture\n"
+                          "Preamp: -3 dB\n"))
+    return 1;
+  captureStage.loadConfig(conditional.string());
+  playbackStage.loadConfig(conditional.string());
+  float captureDirectiveSamples[2] = {1.0f, -1.0f};
+  float playbackDirectiveSamples[2] = {1.0f, -1.0f};
+  captureStage.process(captureDirectiveSamples, 1);
+  playbackStage.process(playbackDirectiveSamples, 1);
+  const float expectedCaptureGain = std::pow(10.0f, -3.0f / 20.0f);
+  if (captureStage.filterCount() != 1 || playbackStage.filterCount() != 1 ||
+      std::abs(captureDirectiveSamples[0] - expectedCaptureGain) > 1e-5f ||
+      std::abs(captureDirectiveSamples[1] + expectedCaptureGain) > 1e-5f ||
+      std::abs(playbackDirectiveSamples[0] - expectedConditionalGain) > 1e-5f ||
+      std::abs(playbackDirectiveSamples[1] + expectedConditionalGain) > 1e-5f) {
+    std::cerr << "Stage: post-mix/capture directive selected the wrong graph\n";
     return 1;
   }
 #endif

@@ -31,7 +31,9 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -41,6 +43,7 @@
 #include <QProcess>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QToolButton>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -60,6 +63,8 @@
 #include <QSettings>
 #include <QTimer>
 #include <QThread>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -73,6 +78,12 @@
 namespace {
 const QString PluginPickerLine =
     QStringLiteral("__SKYAPO_PICK_INSTALLED_PLUGIN__");
+const QString LinuxVstPickerLine =
+    QStringLiteral("__SKYAPO_PICK_NATIVE_VST_PLUGIN__");
+const QString WindowsVstUnavailableLine =
+    QStringLiteral("__SKYAPO_WINDOWS_VST_UNAVAILABLE__");
+const QString DeviceSelectorPolkitAction =
+    QStringLiteral("org.linuxapo.device-selector.open");
 
 struct PluginParameterModel {
   QString symbol;
@@ -425,16 +436,35 @@ QString runtimeStatusText(int result, const QByteArray &output,
   }
 
   QString state;
+  QString dspState;
   for (const auto &line : details.split(QLatin1Char('\n'))) {
     if (line.startsWith(QStringLiteral("Daemon: "))) {
       state = line.mid(8).trimmed().toLower();
-      break;
+    } else if (line.startsWith(QStringLiteral("DSP state: "))) {
+      dspState = line.mid(11).trimmed().toLower();
     }
   }
 
   QString summary;
   if (state == QStringLiteral("streaming")) {
-    summary = QObject::tr("Streaming — audio processing active");
+    if (dspState == QStringLiteral("running")) {
+      summary = QObject::tr("Streaming — audio processing active");
+    } else if (dspState.startsWith(QStringLiteral("initializing"))) {
+      summary = QObject::tr(
+          "PipeWire connected — waiting for negotiated audio format");
+    } else if (dspState.startsWith(QStringLiteral("reconfiguring"))) {
+      summary = QObject::tr("PipeWire connected — rebuilding DSP for audio "
+                            "format (output silence)");
+    } else if (dspState.startsWith(QStringLiteral("paused"))) {
+      summary = QObject::tr("PipeWire streaming — DSP paused (output silence)");
+    } else if (dspState.startsWith(QStringLiteral("quiescing"))) {
+      summary = QObject::tr(
+          "PipeWire connected — DSP transition in progress (output silence)");
+    } else if (dspState == QStringLiteral("stopping")) {
+      summary = QObject::tr("PipeWire connected — DSP stopping");
+    } else {
+      summary = QObject::tr("PipeWire streaming — DSP state unavailable");
+    }
   } else if (state == QStringLiteral("connecting") ||
              state == QStringLiteral("unconnected")) {
     summary = QObject::tr("Waiting for PipeWire (filter state: %1)").arg(state);
@@ -583,8 +613,12 @@ public:
                         QWidget *parent = nullptr)
       : QWidget(parent), curves(std::move(curves)) {
     setObjectName(QStringLiteral("responsePlot"));
-    if (!this->curves.isEmpty())
+    if (!this->curves.isEmpty()) {
       setProperty("analysisBinCount", this->curves.front().points.size());
+      if (!this->curves.front().points.isEmpty())
+        setProperty("plotMaxFrequencyHz",
+                    std::min(24000.0, this->curves.front().points.back().x()));
+    }
     for (const auto &curve : this->curves) {
       if (curve.channel != QStringLiteral("L → L"))
         continue;
@@ -598,9 +632,20 @@ public:
       }
       if (closest != curve.points.cend())
         setProperty("responseAt1000HzLtoLDb", closest->y());
+      if (curve.phasePoints.isEmpty())
+        break;
+      auto closestPhase = curve.phasePoints.cbegin();
+      for (auto point = curve.phasePoints.cbegin();
+           point != curve.phasePoints.cend(); ++point) {
+        if (std::abs(point->x() - 1000.0) <
+            std::abs(closestPhase->x() - 1000.0))
+          closestPhase = point;
+      }
+      if (closestPhase != curve.phasePoints.cend())
+        setProperty("responsePhaseAt1000HzLtoLDeg", closestPhase->y());
       break;
     }
-    setMinimumSize(700, 380);
+    setMinimumSize(700, 560);
   }
 
 protected:
@@ -608,57 +653,113 @@ protected:
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillRect(rect(), palette().base());
-    const QRectF plot(68, 18, width() - 88, height() - 64);
-    constexpr double minHz = 20.0, maxHz = 24000.0;
+    const double panelHeight = (height() - 108.0) / 2.0;
+    const QRectF magnitudePlot(68, 24, width() - 88, panelHeight);
+    const QRectF phasePlot(68, magnitudePlot.bottom() + 42, width() - 88,
+                           panelHeight);
+    constexpr double minHz = 20.0;
+    double maxHz = 24000.0;
+    if (!curves.isEmpty() && !curves.front().points.isEmpty())
+      maxHz = std::min(maxHz, curves.front().points.back().x());
     constexpr double minDb = -24.0, maxDb = 12.0;
-    const auto xFor = [&plot](double hz) {
+    const auto xFor = [maxHz](const QRectF &plot, double hz) {
       return plot.left() +
              std::log(hz / minHz) / std::log(maxHz / minHz) * plot.width();
     };
-    const auto yFor = [&plot](double db) {
-      return plot.bottom() - (db - minDb) / (maxDb - minDb) * plot.height();
+    const auto magnitudeY = [&magnitudePlot](double db) {
+      return magnitudePlot.bottom() -
+             (db - minDb) / (maxDb - minDb) * magnitudePlot.height();
     };
+    const auto phaseY = [&phasePlot](double degrees) {
+      return phasePlot.bottom() -
+             (degrees + 180.0) / 360.0 * phasePlot.height();
+    };
+    painter.setPen(palette().text().color());
+    painter.drawText(QRectF(magnitudePlot.left(), 2, magnitudePlot.width(), 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     tr("Magnitude response (dB)"));
+    painter.drawText(QRectF(phasePlot.left(), magnitudePlot.bottom() + 22,
+                            phasePlot.width(), 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     tr("Phase response (degrees)"));
     painter.setPen(QPen(palette().mid().color(), 1));
     for (int db = -24; db <= 12; db += 6) {
-      const double y = yFor(db);
-      painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+      const double y = magnitudeY(db);
+      painter.drawLine(QPointF(magnitudePlot.left(), y),
+                       QPointF(magnitudePlot.right(), y));
       painter.drawText(QRectF(4, y - 9, 56, 18),
                        Qt::AlignRight | Qt::AlignVCenter,
                        QStringLiteral("%1 dB").arg(db));
     }
+    for (int degrees = -180; degrees <= 180; degrees += 90) {
+      const double y = phaseY(degrees);
+      painter.drawLine(QPointF(phasePlot.left(), y),
+                       QPointF(phasePlot.right(), y));
+      painter.drawText(QRectF(4, y - 9, 56, 18),
+                       Qt::AlignRight | Qt::AlignVCenter,
+                       QStringLiteral("%1°").arg(degrees));
+    }
     for (const double hz : {20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0,
                             5000.0, 10000.0, 20000.0}) {
-      const double x = xFor(hz);
-      painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()));
-      painter.drawText(QRectF(x - 30, plot.bottom() + 5, 60, 18),
+      if (hz > maxHz)
+        continue;
+      const double x = xFor(phasePlot, hz);
+      painter.drawLine(QPointF(x, magnitudePlot.top()),
+                       QPointF(x, phasePlot.bottom()));
+      painter.drawText(QRectF(x - 30, phasePlot.bottom() + 5, 60, 18),
                        Qt::AlignHCenter,
                        hz >= 1000.0 ? QStringLiteral("%1k").arg(hz / 1000.0)
                                     : QString::number(static_cast<int>(hz)));
     }
     painter.setPen(palette().text().color());
-    painter.drawText(QRectF(plot.left(), height() - 22, plot.width(), 18),
-                     Qt::AlignHCenter, tr("Frequency (Hz, logarithmic)"));
+    painter.drawText(
+        QRectF(4, phasePlot.bottom() + 24, width() - 8, 18), Qt::AlignHCenter,
+        tr("Frequency (Hz, logarithmic) · phase is wrapped to ±180°"));
     const QList<QColor> colors{QColor(40, 120, 220), QColor(220, 90, 65),
                                QColor(50, 160, 100), QColor(150, 80, 180)};
     int curveIndex = 0;
     for (const auto &curve : curves) {
-      QPainterPath path;
-      bool started = false;
+      QPainterPath magnitudePath;
+      bool magnitudeStarted = false;
       for (const auto &point : curve.points) {
-        if (point.x() < minHz || point.x() > maxHz)
+        if (point.x() < minHz || point.x() > maxHz || !std::isfinite(point.y()))
           continue;
-        const QPointF mapped(xFor(point.x()),
-                             yFor(std::clamp(point.y(), minDb, maxDb)));
-        if (!started) {
-          path.moveTo(mapped);
-          started = true;
+        const QPointF mapped(xFor(magnitudePlot, point.x()),
+                             magnitudeY(std::clamp(point.y(), minDb, maxDb)));
+        if (!magnitudeStarted) {
+          magnitudePath.moveTo(mapped);
+          magnitudeStarted = true;
         } else {
-          path.lineTo(mapped);
+          magnitudePath.lineTo(mapped);
         }
       }
       painter.setPen(QPen(colors[curveIndex % colors.size()], 2));
-      painter.drawPath(path);
-      painter.drawText(QPointF(plot.left() + curveIndex * 110, plot.top() + 14),
+      painter.drawPath(magnitudePath);
+
+      QPainterPath phasePath;
+      bool phaseStarted = false;
+      double previousPhase = 0.0;
+      for (const auto &point : curve.phasePoints) {
+        if (point.x() < minHz || point.x() > maxHz ||
+            !std::isfinite(point.y())) {
+          phaseStarted = false;
+          continue;
+        }
+        const double phase = std::clamp(point.y(), -180.0, 180.0);
+        const QPointF mapped(xFor(phasePlot, point.x()), phaseY(phase));
+        if (!phaseStarted || std::abs(phase - previousPhase) > 180.0) {
+          phasePath.moveTo(mapped);
+          phaseStarted = true;
+        } else {
+          phasePath.lineTo(mapped);
+        }
+        previousPhase = phase;
+      }
+      painter.setPen(QPen(colors[curveIndex % colors.size()], 2));
+      painter.drawPath(phasePath);
+      painter.setPen(palette().text().color());
+      painter.drawText(QPointF(magnitudePlot.left() + curveIndex * 110,
+                               magnitudePlot.top() + 15),
                        curve.channel);
       ++curveIndex;
     }
@@ -669,8 +770,10 @@ private:
 };
 #endif
 
-MainWindow::MainWindow(QString path, QString cliExecutable)
-    : cliExecutable(std::move(cliExecutable)) {
+MainWindow::MainWindow(QString path, QString cliExecutable,
+                       QString polkitExecutable)
+    : cliExecutable(std::move(cliExecutable)),
+      polkitExecutable(std::move(polkitExecutable)) {
   Q_INIT_RESOURCE(skyapo_editor);
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   Q_INIT_RESOURCE(skyapo_graphiceq);
@@ -799,6 +902,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
          "Enumerated channel count and sample rate appear when available; "
          "the negotiated runtime format is shown in daemon status."));
   auto *refreshButton = new QPushButton(tr("Refresh devices"), root);
+  auto *deviceSelectorButton = new QPushButton(tr("Device Selector…"), root);
+  deviceSelectorButton->setObjectName(QStringLiteral("openDeviceSelector"));
   auto *startButton = new QPushButton(tr("Start daemon"), root);
   auto *stopButton = new QPushButton(tr("Stop daemon"), root);
   startButton->setObjectName(QStringLiteral("startDaemon"));
@@ -806,6 +911,7 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   deviceRow->addWidget(new QLabel(tr("Input device:"), root));
   deviceRow->addWidget(deviceCombo, 1);
   deviceRow->addWidget(refreshButton);
+  deviceRow->addWidget(deviceSelectorButton);
   deviceRow->addWidget(startButton);
   deviceRow->addWidget(stopButton);
   outer->addLayout(deviceRow);
@@ -816,13 +922,9 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   rowTable->setHandlers(
       [this](QMenu *menu) { populateAddPopupMenu(menu); },
       [this](const QString &line, FilterTable::Item *before) {
-        if (line == PluginPickerLine) {
-          addPluginToConfiguration(
-              before ? std::optional<qsizetype>(before->index) : std::nullopt);
-          return;
-        }
-        document.insert(before ? before->index : document.lineCount(), line);
-        markModified();
+        activateFilterTemplate(line,
+                               before ? std::optional<qsizetype>(before->index)
+                                      : std::nullopt);
       },
       [this](FilterTable::Item *item) {
         if (item && item->index >= 0 && item->index < document.lineCount()) {
@@ -931,6 +1033,17 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
       QStringLiteral("configureSelectedPluginParameters"));
   connect(pluginParametersAction, &QAction::triggered, this,
           &MainWindow::configureSelectedPluginParameters);
+  auto *pluginBypassMenu = toolsMenu->addMenu(tr("Plugin bypass"));
+  auto *bypassOnAction =
+      pluginBypassMenu->addAction(tr("Set selected plugin bypass on"));
+  bypassOnAction->setObjectName(QStringLiteral("setPluginBypassOn"));
+  connect(bypassOnAction, &QAction::triggered, this,
+          [this] { setSelectedPluginBypass(true); });
+  auto *bypassOffAction =
+      pluginBypassMenu->addAction(tr("Set selected plugin bypass off"));
+  bypassOffAction->setObjectName(QStringLiteral("setPluginBypassOff"));
+  connect(bypassOffAction, &QAction::triggered, this,
+          [this] { setSelectedPluginBypass(false); });
   auto *helpMenu = menuBar()->addMenu(tr("Help"));
   auto *aboutAction = helpMenu->addAction(tr("About SkyAPO"));
   aboutAction->setObjectName(QStringLiteral("aboutSkyAPO"));
@@ -979,16 +1092,15 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
     if (auto *action =
             menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height())))) {
       const auto line = action->data().value<FilterTemplate>().getLine();
-      if (line == PluginPickerLine)
-        addPluginToConfiguration();
-      else
-        addFilter(line);
+      activateFilterTemplate(line);
     }
   });
   connect(responseButton, &QPushButton::clicked, this,
           &MainWindow::analyzeResponse);
   connect(refreshButton, &QPushButton::clicked, this,
           &MainWindow::refreshDevices);
+  connect(deviceSelectorButton, &QPushButton::clicked, this,
+          &MainWindow::openDeviceSelector);
   connect(deviceCombo, qOverload<int>(&QComboBox::activated), this,
           &MainWindow::selectDevice);
   const auto runDaemonControl = [this, startButton,
@@ -1123,7 +1235,7 @@ void MainWindow::analyzeResponse() {
             QDialog dialog(self);
             dialog.setWindowTitle(self->tr("Calculated filter response"));
             auto *layout = new QVBoxLayout(&dialog);
-            layout->addWidget(new QLabel(
+            auto *summary = new QLabel(
                 self->tr("EAPO Engine impulse response · %1 Hz · %2 %3 · "
                          "%4 FFT samples · all input/output channel paths")
                     .arg(sampleRate)
@@ -1131,7 +1243,21 @@ void MainWindow::analyzeResponse() {
                     .arg(channels == 1 ? self->tr("channel")
                                        : self->tr("channels"))
                     .arg(fftFrames),
-                &dialog));
+                &dialog);
+            summary->setObjectName(QStringLiteral("analysisSummary"));
+            layout->addWidget(summary);
+            const QString peakGain =
+                result.peakGainDb
+                    ? QStringLiteral("%1 dB").arg(*result.peakGainDb, 0, 'f', 2)
+                    : self->tr("N/A");
+            auto *peakGainLabel = new QLabel(
+                self->tr("Peak gain (calculated): %1").arg(peakGain), &dialog);
+            peakGainLabel->setObjectName(QStringLiteral("analysisPeakGain"));
+            peakGainLabel->setToolTip(self->tr(
+                "Maximum finite magnitude among the calculated, "
+                "plugin-free Engine input/output channel responses. "
+                "This is not a live clipping or hardware measurement."));
+            layout->addWidget(peakGainLabel);
             layout->addWidget(
                 new ResponsePlot(std::move(result.curves), &dialog));
             auto *close = new QPushButton(self->tr("Close"), &dialog);
@@ -1394,15 +1520,15 @@ void MainWindow::rebuildRows() {
         parameters = raw.mid(colon + 1).trimmed();
         editor = stageFactory.createFilterGUI(command, parameters);
         if (editor) {
-          const QString unsupportedStageTooltip =
-              tr("Windows playback stage; SkyAPO's PipeWire capture path does "
-                 "not process this stage.");
-          for (const auto *name : {"preMixCheckBox", "postMixCheckBox"}) {
-            if (auto *stage = editor->findChild<QCheckBox *>(name)) {
-              stage->setEnabled(false);
-              stage->setToolTip(unsupportedStageTooltip);
-            }
+          if (auto *preMix = editor->findChild<QCheckBox *>("preMixCheckBox")) {
+            preMix->setEnabled(false);
+            preMix->setToolTip(
+                tr("Per-application pre-mix processing is not available in "
+                   "the current PipeWire graph."));
           }
+          if (auto *postMix = editor->findChild<QCheckBox *>("postMixCheckBox"))
+            postMix->setToolTip(
+                tr("Applied by SkyAPO's mixed PipeWire playback graph."));
         }
       }
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
@@ -1448,52 +1574,134 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
   PreampFilterGUIFactory preamp;
   BiQuadFilterGUIFactory biquad;
   DelayFilterGUIFactory delay;
-  StageFilterGUIFactory stage;
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   GraphicEQFilterGUIFactory graphicEQ;
 #endif
-  const auto append = [menu](const QList<FilterTemplate> &templates) {
+  const auto append = [](QMenu *target,
+                         const QList<FilterTemplate> &templates) {
     for (const auto &filter : templates) {
-      auto *action = menu->addAction(filter.getName());
+      auto *action = target->addAction(filter.getName());
       action->setData(QVariant::fromValue(filter));
     }
   };
-  append(preamp.createFilterTemplates());
-  menu->addAction(tr("Include configuration…"))
+
+  auto *comment = menu->addMenu(tr("Comment"));
+  comment->setObjectName(QStringLiteral("addFilterCommentMenu"));
+  comment->addAction(tr("Comment"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Comment"), "# ", {tr("Comment")})));
+
+  auto *control = menu->addMenu(tr("Control"));
+  control->setObjectName(QStringLiteral("addFilterControlMenu"));
+  control->addAction(tr("Include (Include configuration file)"))
       ->setData(QVariant::fromValue(FilterTemplate(tr("Include configuration…"),
                                                    "Include: child.txt",
-                                                   {tr("Configuration")})));
-  menu->addAction(tr("Device match"))
+                                                   {tr("Control")})));
+  control->addAction(tr("Device (Select device)"))
       ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Device match"), "Device: all", {tr("Configuration")})));
-  menu->addAction(tr("Channel selection"))
+          tr("Device (Select device)"), "Device: all", {tr("Control")})));
+  control->addAction(tr("Channel (Select channels)"))
       ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Channel selection"), "Channel: L R", {tr("Basic filters")})));
-  menu->addAction(tr("Copy between channels"))
-      ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Copy between channels"), "Copy: L=L", {tr("Basic filters")})));
-  menu->addSection(tr("Parametric filters"));
-  append(biquad.createFilterTemplates());
-  menu->addAction(tr("Custom IIR filter"))
+          tr("Channel (Select channels)"), "Channel: L R", {tr("Control")})));
+  control->addAction(tr("Stage (Select processing stage)"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Stage (Select processing stage)"),
+                         "Stage: capture", {tr("Control")})));
+
+  auto *basic = menu->addMenu(tr("Basic filters"));
+  basic->setObjectName(QStringLiteral("addFilterBasicMenu"));
+  append(basic, preamp.createFilterTemplates());
+  append(basic, delay.createFilterTemplates());
+  basic->addAction(tr("Copy (Copy between channels)"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Copy (Copy between channels)"), "Copy: L=L",
+                         {tr("Basic filters")})));
+
+  auto *parametric = menu->addMenu(tr("Parametric filters"));
+  parametric->setObjectName(QStringLiteral("addFilterParametricMenu"));
+  append(parametric, biquad.createFilterTemplates());
+  parametric->addAction(tr("Custom IIR filter"))
       ->setData(QVariant::fromValue(
           FilterTemplate(tr("Custom IIR filter"),
                          "Filter: ON IIR Order 2 Coefficients 1 0 0 1 0 0",
                          {tr("Parametric filters")})));
-  menu->addSeparator();
-  append(delay.createFilterTemplates());
-  append(stage.createFilterTemplates());
-  menu->addSection(tr("Plugins"));
-  menu->addAction(tr("Installed plugin…"))
-      ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Installed plugin…"), PluginPickerLine, {tr("Plugins")})));
-  menu->addAction(tr("Convolution (impulse response)"))
+
+  auto *graphic = menu->addMenu(tr("Graphic equalizers"));
+  graphic->setObjectName(QStringLiteral("addFilterGraphicMenu"));
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  append(graphic, graphicEQ.createFilterTemplates());
+#else
+  for (const auto &name :
+       {tr("15-band graphic equalizer"), tr("31-band graphic equalizer"),
+        tr("Graphic equalizer with variable bands")}) {
+    auto *unavailable = graphic->addAction(name);
+    unavailable->setEnabled(false);
+    unavailable->setToolTip(tr("Requires FFTW3f support at build time"));
+  }
+#endif
+
+  auto *advanced = menu->addMenu(tr("Advanced filters"));
+  advanced->setObjectName(QStringLiteral("addFilterAdvancedMenu"));
+  advanced->addAction(tr("Convolution (Convolution with impulse response)"))
       ->setData(QVariant::fromValue(FilterTemplate(
           tr("Convolution (impulse response)"),
           "Convolution: impulse-response.wav", {tr("Advanced filters")})));
-#ifdef SKYAPO_HAVE_GRAPHIC_EQ
-  menu->addSeparator();
-  append(graphicEQ.createFilterTemplates());
-#endif
+  advanced->addAction(tr("Loudness correction"))
+      ->setData(QVariant::fromValue(FilterTemplate(
+          tr("Loudness correction"),
+          "LoudnessCorrection: ReferenceLevel 0 ReferenceOffset 0",
+          {tr("Advanced filters")})));
+
+  auto *plugins = menu->addMenu(tr("Plugins"));
+  plugins->setObjectName(QStringLiteral("addFilterPluginsMenu"));
+  auto *native =
+      plugins->addAction(tr("Installed plugin (LV2 / CLAP / VST3)…"));
+  native->setObjectName(QStringLiteral("addInstalledPluginFromMenu"));
+  native->setData(QVariant::fromValue(FilterTemplate(
+      tr("Installed plugin…"), PluginPickerLine, {tr("Plugins")})));
+  auto *linuxVst = plugins->addAction(tr("VST plugin (Linux)"));
+  linuxVst->setObjectName(QStringLiteral("addLinuxVstPlugin"));
+  linuxVst->setData(QVariant::fromValue(FilterTemplate(
+      tr("VST plugin (Linux)"), LinuxVstPickerLine, {tr("Plugins")})));
+  auto *windowsVst = plugins->addAction(tr("VST plugin (Windows)"));
+  windowsVst->setObjectName(QStringLiteral("addWindowsVstPlugin"));
+  windowsVst->setData(QVariant::fromValue(FilterTemplate(
+      tr("VST plugin (Windows)"), WindowsVstUnavailableLine, {tr("Plugins")})));
+}
+
+void MainWindow::activateFilterTemplate(const QString &line,
+                                        std::optional<qsizetype> beforeIndex) {
+  if (line == PluginPickerLine) {
+    addPluginToConfiguration(beforeIndex);
+    return;
+  }
+  if (line == LinuxVstPickerLine) {
+    addPluginToConfiguration(beforeIndex, QStringLiteral("VST3"));
+    return;
+  }
+  if (line == WindowsVstUnavailableLine) {
+    QMessageBox::information(
+        this, tr("VST plugin (Windows) unavailable"),
+        tr("Windows VST binaries are not loaded natively by LinuxAPO. A tested "
+           "Wine/yabridge host integration is not available in this build. "
+           "If yabridge has produced a Linux VST3 wrapper, try it through the "
+           "Linux VST entry; that compatibility path is not verified here."));
+    return;
+  }
+  if (line == "LoudnessCorrection: ReferenceLevel 0 ReferenceOffset 0") {
+    QMessageBox::information(
+        this, tr("Loudness correction"),
+        tr("This uses the upstream Equalizer APO filter and needs a usable "
+           "live PipeWire output-volume snapshot. The renderer and config "
+           "checker cannot supply that runtime input."));
+  }
+  if (beforeIndex) {
+    document.insert(
+        std::clamp<qsizetype>(*beforeIndex, 0, document.lineCount()), line);
+    markModified();
+  } else {
+    addFilter(line);
+  }
 }
 
 void MainWindow::syncRowsToDocument() {
@@ -1519,23 +1727,32 @@ void MainWindow::addFilter(const QString &line) {
   rebuildRows();
 }
 
-void MainWindow::addPluginToConfiguration(
-    std::optional<qsizetype> beforeIndex) {
+void MainWindow::addPluginToConfiguration(std::optional<qsizetype> beforeIndex,
+                                          QString formatFilter) {
   if (pluginRequestPending)
     return;
   pluginRequestPending = true;
   const quint64 requestedRevision = configRevision;
   const auto requestedIndex = beforeIndex;
-  auto *insertAction = findChild<QAction *>("addInstalledPlugin");
-  if (insertAction)
-    insertAction->setEnabled(false);
+  QList<QAction *> insertionActions;
+  for (auto *action : findChildren<QAction *>()) {
+    const auto name = action->objectName();
+    if (name == QStringLiteral("addInstalledPlugin") ||
+        name == QStringLiteral("addInstalledPluginFromMenu") ||
+        name == QStringLiteral("addLinuxVstPlugin")) {
+      action->setEnabled(false);
+      insertionActions.push_back(action);
+    }
+  }
 
-  runCli({"plugin", "list"}, [this, insertAction, requestedRevision,
+  runCli({"plugin", "list"}, [this, insertionActions, requestedRevision,
+                              formatFilter = std::move(formatFilter),
                               requestedIndex](int result, QByteArray output,
                                               QByteArray error) {
     pluginRequestPending = false;
-    if (insertAction)
-      insertAction->setEnabled(true);
+    for (auto *action : insertionActions)
+      if (action)
+        action->setEnabled(true);
     if (result != 0) {
       QMessageBox::warning(this, tr("Add plugin"),
                            QString::fromUtf8(error.isEmpty() ? output : error));
@@ -1544,12 +1761,18 @@ void MainWindow::addPluginToConfiguration(
 
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("pluginPicker"));
-    dialog.setWindowTitle(tr("Add installed plugin"));
+    dialog.setWindowTitle(formatFilter == QStringLiteral("VST3")
+                              ? tr("Add VST plugin (Linux)")
+                              : tr("Add installed plugin"));
     auto *layout = new QVBoxLayout(&dialog);
     auto *description = new QLabel(
-        tr("Choose a discovered LV2, CLAP, or VST3 plugin. The editor "
-           "inserts its config directive; edit parameters in the "
-           "configuration row."),
+        formatFilter == QStringLiteral("VST3")
+            ? tr("Choose a discovered Linux VST3 module. Direct Windows VST "
+                 "binaries are not loaded. A yabridge wrapper may appear if "
+                 "installed, but that path is not compatibility-tested.")
+            : tr("Choose a discovered LV2, CLAP, or VST3 plugin. The editor "
+                 "inserts its config directive; edit parameters in the "
+                 "configuration row."),
         &dialog);
     description->setWordWrap(true);
     layout->addWidget(description);
@@ -1561,6 +1784,8 @@ void MainWindow::addPluginToConfiguration(
       if (fields.size() != 3 || (fields[0] != QStringLiteral("LV2") &&
                                  fields[0] != QStringLiteral("CLAP") &&
                                  fields[0] != QStringLiteral("VST3")))
+        continue;
+      if (!formatFilter.isEmpty() && fields[0] != formatFilter)
         continue;
       const QString id = fields[1].trimmed();
       if (id.isEmpty() || std::any_of(id.cbegin(), id.cend(),
@@ -1576,9 +1801,13 @@ void MainWindow::addPluginToConfiguration(
     if (plugins->count() == 0) {
       QMessageBox::information(
           this, tr("Add plugin"),
-          tr("No supported plugins were discovered. Check that a "
-             "native LV2, CLAP, or VST3 host was built and the plugin "
-             "is installed."));
+          formatFilter == QStringLiteral("VST3")
+              ? tr("No native Linux VST3 plugins were discovered. Check that "
+                   "the VST3 host was built and a Linux VST3 plugin is "
+                   "installed. Windows binaries are not accepted here.")
+              : tr("No supported plugins were discovered. Check that a "
+                   "native LV2, CLAP, or VST3 host was built and the plugin "
+                   "is installed."));
       return;
     }
     plugins->setCurrentRow(0);
@@ -1648,110 +1877,263 @@ void MainWindow::configureSelectedPluginParameters() {
   if (action)
     action->setEnabled(false);
 
-  runCli({QStringLiteral("plugin"), QStringLiteral("info"), pluginId},
-         [this, action, requestedRevision, index, originalLine, format,
-          pluginId](int result, QByteArray output, QByteArray error) {
+  runCli(
+      {QStringLiteral("plugin"), QStringLiteral("info"), pluginId},
+      [this, action, requestedRevision, index, originalLine, format,
+       pluginId](int result, QByteArray output, QByteArray error) {
+        pluginRequestPending = false;
+        if (action)
+          action->setEnabled(true);
+        if (result != 0) {
+          QMessageBox::warning(
+              this, tr("Plugin parameters"),
+              QString::fromUtf8(error.isEmpty() ? output : error));
+          return;
+        }
+        if (configRevision != requestedRevision ||
+            index >= document.lineCount() ||
+            document.line(index).toQString() != originalLine) {
+          QMessageBox::warning(
+              this, tr("Plugin parameters"),
+              tr("The selected configuration row changed while plugin "
+                 "metadata was loading. Select it again and retry."));
+          return;
+        }
+
+        QVector<PluginParameterModel> parameters;
+        QString errorText;
+        if (!parsePluginMetadata(output, format, pluginId, parameters,
+                                 errorText)) {
+          QMessageBox::warning(this, tr("Plugin parameters"), errorText);
+          return;
+        }
+        if (parameters.isEmpty()) {
+          QMessageBox::information(
+              this, tr("Plugin parameters"),
+              tr("This plugin exposes no writable input parameters."));
+          return;
+        }
+
+        QHash<QString, double> values;
+        for (const auto &parameter : parameters)
+          values.insert(parameter.symbol, parameter.defaultValue);
+        if (!readConfiguredPluginValues(originalLine, format, parameters,
+                                        values, errorText)) {
+          QMessageBox::warning(
+              this, tr("Plugin parameters"),
+              errorText + QLatin1Char('\n') +
+                  tr("Edit the row as raw text to resolve it."));
+          return;
+        }
+
+        QDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("pluginParameterEditor"));
+        dialog.setWindowTitle(tr("Plugin parameters — %1").arg(pluginId));
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *notice = new QLabel(
+            tr("Save changes the configuration. Apply Live sends these "
+               "values to the active plugin without saving the file. "
+               "Values shown here are configuration values, not live "
+               "plugin readbacks."),
+            &dialog);
+        notice->setWordWrap(true);
+        layout->addWidget(notice);
+        auto *form = new QFormLayout;
+        QHash<QString, QDoubleSpinBox *> editors;
+        for (const auto &parameter : parameters) {
+          auto *editor = new QDoubleSpinBox(&dialog);
+          editor->setObjectName(
+              QStringLiteral("pluginParameter_%1").arg(parameter.symbol));
+          editor->setDecimals(9);
+          editor->setRange(parameter.minimum, parameter.maximum);
+          editor->setValue(values.value(parameter.symbol));
+          editor->setKeyboardTracking(false);
+          form->addRow(parameter.name, editor);
+          editors.insert(parameter.symbol, editor);
+        }
+        auto *formContainer = new QWidget(&dialog);
+        formContainer->setLayout(form);
+        auto *scroll = new QScrollArea(&dialog);
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(formContainer);
+        layout->addWidget(scroll, 1);
+        auto *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        buttons->setObjectName(QStringLiteral("pluginParameterButtons"));
+        auto *applyLiveButton = new QPushButton(tr("Apply Live"), &dialog);
+        applyLiveButton->setObjectName(
+            QStringLiteral("applyPluginParametersLive"));
+        buttons->addButton(applyLiveButton, QDialogButtonBox::ActionRole);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                &QDialog::reject);
+        connect(
+            applyLiveButton, &QPushButton::clicked, &dialog,
+            [this, applyLiveButton, pluginId, parameters, editors] {
+              if (pluginRequestPending)
+                return;
+              QVector<QPair<QString, QString>> pendingValues;
+              pendingValues.reserve(parameters.size());
+              for (const auto &parameter : parameters) {
+                const auto *editor = editors.value(parameter.symbol);
+                if (editor)
+                  pendingValues.push_back(
+                      {parameter.symbol,
+                       QString::number(editor->value(), 'g', 9)});
+              }
+              if (pendingValues.isEmpty()) {
+                QMessageBox::information(
+                    this, tr("Apply plugin parameters live"),
+                    tr("There are no writable parameters to apply."));
+                return;
+              }
+
+              pluginRequestPending = true;
+              applyLiveButton->setEnabled(false);
+              const QPointer<QPushButton> applyLiveButtonGuard(applyLiveButton);
+              auto applyNext =
+                  std::make_shared<std::function<void(qsizetype)>>();
+              const std::weak_ptr<std::function<void(qsizetype)>>
+                  weakApplyNext = applyNext;
+              *applyNext = [this, weakApplyNext, applyLiveButtonGuard, pluginId,
+                            pendingValues](qsizetype index) {
+                if (index >= pendingValues.size()) {
+                  pluginRequestPending = false;
+                  if (applyLiveButtonGuard)
+                    applyLiveButtonGuard->setEnabled(true);
+                  QMessageBox::information(
+                      this, tr("Apply plugin parameters live"),
+                      tr("The daemon acknowledged all live parameter "
+                         "updates. The configuration file was not "
+                         "changed; save separately to persist them."));
+                  return;
+                }
+
+                const auto applyStep = weakApplyNext.lock();
+                if (!applyStep) {
+                  pluginRequestPending = false;
+                  if (applyLiveButtonGuard)
+                    applyLiveButtonGuard->setEnabled(true);
+                  return;
+                }
+                const auto value = pendingValues.at(index);
+                runCli({QStringLiteral("plugin"), QStringLiteral("set"),
+                        pluginId, value.first, value.second},
+                       [this, weakApplyNext, applyStep, applyLiveButtonGuard,
+                        pluginId, parameter = value.first, index](
+                           int result, QByteArray output, QByteArray error) {
+                         (void)applyStep;
+                         if (result != 0) {
+                           pluginRequestPending = false;
+                           if (applyLiveButtonGuard)
+                             applyLiveButtonGuard->setEnabled(true);
+                           QByteArray detail = error.isEmpty() ? output : error;
+                           QString message =
+                               tr("Could not apply parameter '%1' to "
+                                  "plugin '%2'.")
+                                   .arg(parameter, pluginId);
+                           if (index > 0)
+                             message += tr(" Earlier parameters may "
+                                           "already have been applied.");
+                           if (!detail.trimmed().isEmpty())
+                             message += QLatin1Char('\n') +
+                                        QString::fromUtf8(detail).trimmed();
+                           QMessageBox::warning(this,
+                                                tr("Plugin parameter update "
+                                                   "failed"),
+                                                message);
+                           return;
+                         }
+                         if (const auto nextStep = weakApplyNext.lock())
+                           (*nextStep)(index + 1);
+                       });
+              };
+              (*applyNext)(0);
+            });
+        layout->addWidget(buttons);
+        dialog.resize(560, static_cast<int>(std::min<qsizetype>(
+                               640, 180 + parameters.size() * 38)));
+        if (dialog.exec() != QDialog::Accepted)
+          return;
+
+        for (auto iterator = editors.cbegin(); iterator != editors.cend();
+             ++iterator)
+          values.insert(iterator.key(), iterator.value()->value());
+        QString updated;
+        if (!patchPluginDirective(originalLine, format, pluginId, parameters,
+                                  values, updated, errorText)) {
+          QMessageBox::warning(this, tr("Plugin parameters"), errorText);
+          return;
+        }
+        if (updated != originalLine) {
+          document.replace(index, updated);
+          markModified();
+          rebuildRows();
+        }
+      });
+}
+
+void MainWindow::setSelectedPluginBypass(bool bypassed) {
+  if (pluginRequestPending)
+    return;
+  auto *item = rowTable ? rowTable->getFocusedItem() : nullptr;
+  if (!item || item->index < 0 || item->index >= document.lineCount()) {
+    QMessageBox::information(this, tr("Plugin bypass"),
+                             tr("Select a Plugin: row first."));
+    return;
+  }
+
+  const QString line =
+      withoutInlineComment(document.line(item->index).toQString());
+  static const QRegularExpression directiveExpression(
+      QStringLiteral(R"(^\s*Plugin\s*:\s*(LV2|CLAP|VST3)\s+(\S+))"),
+      QRegularExpression::CaseInsensitiveOption);
+  const auto directive = directiveExpression.match(line);
+  if (!directive.hasMatch()) {
+    QMessageBox::information(
+        this, tr("Plugin bypass"),
+        tr("Select a native LV2, CLAP, or VST3 Plugin: row. Other plugin "
+           "directives do not support this control."));
+    return;
+  }
+
+  const QString pluginId = directive.captured(2);
+  auto *onAction = findChild<QAction *>(QStringLiteral("setPluginBypassOn"));
+  auto *offAction = findChild<QAction *>(QStringLiteral("setPluginBypassOff"));
+  pluginRequestPending = true;
+  if (onAction)
+    onAction->setEnabled(false);
+  if (offAction)
+    offAction->setEnabled(false);
+  runCli({QStringLiteral("plugin"), QStringLiteral("bypass"), pluginId,
+          bypassed ? QStringLiteral("on") : QStringLiteral("off")},
+         [this, onAction, offAction, pluginId,
+          bypassed](int result, QByteArray output, QByteArray error) {
            pluginRequestPending = false;
-           if (action)
-             action->setEnabled(true);
+           if (onAction)
+             onAction->setEnabled(true);
+           if (offAction)
+             offAction->setEnabled(true);
+           const QByteArray detail = error.isEmpty() ? output : error;
            if (result != 0) {
-             QMessageBox::warning(
-                 this, tr("Plugin parameters"),
-                 QString::fromUtf8(error.isEmpty() ? output : error));
+             QString message =
+                 tr("Could not set bypass for plugin '%1' to "
+                    "%2.")
+                     .arg(pluginId, bypassed ? tr("on") : tr("off"));
+             if (!detail.trimmed().isEmpty())
+               message +=
+                   QLatin1Char('\n') + QString::fromUtf8(detail).trimmed();
+             QMessageBox::warning(this, tr("Plugin bypass failed"), message);
              return;
            }
-           if (configRevision != requestedRevision ||
-               index >= document.lineCount() ||
-               document.line(index).toQString() != originalLine) {
-             QMessageBox::warning(
-                 this, tr("Plugin parameters"),
-                 tr("The selected configuration row changed while plugin "
-                    "metadata was loading. Select it again and retry."));
-             return;
-           }
-
-           QVector<PluginParameterModel> parameters;
-           QString errorText;
-           if (!parsePluginMetadata(output, format, pluginId, parameters,
-                                    errorText)) {
-             QMessageBox::warning(this, tr("Plugin parameters"), errorText);
-             return;
-           }
-           if (parameters.isEmpty()) {
-             QMessageBox::information(
-                 this, tr("Plugin parameters"),
-                 tr("This plugin exposes no writable input parameters."));
-             return;
-           }
-
-           QHash<QString, double> values;
-           for (const auto &parameter : parameters)
-             values.insert(parameter.symbol, parameter.defaultValue);
-           if (!readConfiguredPluginValues(originalLine, format, parameters,
-                                           values, errorText)) {
-             QMessageBox::warning(
-                 this, tr("Plugin parameters"),
-                 errorText + QLatin1Char('\n') +
-                     tr("Edit the row as raw text to resolve it."));
-             return;
-           }
-
-           QDialog dialog(this);
-           dialog.setObjectName(QStringLiteral("pluginParameterEditor"));
-           dialog.setWindowTitle(tr("Plugin parameters — %1").arg(pluginId));
-           auto *layout = new QVBoxLayout(&dialog);
-           auto *notice = new QLabel(
-               tr("These are saved configuration values, not live plugin "
-                  "readbacks. Save and Reload to apply changes."),
-               &dialog);
-           notice->setWordWrap(true);
-           layout->addWidget(notice);
-           auto *form = new QFormLayout;
-           QHash<QString, QDoubleSpinBox *> editors;
-           for (const auto &parameter : parameters) {
-             auto *editor = new QDoubleSpinBox(&dialog);
-             editor->setObjectName(
-                 QStringLiteral("pluginParameter_%1").arg(parameter.symbol));
-             editor->setDecimals(9);
-             editor->setRange(parameter.minimum, parameter.maximum);
-             editor->setValue(values.value(parameter.symbol));
-             editor->setKeyboardTracking(false);
-             form->addRow(parameter.name, editor);
-             editors.insert(parameter.symbol, editor);
-           }
-           auto *formContainer = new QWidget(&dialog);
-           formContainer->setLayout(form);
-           auto *scroll = new QScrollArea(&dialog);
-           scroll->setWidgetResizable(true);
-           scroll->setWidget(formContainer);
-           layout->addWidget(scroll, 1);
-           auto *buttons = new QDialogButtonBox(
-               QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-           buttons->setObjectName(QStringLiteral("pluginParameterButtons"));
-           connect(buttons, &QDialogButtonBox::accepted, &dialog,
-                   &QDialog::accept);
-           connect(buttons, &QDialogButtonBox::rejected, &dialog,
-                   &QDialog::reject);
-           layout->addWidget(buttons);
-           dialog.resize(560, static_cast<int>(std::min<qsizetype>(
-                                  640, 180 + parameters.size() * 38)));
-           if (dialog.exec() != QDialog::Accepted)
-             return;
-
-           for (auto iterator = editors.cbegin(); iterator != editors.cend();
-                ++iterator)
-             values.insert(iterator.key(), iterator.value()->value());
-           QString updated;
-           if (!patchPluginDirective(originalLine, format, pluginId, parameters,
-                                     values, updated, errorText)) {
-             QMessageBox::warning(this, tr("Plugin parameters"), errorText);
-             return;
-           }
-           if (updated != originalLine) {
-             document.replace(index, updated);
-             markModified();
-             rebuildRows();
-           }
+           const QString acknowledgement = QString::fromUtf8(detail).trimmed();
+           QMessageBox::information(
+               this, tr("Plugin bypass"),
+               acknowledgement.isEmpty()
+                   ? tr("The daemon accepted the bypass request for '%1'.")
+                         .arg(pluginId)
+                   : acknowledgement);
          });
 }
 
@@ -2032,6 +2414,998 @@ void MainWindow::refreshStatus() {
     statusLabel->setText(status);
     statusLabel->setAccessibleDescription(status);
   });
+}
+
+void MainWindow::openDeviceSelector() {
+  if (deviceSelectorAuthorizationPending)
+    return;
+
+  const QString executable =
+      polkitExecutable.isEmpty()
+          ? QStandardPaths::findExecutable(QStringLiteral("pkcheck"))
+          : polkitExecutable;
+  if (executable.isEmpty()) {
+    showDeviceSelectorAuthorizationFailure(
+        tr("The PolicyKit checker (pkcheck) is not installed or not on "
+           "PATH. ") +
+        tr("No system changes were made."));
+    return;
+  }
+
+  deviceSelectorAuthorizationPending = true;
+  auto *process = new QProcess(this);
+  process->setProcessChannelMode(QProcess::SeparateChannels);
+  auto *timeout = new QTimer(process);
+  timeout->setSingleShot(true);
+  timeout->setInterval(120000);
+  auto completed = std::make_shared<bool>(false);
+  const auto finish = [this, process, timeout, completed](bool authorized,
+                                                          QString detail) {
+    if (*completed)
+      return;
+    *completed = true;
+    timeout->stop();
+    deviceSelectorAuthorizationPending = false;
+    process->deleteLater();
+    if (authorized)
+      showDeviceSelectorDialog();
+    else
+      showDeviceSelectorAuthorizationFailure(detail);
+  };
+  connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+          this,
+          [this, process, finish](int exitCode,
+                                  QProcess::ExitStatus exitStatus) mutable {
+            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+              finish(true, {});
+              return;
+            }
+            const QString detail =
+                exitStatus == QProcess::NormalExit && exitCode == 1
+                    ? tr("Authorization was denied or cancelled. The Device "
+                         "Selector was not opened.")
+                    : tr("PolicyKit could not verify authorization (exit code "
+                         "%1). The Device Selector was not opened.")
+                          .arg(exitCode);
+            finish(false, detail);
+          });
+  connect(process, &QProcess::errorOccurred, this,
+          [process, finish](QProcess::ProcessError error) mutable {
+            if (error == QProcess::FailedToStart)
+              finish(false,
+                     QObject::tr("Could not start pkcheck: %1. The Device "
+                                 "Selector was not opened.")
+                         .arg(process->errorString()));
+          });
+  connect(timeout, &QTimer::timeout, this, [process, finish]() mutable {
+    process->kill();
+    finish(false, QObject::tr("PolicyKit authorization timed out. The Device "
+                              "Selector was not opened."));
+  });
+  process->start(executable,
+                 {QStringLiteral("--action-id"), DeviceSelectorPolkitAction,
+                  QStringLiteral("--process"),
+                  QString::number(QCoreApplication::applicationPid()),
+                  QStringLiteral("--allow-user-interaction")});
+  timeout->start();
+}
+
+void MainWindow::showDeviceSelectorAuthorizationFailure(const QString &detail) {
+  auto *warning =
+      new QMessageBox(QMessageBox::Warning, tr("Authorization required"),
+                      detail, QMessageBox::Ok, this);
+  warning->setObjectName(QStringLiteral("deviceSelectorAuthorizationError"));
+  warning->setAttribute(Qt::WA_DeleteOnClose);
+  warning->open();
+}
+
+void MainWindow::showDeviceSelectorDialog() {
+  QDialog dialog(this);
+  dialog.setObjectName(QStringLiteral("deviceSelectorDialog"));
+  dialog.setWindowTitle(tr("LinuxAPO Device Selector"));
+  dialog.resize(920, 700);
+  auto *layout = new QVBoxLayout(&dialog);
+  auto *intro = new QLabel(
+      tr("Choose the PipeWire endpoints used by LinuxAPO. Capture selection "
+         "feeds the microphone processing graph; playback selection targets "
+         "the SkyAPO Playback graph. This does not change the desktop default "
+         "or reroute unrelated applications."),
+      &dialog);
+  intro->setWordWrap(true);
+  layout->addWidget(intro);
+
+  const auto createDeviceTable = [&dialog](const QString &name) {
+    auto *table = new QTableWidget(0, 5, &dialog);
+    table->setObjectName(name);
+    table->setHorizontalHeaderLabels(
+        {QObject::tr("SkyAPO selection"), QObject::tr("Description"),
+         QObject::tr("PipeWire node"), QObject::tr("Channels / rate"),
+         QObject::tr("System default")});
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->verticalHeader()->hide();
+    table->horizontalHeader()->setStretchLastSection(false);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    table->setColumnWidth(0, 125);
+    table->setColumnWidth(3, 115);
+    table->setColumnWidth(4, 105);
+    table->setMinimumHeight(150);
+    return table;
+  };
+
+  auto *captureGroup = new QGroupBox(tr("Capture devices"), &dialog);
+  auto *captureLayout = new QVBoxLayout(captureGroup);
+  auto *captureTable = createDeviceTable(QStringLiteral("captureDevicesTable"));
+  captureLayout->addWidget(captureTable);
+  auto *captureActions = new QHBoxLayout;
+  auto *setCapture =
+      new QPushButton(tr("Use selected capture device"), captureGroup);
+  setCapture->setObjectName(QStringLiteral("selectCaptureDevice"));
+  setCapture->setEnabled(false);
+  captureActions->addStretch(1);
+  captureActions->addWidget(setCapture);
+  captureLayout->addLayout(captureActions);
+  layout->addWidget(captureGroup, 1);
+
+  auto *playbackGroup = new QGroupBox(tr("Playback devices"), &dialog);
+  auto *playbackLayout = new QVBoxLayout(playbackGroup);
+  auto *playbackTable =
+      createDeviceTable(QStringLiteral("playbackDevicesTable"));
+  playbackLayout->addWidget(playbackTable);
+  auto *playbackActions = new QHBoxLayout;
+  auto *setPlayback =
+      new QPushButton(tr("Use selected playback target"), playbackGroup);
+  setPlayback->setObjectName(QStringLiteral("selectPlaybackDevice"));
+  setPlayback->setToolTip(
+      tr("Changes LinuxAPO's playback graph target only; the desktop default "
+         "sink and other applications are not moved."));
+  setPlayback->setEnabled(false);
+  playbackActions->addStretch(1);
+  playbackActions->addWidget(setPlayback);
+  playbackLayout->addLayout(playbackActions);
+  layout->addWidget(playbackGroup, 1);
+
+  auto *runtimeStatus =
+      new QLabel(tr("Reading PipeWire and daemon state…"), &dialog);
+  runtimeStatus->setObjectName(QStringLiteral("deviceSelectorRuntimeStatus"));
+  runtimeStatus->setTextFormat(Qt::PlainText);
+  runtimeStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  runtimeStatus->setWordWrap(true);
+  auto *troubleshooting = new QToolButton(&dialog);
+  troubleshooting->setObjectName(
+      QStringLiteral("deviceSelectorTroubleshootingToggle"));
+  troubleshooting->setText(tr("Troubleshooting and graph details"));
+  troubleshooting->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  troubleshooting->setArrowType(Qt::RightArrow);
+  troubleshooting->setCheckable(true);
+  troubleshooting->setChecked(false);
+  troubleshooting->setAutoRaise(true);
+  runtimeStatus->setVisible(false);
+  connect(troubleshooting, &QToolButton::toggled, &dialog,
+          [runtimeStatus, troubleshooting](bool expanded) {
+            troubleshooting->setArrowType(expanded ? Qt::DownArrow
+                                                   : Qt::RightArrow);
+            runtimeStatus->setVisible(expanded);
+          });
+  layout->addWidget(troubleshooting);
+  layout->addWidget(runtimeStatus);
+  auto *selectionFeedback = new QLabel(&dialog);
+  selectionFeedback->setObjectName(QStringLiteral("deviceSelectionFeedback"));
+  selectionFeedback->setWordWrap(true);
+  layout->addWidget(selectionFeedback);
+
+  auto *footer = new QHBoxLayout;
+  auto *refresh = new QPushButton(tr("Refresh"), &dialog);
+  refresh->setObjectName(QStringLiteral("refreshDeviceSelector"));
+  auto *verifyAudioPath = new QPushButton(tr("Verify audio path…"), &dialog);
+  verifyAudioPath->setObjectName(QStringLiteral("verifyAudioPath"));
+  verifyAudioPath->setToolTip(
+      tr("Read-only checks of the current configuration and PipeWire graph. "
+         "Does not emit a test signal or change audio routing."));
+  auto *close = new QPushButton(tr("Close"), &dialog);
+  close->setObjectName(QStringLiteral("closeDeviceSelector"));
+  footer->addWidget(refresh);
+  footer->addWidget(verifyAudioPath);
+  footer->addStretch(1);
+  footer->addWidget(close);
+  layout->addLayout(footer);
+  connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+  connect(captureTable, &QTableWidget::itemSelectionChanged, &dialog,
+          [setCapture, captureTable] {
+            const int row = captureTable->currentRow();
+            const auto *state = row >= 0 ? captureTable->item(row, 0) : nullptr;
+            setCapture->setEnabled(row >= 0 && state &&
+                                   state->text() != QObject::tr("Unavailable"));
+          });
+  connect(
+      playbackTable, &QTableWidget::itemSelectionChanged, &dialog,
+      [setPlayback, playbackTable] {
+        const int row = playbackTable->currentRow();
+        const auto *state = row >= 0 ? playbackTable->item(row, 0) : nullptr;
+        setPlayback->setEnabled(row >= 0 && state &&
+                                state->text() != QObject::tr("Unavailable"));
+      });
+
+  const QPointer<QDialog> dialogGuard(&dialog);
+  const QPointer<QTableWidget> captureGuard(captureTable);
+  const QPointer<QTableWidget> playbackGuard(playbackTable);
+  const QPointer<QLabel> statusGuard(runtimeStatus);
+  const QPointer<QLabel> feedbackGuard(selectionFeedback);
+  const QPointer<QPushButton> refreshGuard(refresh);
+  const QPointer<QPushButton> setCaptureGuard(setCapture);
+  const QPointer<QPushButton> setPlaybackGuard(setPlayback);
+  const auto fillTable = [](QTableWidget *table, const QByteArray &output,
+                            bool playback) {
+    if (!table)
+      return;
+    struct Entry {
+      QString id;
+      QString node;
+      QString description;
+      QString selected;
+      QString channels;
+      QString rate;
+      QString defaultState;
+    };
+    QVector<Entry> entries;
+    const auto lines =
+        QString::fromUtf8(output).split('\n', Qt::SkipEmptyParts);
+    for (qsizetype index = 1; index < lines.size(); ++index) {
+      const auto fields = lines[index].split('\t');
+      const qsizetype expected = playback ? 8 : 11;
+      if (fields.size() < expected)
+        continue;
+      entries.push_back(Entry{fields[0], fields[1], fields[2], fields[3],
+                              fields[4], fields[5],
+                              playback ? fields[7] : fields[10]});
+    }
+    const QString priorSelectedNode =
+        table->property("skyapo.lastSelectedNode").toString();
+    const auto selected =
+        std::find_if(entries.cbegin(), entries.cend(), [](const Entry &entry) {
+          return entry.selected == QStringLiteral("yes");
+        });
+    if (selected != entries.cend()) {
+      table->setProperty("skyapo.lastSelectedNode", selected->node);
+    } else if (!priorSelectedNode.isEmpty() &&
+               std::none_of(entries.cbegin(), entries.cend(),
+                            [&priorSelectedNode](const Entry &entry) {
+                              return entry.node == priorSelectedNode;
+                            })) {
+      entries.push_back(
+          Entry{{},
+                priorSelectedNode,
+                QObject::tr("Previously selected device is unavailable"),
+                QStringLiteral("unavailable"),
+                QStringLiteral("unknown"),
+                QStringLiteral("unknown"),
+                QStringLiteral("unknown")});
+    } else if (!priorSelectedNode.isEmpty()) {
+      table->setProperty("skyapo.lastSelectedNode", QString{});
+    }
+
+    table->setRowCount(0);
+    int selectedRow = -1;
+    for (const auto &entry : entries) {
+      const int row = table->rowCount();
+      table->insertRow(row);
+      const QString format =
+          (entry.channels == QStringLiteral("unknown") &&
+           entry.rate == QStringLiteral("unknown"))
+              ? QObject::tr("unknown")
+              : QObject::tr("%1 ch / %2 Hz").arg(entry.channels, entry.rate);
+      const QString selected = entry.selected == QStringLiteral("yes")
+                                   ? QObject::tr("Selected")
+                               : entry.selected == QStringLiteral("unavailable")
+                                   ? QObject::tr("Unavailable")
+                                   : QString{};
+      const QString defaultState =
+          entry.defaultState == QStringLiteral("yes")  ? QObject::tr("Yes")
+          : entry.defaultState == QStringLiteral("no") ? QObject::tr("No")
+                                                       : QObject::tr("Unknown");
+      const QStringList values{selected, entry.description, entry.node, format,
+                               defaultState};
+      for (int column = 0; column < values.size(); ++column) {
+        auto *item = new QTableWidgetItem(values[column]);
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        if (column == 2) {
+          item->setData(Qt::UserRole, entry.node);
+          if (entry.selected == QStringLiteral("unavailable"))
+            item->setToolTip(QObject::tr(
+                "The saved device preference is retained until this endpoint "
+                "returns or another device is selected."));
+        }
+        table->setItem(row, column, item);
+      }
+      if (entry.selected == QStringLiteral("yes") ||
+          entry.selected == QStringLiteral("unavailable"))
+        selectedRow = row;
+    }
+    if (selectedRow >= 0)
+      table->selectRow(selectedRow);
+    else if (table->rowCount() > 0)
+      table->setCurrentCell(-1, -1);
+  };
+
+  const auto updateRuntimeStatus =
+      [statusGuard](
+          int statusResult, QByteArray statusOutput, QByteArray statusError,
+          int captureResult, QByteArray captureCurrent, QByteArray captureError,
+          int outputResult, QByteArray outputCurrent, QByteArray outputError) {
+        if (!statusGuard)
+          return;
+        QString status = statusResult == 0
+                             ? QString::fromUtf8(statusOutput).trimmed()
+                             : QString::fromUtf8(statusError).trimmed();
+        QString playback = outputResult == 0
+                               ? QString::fromUtf8(outputCurrent).trimmed()
+                               : QString::fromUtf8(outputError).trimmed();
+        QString capture = captureResult == 0
+                              ? QString::fromUtf8(captureCurrent).trimmed()
+                              : QString::fromUtf8(captureError).trimmed();
+        if (status.isEmpty())
+          status = QObject::tr("Daemon status unavailable");
+        if (capture.isEmpty())
+          capture = QObject::tr("Capture selection status unavailable");
+        if (playback.isEmpty())
+          playback = QObject::tr("Playback target status unavailable");
+        statusGuard->setText(QObject::tr("Daemon and graph state:\n%1\n\n"
+                                         "Capture selection:\n%2\n\n"
+                                         "Playback target and graph:\n%3")
+                                 .arg(status, capture, playback));
+      };
+
+  const auto revealUnavailable = [](QTableWidget *table,
+                                    const QByteArray &currentOutput) {
+    if (!table)
+      return;
+    QString current =
+        QString::fromUtf8(currentOutput).section('\n', 0, 0).trimmed();
+    const QString suffix = QStringLiteral(" (unavailable)");
+    if (!current.endsWith(suffix))
+      return;
+    const QString nodeName = current.left(current.size() - suffix.size());
+    if (nodeName.isEmpty())
+      return;
+    for (int row = 0; row < table->rowCount(); ++row)
+      if (table->item(row, 2) &&
+          table->item(row, 2)->data(Qt::UserRole).toString() == nodeName)
+        return;
+    const int row = table->rowCount();
+    table->insertRow(row);
+    const QStringList values{QObject::tr("Unavailable"),
+                             QObject::tr("Previously selected device is "
+                                         "unavailable"),
+                             nodeName, QObject::tr("unknown"),
+                             QObject::tr("Unknown")};
+    for (int column = 0; column < values.size(); ++column) {
+      auto *item = new QTableWidgetItem(values[column]);
+      item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+      if (column == 2) {
+        item->setData(Qt::UserRole, nodeName);
+        item->setToolTip(QObject::tr(
+            "The saved device preference is retained until this endpoint "
+            "returns or another device is selected."));
+      }
+      table->setItem(row, column, item);
+    }
+    table->setProperty("skyapo.lastSelectedNode", nodeName);
+    table->selectRow(row);
+  };
+
+  const auto refreshInProgress = std::make_shared<bool>(false);
+  const auto refreshDevices = [this, captureGuard, playbackGuard, statusGuard,
+                               updateRuntimeStatus, revealUnavailable,
+                               fillTable, refreshInProgress]() {
+    if (*refreshInProgress)
+      return;
+    *refreshInProgress = true;
+    auto statusResult = std::make_shared<int>(-1);
+    auto statusOutput = std::make_shared<QByteArray>();
+    auto statusError = std::make_shared<QByteArray>();
+    auto captureResult = std::make_shared<int>(-1);
+    auto captureCurrent = std::make_shared<QByteArray>();
+    auto captureError = std::make_shared<QByteArray>();
+    auto outputResult = std::make_shared<int>(-1);
+    auto outputCurrent = std::make_shared<QByteArray>();
+    auto outputError = std::make_shared<QByteArray>();
+    auto pending = std::make_shared<int>(5);
+    const auto refreshFinished = [refreshInProgress] {
+      *refreshInProgress = false;
+    };
+    const auto finishStatus = [pending, statusResult, statusOutput, statusError,
+                               captureResult, captureCurrent, captureError,
+                               outputResult, outputCurrent, outputError,
+                               updateRuntimeStatus, refreshFinished] {
+      if (--*pending == 0) {
+        updateRuntimeStatus(*statusResult, *statusOutput, *statusError,
+                            *captureResult, *captureCurrent, *captureError,
+                            *outputResult, *outputCurrent, *outputError);
+        refreshFinished();
+      }
+    };
+    runCli({"device", "list"}, [captureGuard, statusGuard, fillTable,
+                                finishStatus](int result, QByteArray output,
+                                              QByteArray error) {
+      if (result == 0)
+        fillTable(captureGuard, output, false);
+      else if (statusGuard)
+        statusGuard->setText(QObject::tr("Capture enumeration failed: %1")
+                                 .arg(QString::fromUtf8(error).trimmed()));
+      finishStatus();
+    });
+    runCli({"device", "current"},
+           [captureGuard, captureResult, captureCurrent, captureError,
+            revealUnavailable,
+            finishStatus](int result, QByteArray output, QByteArray error) {
+             *captureResult = result;
+             *captureCurrent = std::move(output);
+             *captureError = std::move(error);
+             if (result == 0)
+               revealUnavailable(captureGuard, *captureCurrent);
+             finishStatus();
+           });
+    runCli({"device", "output", "list"},
+           [playbackGuard, statusGuard, fillTable,
+            finishStatus](int result, QByteArray output, QByteArray error) {
+             if (result == 0)
+               fillTable(playbackGuard, output, true);
+             else if (statusGuard)
+               statusGuard->setText(
+                   QObject::tr("Playback enumeration failed: %1")
+                       .arg(QString::fromUtf8(error).trimmed()));
+             finishStatus();
+           });
+    runCli({"status"}, [statusResult, statusOutput, statusError, finishStatus](
+                           int result, QByteArray output, QByteArray error) {
+      *statusResult = result;
+      *statusOutput = std::move(output);
+      *statusError = std::move(error);
+      finishStatus();
+    });
+    runCli({"device", "output", "current"},
+           [outputResult, outputCurrent, outputError, playbackGuard,
+            revealUnavailable,
+            finishStatus](int result, QByteArray output, QByteArray error) {
+             *outputResult = result;
+             *outputCurrent = std::move(output);
+             *outputError = std::move(error);
+             if (result == 0)
+               revealUnavailable(playbackGuard, *outputCurrent);
+             finishStatus();
+           });
+  };
+
+  const auto applySelection = [this, dialogGuard, refreshGuard, feedbackGuard,
+                               setCaptureGuard, setPlaybackGuard,
+                               refreshDevices](QTableWidget *table,
+                                               bool playback) {
+    if (!table || table->currentRow() < 0)
+      return;
+    const auto *nodeItem = table->item(table->currentRow(), 2);
+    if (!nodeItem)
+      return;
+    const auto *stateItem = table->item(table->currentRow(), 0);
+    if (stateItem && stateItem->text() == tr("Unavailable"))
+      return;
+    const QString nodeName = nodeItem->data(Qt::UserRole).toString();
+    if (nodeName.isEmpty())
+      return;
+    if (setCaptureGuard)
+      setCaptureGuard->setEnabled(false);
+    if (setPlaybackGuard)
+      setPlaybackGuard->setEnabled(false);
+    const auto command = playback
+                             ? QStringList{"device", "output", "set", nodeName}
+                             : QStringList{"device", "set", nodeName};
+    runCli({"status"}, [this, dialogGuard, refreshGuard, feedbackGuard,
+                        setCaptureGuard, setPlaybackGuard, refreshDevices,
+                        command,
+                        playback](int statusResult, QByteArray statusOutput,
+                                  QByteArray statusError) {
+      if (statusResult != 0 || !statusOutput.contains("Daemon:")) {
+        if (setCaptureGuard)
+          setCaptureGuard->setEnabled(true);
+        if (setPlaybackGuard)
+          setPlaybackGuard->setEnabled(true);
+        const QString detail =
+            QString::fromUtf8(statusError.isEmpty() ? statusOutput
+                                                    : statusError)
+                .trimmed();
+        if (feedbackGuard)
+          feedbackGuard->setText(
+              tr("Could not determine daemon state; no endpoint preference "
+                 "was changed."));
+        QWidget *messageParent =
+            dialogGuard ? static_cast<QWidget *>(dialogGuard.data())
+                        : static_cast<QWidget *>(this);
+        QMessageBox::warning(
+            messageParent, tr("Device selection not changed"),
+            detail.isEmpty() ? tr("The daemon status response was unavailable.")
+                             : detail);
+        return;
+      }
+      const bool daemonWasRunning =
+          !statusOutput.contains("Daemon: not reachable");
+      runCli(command, [this, dialogGuard, refreshGuard, feedbackGuard,
+                       setCaptureGuard, setPlaybackGuard, refreshDevices,
+                       playback, daemonWasRunning](
+                          int result, QByteArray output, QByteArray error) {
+        if (result != 0) {
+          if (setCaptureGuard)
+            setCaptureGuard->setEnabled(true);
+          if (setPlaybackGuard)
+            setPlaybackGuard->setEnabled(true);
+          QWidget *messageParent =
+              dialogGuard ? static_cast<QWidget *>(dialogGuard.data())
+                          : static_cast<QWidget *>(this);
+          QMessageBox::warning(
+              messageParent,
+              playback ? tr("Playback target selection failed")
+                       : tr("Capture device selection failed"),
+              QString::fromUtf8(error.isEmpty() ? output : error).trimmed());
+          return;
+        }
+
+        const auto savedMessage = QString::fromUtf8(output).trimmed();
+        if (!daemonWasRunning) {
+          if (feedbackGuard)
+            feedbackGuard->setText(
+                tr("Selection saved. It will be used the next time skyapod is "
+                   "started."));
+          if (setCaptureGuard)
+            setCaptureGuard->setEnabled(true);
+          if (setPlaybackGuard)
+            setPlaybackGuard->setEnabled(true);
+          if (dialogGuard && refreshGuard)
+            refreshGuard->click();
+          refreshDevices();
+          refreshStatus();
+          return;
+        }
+
+        if (playback) {
+          if (feedbackGuard)
+            feedbackGuard->setText(
+                tr("%1\nThe running playback graph is switching targets "
+                   "without restarting capture.")
+                    .arg(savedMessage));
+          if (setCaptureGuard)
+            setCaptureGuard->setEnabled(true);
+          if (setPlaybackGuard)
+            setPlaybackGuard->setEnabled(true);
+          if (dialogGuard && refreshGuard)
+            refreshGuard->click();
+          refreshDevices();
+          refreshStatus();
+          return;
+        }
+
+        if (feedbackGuard)
+          feedbackGuard->setText(tr("Selection saved; restarting skyapod…"));
+        runCli({"restart"}, [this, dialogGuard, refreshGuard, feedbackGuard,
+                             setCaptureGuard, setPlaybackGuard, refreshDevices,
+                             playback, savedMessage](int restartResult,
+                                                     QByteArray restartOutput,
+                                                     QByteArray restartError) {
+          if (setCaptureGuard)
+            setCaptureGuard->setEnabled(true);
+          if (setPlaybackGuard)
+            setPlaybackGuard->setEnabled(true);
+          const QString restartMessage = QString::fromUtf8(
+              restartResult == 0 ? restartOutput : restartError);
+          if (restartResult == 0) {
+            if (feedbackGuard)
+              feedbackGuard->setText(
+                  tr("%1\n%2").arg(savedMessage, restartMessage.trimmed()));
+          } else {
+            const QString detail = restartMessage.trimmed().isEmpty()
+                                       ? tr("skyapod restart failed")
+                                       : restartMessage.trimmed();
+            if (feedbackGuard)
+              feedbackGuard->setText(
+                  tr("Selection was saved, but skyapod did not restart: %1")
+                      .arg(detail));
+            QWidget *messageParent =
+                dialogGuard ? static_cast<QWidget *>(dialogGuard.data())
+                            : static_cast<QWidget *>(this);
+            QMessageBox::warning(messageParent,
+                                 playback ? tr("Playback graph restart failed")
+                                          : tr("Capture graph restart failed"),
+                                 detail);
+          }
+          if (dialogGuard && refreshGuard)
+            refreshGuard->click();
+          refreshDevices();
+          refreshStatus();
+        });
+      });
+    });
+  };
+  connect(
+      setCapture, &QPushButton::clicked, &dialog,
+      [applySelection, captureGuard] { applySelection(captureGuard, false); });
+  connect(
+      setPlayback, &QPushButton::clicked, &dialog,
+      [applySelection, playbackGuard] { applySelection(playbackGuard, true); });
+  connect(refresh, &QPushButton::clicked, &dialog, refreshDevices);
+  connect(verifyAudioPath, &QPushButton::clicked, &dialog, [this, &dialog] {
+    auto *verification = new QDialog(&dialog);
+    verification->setAttribute(Qt::WA_DeleteOnClose);
+    verification->setObjectName(QStringLiteral("deviceVerificationDialog"));
+    verification->setWindowTitle(tr("Verify LinuxAPO audio path"));
+    verification->resize(760, 440);
+    const QString config =
+        configPath.isEmpty() ? defaultConfigPath() : configPath;
+    const bool editorHasUnsavedChanges = modified;
+    auto *verificationLayout = new QVBoxLayout(verification);
+    auto *notice = new QLabel(
+        tr("These checks validate the saved editor file (%1) and inspect the "
+           "current PipeWire graph. They do not start or restart the daemon, "
+           "change routes, or emit a test signal.%2")
+            .arg(QDir::toNativeSeparators(config),
+                 editorHasUnsavedChanges
+                     ? tr("\nUnsaved editor changes are not included. Save the "
+                          "configuration and reload it before verifying those "
+                          "edits.")
+                     : QString{}),
+        verification);
+    notice->setObjectName(QStringLiteral("deviceVerificationNotice"));
+    notice->setWordWrap(true);
+    verificationLayout->addWidget(notice);
+
+    auto *results = new QTableWidget(7, 3, verification);
+    results->setObjectName(QStringLiteral("deviceVerificationResults"));
+    results->setHorizontalHeaderLabels(
+        {tr("Check"), tr("Result"), tr("Details")});
+    results->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    results->setSelectionMode(QAbstractItemView::NoSelection);
+    results->verticalHeader()->hide();
+    results->horizontalHeader()->setSectionResizeMode(
+        0, QHeaderView::ResizeToContents);
+    results->horizontalHeader()->setSectionResizeMode(
+        1, QHeaderView::ResizeToContents);
+    results->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    const QStringList labels{
+        tr("Configuration"),         tr("Capture engine"),
+        tr("Capture route"),         tr("Virtual microphone"),
+        tr("Playback route"),        tr("Numerical DSP test"),
+        tr("Physical hardware test")};
+    for (int row = 0; row < labels.size(); ++row) {
+      results->setItem(row, 0, new QTableWidgetItem(labels[row]));
+      results->setItem(row, 1, new QTableWidgetItem(tr("CHECKING")));
+      results->setItem(row, 2, new QTableWidgetItem(tr("Querying…")));
+    }
+    verificationLayout->addWidget(results, 1);
+
+    auto *summary =
+        new QLabel(tr("Running read-only graph checks. No test signal will be "
+                      "emitted; DSP amplitude and physical hardware are not "
+                      "tested."),
+                   verification);
+    summary->setObjectName(QStringLiteral("deviceVerificationSummary"));
+    summary->setWordWrap(true);
+    verificationLayout->addWidget(summary);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, verification);
+    connect(buttons, &QDialogButtonBox::rejected, verification,
+            &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, verification,
+            &QDialog::accept);
+    verificationLayout->addWidget(buttons);
+
+    const QPointer<QDialog> verificationGuard(verification);
+    const QPointer<QTableWidget> resultsGuard(results);
+    const QPointer<QLabel> summaryGuard(summary);
+    auto setResult = [resultsGuard](int row, const QString &state,
+                                    const QString &detail) {
+      if (!resultsGuard)
+        return;
+      resultsGuard->setItem(row, 1, new QTableWidgetItem(state));
+      resultsGuard->setItem(row, 2, new QTableWidgetItem(detail));
+    };
+    verification->open();
+
+    struct VerificationResponse {
+      int result{-1};
+      QByteArray output;
+      QByteArray error;
+    };
+    auto responses = std::make_shared<QHash<QString, VerificationResponse>>();
+    auto pending = std::make_shared<int>(6);
+    const QList<QPair<QString, QStringList>> commands{
+        {QStringLiteral("config"),
+         {QStringLiteral("config"), QStringLiteral("check"), config}},
+        {QStringLiteral("status"), {QStringLiteral("status")}},
+        {QStringLiteral("capture"),
+         {QStringLiteral("device"), QStringLiteral("current")}},
+        {QStringLiteral("capture-list"),
+         {QStringLiteral("device"), QStringLiteral("list")}},
+        {QStringLiteral("playback"),
+         {QStringLiteral("device"), QStringLiteral("output"),
+          QStringLiteral("current")}},
+        {QStringLiteral("playback-list"),
+         {QStringLiteral("device"), QStringLiteral("output"),
+          QStringLiteral("list")}}};
+    for (const auto &command : commands) {
+      runCli(command.second, [commandKey = command.first, responses, pending,
+                              verificationGuard, resultsGuard, summaryGuard,
+                              setResult, config, editorHasUnsavedChanges,
+                              this](int result, QByteArray output,
+                                    QByteArray error) mutable {
+        if (!verificationGuard)
+          return;
+        (*responses)[commandKey] = {result, std::move(output),
+                                    std::move(error)};
+        if (--*pending != 0)
+          return;
+
+        const auto response = [responses](const QString &key) {
+          return responses->value(key);
+        };
+        const auto outputFor = [&response](const QString &key) {
+          return QString::fromUtf8(response(key).output);
+        };
+        const auto firstLine = [&outputFor](const QString &key) {
+          return outputFor(key).section('\n', 0, 0).trimmed();
+        };
+        const auto statusField = [&outputFor](const QString &field) {
+          const QString prefix = field + QStringLiteral(":");
+          for (const QString &line :
+               outputFor(QStringLiteral("status")).split('\n'))
+            if (line.startsWith(prefix))
+              return line.mid(prefix.size()).trimmed();
+          return QString{};
+        };
+        const auto listedDevice = [&outputFor](const QString &key,
+                                               const QString &name) {
+          for (const QString &line : outputFor(key).split('\n')) {
+            const QStringList columns = line.split('\t');
+            if (columns.size() > 1 && columns[1] == name)
+              return true;
+          }
+          return false;
+        };
+        const auto linksReady = [](const QString &value) {
+          const auto match =
+              QRegularExpression(QStringLiteral("^(\\d+)/(\\d+)")).match(value);
+          return match.hasMatch() && match.captured(1) == match.captured(2) &&
+                 match.captured(2).toUInt() > 0;
+        };
+        const auto linksKnown = [](const QString &value) {
+          const auto match =
+              QRegularExpression(QStringLiteral("^(\\d+)/(\\d+)")).match(value);
+          return match.hasMatch() && match.captured(2).toUInt() > 0;
+        };
+        const auto failed = [&response](const QString &key) {
+          return response(key).result != 0;
+        };
+        const auto commandError = [this, &response](const QString &key,
+                                                    const QString &command) {
+          const auto result = response(key);
+          if (result.result == 0)
+            return QString{};
+          const QString diagnostic =
+              QString::fromUtf8(result.error.isEmpty() ? result.output
+                                                       : result.error)
+                  .trimmed();
+          if (diagnostic.isEmpty())
+            return tr("%1 failed with exit status %2.")
+                .arg(command)
+                .arg(result.result);
+          return tr("%1 failed: %2").arg(command, diagnostic);
+        };
+
+        const auto configResponse = response("config");
+        const bool configFileValid =
+            configResponse.result == 0 &&
+            QString::fromUtf8(configResponse.output)
+                .contains(QStringLiteral("Valid config"), Qt::CaseInsensitive);
+        const QString activeConfig = statusField(QStringLiteral("Config"));
+        const auto normalizedConfigPath = [](const QString &path) {
+          const QFileInfo info(path);
+          const QString canonicalPath = info.canonicalFilePath();
+          return QDir::cleanPath(canonicalPath.isEmpty()
+                                     ? info.absoluteFilePath()
+                                     : canonicalPath);
+        };
+        const bool configPathMatches =
+            !activeConfig.isEmpty() &&
+            normalizedConfigPath(config) == normalizedConfigPath(activeConfig);
+        const bool configOk = configFileValid && configPathMatches;
+        const bool configStateKnown =
+            !failed("status") && !activeConfig.isEmpty();
+        const QString configResult = !configStateKnown ? tr("UNKNOWN")
+                                     : configOk        ? tr("PASS")
+                                                       : tr("FAIL");
+        QStringList configDetails;
+        if (configFileValid)
+          configDetails << QString::fromUtf8(configResponse.output).trimmed();
+        else {
+          const QString diagnostic =
+              QString::fromUtf8(configResponse.error.isEmpty()
+                                    ? configResponse.output
+                                    : configResponse.error)
+                  .trimmed();
+          configDetails << (diagnostic.isEmpty()
+                                ? tr("Config check failed or returned no "
+                                     "validation result.")
+                                : diagnostic);
+        }
+        if (activeConfig.isEmpty())
+          configDetails << tr("skyapod did not report its active config file.");
+        else if (configPathMatches)
+          configDetails << tr("The saved editor file matches the config "
+                              "reported active by skyapod.");
+        else
+          configDetails << tr("The saved editor config does not match the "
+                              "config loaded by "
+                              "skyapod: %1 vs %2.")
+                               .arg(QDir::toNativeSeparators(config),
+                                    QDir::toNativeSeparators(activeConfig));
+        if (editorHasUnsavedChanges)
+          configDetails << tr("Unsaved editor changes are not included.");
+        setResult(0, configResult, configDetails.join(QLatin1Char('\n')));
+
+        const QString daemon = statusField(QStringLiteral("Daemon"));
+        const QString dsp = statusField(QStringLiteral("DSP state"));
+        const bool engineStateKnown =
+            !failed("status") && !daemon.isEmpty() && !dsp.isEmpty() &&
+            daemon.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) !=
+                0 &&
+            dsp.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) != 0;
+        const bool engineOk = !failed("status") &&
+                              daemon == QStringLiteral("streaming") &&
+                              dsp == QStringLiteral("running");
+        QStringList engineDetails{
+            tr("Daemon: %1; DSP state: %2")
+                .arg(daemon.isEmpty() ? tr("unknown") : daemon,
+                     dsp.isEmpty() ? tr("unknown") : dsp)};
+        if (const auto error = commandError("status", tr("Status query"));
+            !error.isEmpty())
+          engineDetails << error;
+        setResult(1,
+                  !engineStateKnown ? tr("UNKNOWN")
+                  : engineOk        ? tr("PASS")
+                                    : tr("FAIL"),
+                  engineDetails.join(QLatin1Char('\n')));
+
+        const QString captureName = firstLine("capture");
+        const QString activeLinks =
+            statusField(QStringLiteral("Active capture links"));
+        const bool captureStateKnown =
+            !failed("capture") && !failed("capture-list") &&
+            !failed("status") && !captureName.isEmpty() &&
+            !activeLinks.isEmpty() && linksKnown(activeLinks);
+        const bool captureOk =
+            captureStateKnown &&
+            !captureName.contains(QStringLiteral("unavailable"),
+                                  Qt::CaseInsensitive) &&
+            listedDevice(QStringLiteral("capture-list"), captureName) &&
+            linksReady(activeLinks);
+        QStringList captureDetails{
+            tr("Selected input: %1; active capture links: %2")
+                .arg(captureName.isEmpty() ? tr("unknown") : captureName,
+                     activeLinks.isEmpty() ? tr("unknown") : activeLinks)};
+        for (const auto &[key, label] :
+             {std::pair{QStringLiteral("capture"), tr("Capture selection")},
+              std::pair{QStringLiteral("capture-list"),
+                        tr("Capture device list")}}) {
+          if (const auto error = commandError(key, label); !error.isEmpty())
+            captureDetails << error;
+        }
+        setResult(2,
+                  !captureStateKnown ? tr("UNKNOWN")
+                  : captureOk        ? tr("PASS")
+                                     : tr("FAIL"),
+                  captureDetails.join(QLatin1Char('\n')));
+
+        const QString virtualMic =
+            statusField(QStringLiteral("Virtual microphone"));
+        const QString virtualNode = statusField(QStringLiteral("Virtual node"));
+        const auto virtualNodeId =
+            QRegularExpression(QStringLiteral("^(\\d+)\\s+\\("))
+                .match(virtualNode);
+        const bool virtualMicStateKnown = !failed("status") &&
+                                          !virtualMic.isEmpty() &&
+                                          virtualNodeId.hasMatch();
+        const bool virtualMicOk =
+            virtualMicStateKnown &&
+            virtualMic == QStringLiteral("SkyAPO Virtual Mic") &&
+            virtualNodeId.hasMatch() &&
+            virtualNodeId.captured(1).toULongLong() != 0xffffffffULL;
+        QStringList virtualMicDetails{
+            tr("%1; node %2")
+                .arg(virtualMic.isEmpty() ? tr("not reported") : virtualMic,
+                     virtualNode.isEmpty() ? tr("unknown") : virtualNode)};
+        if (const auto error = commandError("status", tr("Status query"));
+            !error.isEmpty())
+          virtualMicDetails << error;
+        setResult(3,
+                  !virtualMicStateKnown ? tr("UNKNOWN")
+                  : virtualMicOk        ? tr("PASS")
+                                        : tr("FAIL"),
+                  virtualMicDetails.join(QLatin1Char('\n')));
+
+        const QString playbackName = firstLine("playback");
+        const QString playbackGraph =
+            statusField(QStringLiteral("Playback graph"));
+        const auto playbackLinks =
+            QRegularExpression(QStringLiteral("internal links (\\d+/\\d+), "
+                                              "target links (\\d+/\\d+)"))
+                .match(playbackGraph);
+        const QString playbackTarget =
+            statusField(QStringLiteral("Playback target"));
+        const auto targetId =
+            QRegularExpression(QStringLiteral("\\s+\\(\\d+\\)$"))
+                .match(playbackTarget);
+        const QString targetName =
+            targetId.hasMatch()
+                ? playbackTarget.left(targetId.capturedStart()).trimmed()
+                : playbackTarget;
+        const bool targetAvailable =
+            listedDevice(QStringLiteral("playback-list"), targetName) ||
+            (playbackName == targetName &&
+             listedDevice(QStringLiteral("playback-list"), playbackName));
+        const bool playbackStateKnown =
+            !failed("playback") && !failed("playback-list") &&
+            !failed("status") && !playbackName.isEmpty() &&
+            !playbackGraph.isEmpty() && !playbackTarget.isEmpty() &&
+            playbackLinks.hasMatch() && linksKnown(playbackLinks.captured(1)) &&
+            linksKnown(playbackLinks.captured(2));
+        const bool playbackOk =
+            playbackStateKnown &&
+            playbackGraph.startsWith(QStringLiteral("streaming / streaming")) &&
+            playbackLinks.hasMatch() && linksReady(playbackLinks.captured(1)) &&
+            linksReady(playbackLinks.captured(2)) && targetAvailable;
+        QStringList playbackDetails{
+            tr("Target: %1; graph: %2")
+                .arg(playbackTarget.isEmpty() ? tr("unknown") : playbackTarget,
+                     playbackGraph.isEmpty() ? tr("unavailable")
+                                             : playbackGraph)};
+        for (const auto &[key, label] :
+             {std::pair{QStringLiteral("playback"),
+                        tr("Playback selection query")},
+              std::pair{QStringLiteral("playback-list"),
+                        tr("Playback device list")}}) {
+          if (const auto error = commandError(key, label); !error.isEmpty())
+            playbackDetails << error;
+        }
+        setResult(4,
+                  !playbackStateKnown ? tr("UNKNOWN")
+                  : playbackOk        ? tr("PASS")
+                                      : tr("FAIL"),
+                  playbackDetails.join(QLatin1Char('\n')));
+
+        setResult(5, tr("NOT TESTED"),
+                  tr("No known test signal was injected, so numeric "
+                     "DSP gain/correctness was not measured."));
+        setResult(6, tr("NOT TESTED"),
+                  tr("This graph inspection does not prove physical "
+                     "microphone, speaker, or headphone behavior."));
+        const bool allGraphChecks =
+            configOk && engineOk && captureOk && virtualMicOk && playbackOk;
+        if (summaryGuard)
+          summaryGuard->setText(
+              allGraphChecks ? tr("5/5 graph checks passed. No test signal "
+                                  "was emitted; numerical DSP and physical "
+                                  "hardware remain untested.")
+                             : tr("One or more graph checks failed. No test "
+                                  "signal was emitted; numerical DSP and "
+                                  "physical hardware remain untested."));
+      });
+    }
+  });
+  QTimer selectorRefreshTimer(&dialog);
+  selectorRefreshTimer.setObjectName(
+      QStringLiteral("deviceSelectorRefreshTimer"));
+  selectorRefreshTimer.setInterval(5000);
+  connect(&selectorRefreshTimer, &QTimer::timeout, &dialog, refreshDevices);
+  refreshDevices();
+  selectorRefreshTimer.start();
+  dialog.exec();
+  selectorRefreshTimer.stop();
 }
 
 void MainWindow::refreshDevices() {
