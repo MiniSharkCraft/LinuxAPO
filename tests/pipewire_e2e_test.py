@@ -823,6 +823,11 @@ def main():
                 config_candidate_pause)
         if pdc_format_event_order:
             env["SKYAPO_TEST_FORMAT_REBUILD_BEFORE_PDC_EVENT"] = "1"
+        if mode == "lv2-pdc-recovery":
+            # Exercise the control-plane timeout path independently from the
+            # plugin's PDC budget failure. The daemon must remain reachable,
+            # faulted, and silent when callback draining cannot be confirmed.
+            env["SKYAPO_TEST_FAIL_LATENCY_DRAIN"] = "1"
         if callback_process_exception:
             env["SKYAPO_TEST_THROW_PROCESS_EXCEPTION_ONCE"] = (
                 "after-transition" if callback_transition_exception else "1")
@@ -2890,6 +2895,12 @@ def main():
                     raise RuntimeError(
                         "dynamic PDC budget failure did not leave the daemon "
                         f"in its recoverable silence state:\n{fault_status}")
+                if (mode == "lv2-pdc-recovery" and
+                        "Test latency callback drain timeout: injected" not in
+                        fault_status):
+                    raise RuntimeError(
+                        "PDC recovery test did not exercise the callback-drain "
+                        f"timeout path:\n{fault_status}")
                 fault_node = virtual_source_id(fault_status)
                 assert_virtual_source(pw_dump, env, fault_node)
                 silent = run([str(consumer), "--expect-silent",

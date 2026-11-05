@@ -188,6 +188,7 @@ struct Runtime {
   std::atomic<bool> pluginLatencyEventQueued{false};
 #ifdef SKYAPO_PIPEWIRE_E2E_TESTING
   std::atomic<bool> testFormatRebuildDeferred{false};
+  bool testLatencyDrainFailureInjected{};
 #endif
   // A queued completion event can outlive its graph; this prevents it from
   // resetting telemetry for a more recently installed graph.
@@ -1293,10 +1294,35 @@ struct Runtime {
       r.resumeAudio();
       return;
     }
-    if (!r.quiesceAndDrain()) {
+    // Keep the callback gate closed if draining times out. quiesceAndDrain()
+    // resumes audio on timeout, which is unsafe while a plugin's PDC state is
+    // unresolved.
+    r.audioMode.store(AudioMode::Quiescing, std::memory_order_seq_cst);
+    bool callbacksDrained = r.waitForCallbacksToDrain();
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    bool injectedDrainTimeout = false;
+    if (const char *inject = std::getenv("SKYAPO_TEST_FAIL_LATENCY_DRAIN");
+        inject && std::strcmp(inject, "1") == 0 &&
+        !r.testLatencyDrainFailureInjected) {
+      r.testLatencyDrainFailureInjected = true;
+      injectedDrainTimeout = true;
+      callbacksDrained = false;
+    }
+#endif
+    if (!callbacksDrained) {
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      r.pluginLatencyError = injectedDrainTimeout
+                                 ? "injected callback drain timeout"
+                                 : "timed out draining callbacks for plugin "
+                                   "latency refresh";
+#else
       r.pluginLatencyError =
           "timed out draining callbacks for plugin latency refresh";
-      r.fail(r.pluginLatencyError);
+#endif
+      r.pluginLatencyFaulted.store(true, std::memory_order_seq_cst);
+      r.audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+      std::cerr << "skyapod: " << r.pluginLatencyError
+                << "; keeping the daemon alive and output silent\n";
       return;
     }
     try {
@@ -1718,6 +1744,10 @@ struct Runtime {
            "required\n";
     if (!pluginLatencyError.empty())
       s << "Plugin latency update error: " << pluginLatencyError << '\n';
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    if (testLatencyDrainFailureInjected)
+      s << "Test latency callback drain timeout: injected\n";
+#endif
     s << "Plugin failures:";
     const auto failures =
         e ? e->failedPluginDescriptions() : std::vector<std::string>{};
