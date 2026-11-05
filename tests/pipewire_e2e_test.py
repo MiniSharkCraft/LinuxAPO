@@ -2,7 +2,6 @@
 """Launch an isolated PipeWire graph and verify captured DSP output."""
 
 import os
-import json
 import pathlib
 import re
 import select
@@ -15,6 +14,8 @@ import tempfile
 import time
 import wave
 from pprint import pformat
+
+from pipewire_dump import pipewire_dump_objects
 
 
 def run(args, env, timeout=8, check=True):
@@ -217,7 +218,7 @@ def destroy_capture_link(pw_cli, pw_dump, env, status):
     virtual = re.search(r"^Virtual node: (\d+)", status, re.MULTILINE)
     if not capture or not virtual:
         raise RuntimeError("daemon status did not expose PipeWire node IDs")
-    objects = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+    objects = pipewire_dump_objects(run([str(pw_dump)], env, timeout=5).stdout)
     source_id, sink_id = capture.group(1), virtual.group(1)
     candidates = []
     for item in objects:
@@ -251,7 +252,7 @@ def destroy_capture_link(pw_cli, pw_dump, env, status):
 
 
 def destroy_playback_internal_link(pw_cli, pw_dump, env):
-    objects = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+    objects = pipewire_dump_objects(run([str(pw_dump)], env, timeout=5).stdout)
     node_ids = {}
     for item in objects:
         if not item.get("type", "").endswith(":Node"):
@@ -293,7 +294,7 @@ def virtual_source_id(status):
 
 
 def assert_virtual_source(pw_dump, env, expected_id):
-    objects = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+    objects = pipewire_dump_objects(run([str(pw_dump)], env, timeout=5).stdout)
     for item in objects:
         if str(item.get("id")) != str(expected_id):
             continue
@@ -310,7 +311,7 @@ def assert_virtual_source(pw_dump, env, expected_id):
 
 def connect_test_source_to_playback(pw_cli, pw_dump, env, source_name,
                                    playback_name, channels):
-    objects = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+    objects = pipewire_dump_objects(run([str(pw_dump)], env, timeout=5).stdout)
     nodes, ports = {}, {}
     for item in objects:
         info = item.get("info", {})
@@ -339,7 +340,7 @@ def connect_test_source_to_playback(pw_cli, pw_dump, env, source_name,
                       input_port))
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        graph = json.loads(run([str(pw_dump)], env, timeout=5).stdout)
+        graph = pipewire_dump_objects(run([str(pw_dump)], env, timeout=5).stdout)
         active = set()
         for item in graph:
             if not item.get("type", "").endswith(":Link"):
@@ -359,7 +360,7 @@ def connect_test_source_to_playback(pw_cli, pw_dump, env, source_name,
 
 
 def summarize_graph_dump(raw):
-    objects = json.loads(raw)
+    objects = pipewire_dump_objects(raw)
     nodes = set()
     summary = []
     for item in objects:
@@ -882,7 +883,7 @@ def main():
                 null_target_manager.stdin.flush()
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
-                    objects = json.loads(
+                    objects = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     if any(
                             item.get("type", "").endswith(":Node") and
@@ -905,7 +906,7 @@ def main():
                                 "factory": item.get("info", {}).get("props", item.get("props", {}))
                                 .get("factory.name"),
                             }
-                            for item in json.loads(graph.stdout)
+                            for item in pipewire_dump_objects(graph.stdout)
                             if item.get("type", "").endswith(":Node")
                         ]
                     raise RuntimeError(
@@ -926,7 +927,7 @@ def main():
                     create_null_sink(null_target_manager, alternate_properties)
                     deadline = time.monotonic() + 8
                     while time.monotonic() < deadline:
-                        objects = json.loads(
+                        objects = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         target_names = {
                             item.get("info", {}).get("props", item.get("props", {}))
@@ -965,7 +966,7 @@ def main():
                 raise RuntimeError(f"device selection did not persist: {selected.stdout}")
             if stable_id_replug:
                 device_list = run([str(cli), "device", "list"], env).stdout
-                pipewire_objects = json.loads(
+                pipewire_objects = pipewire_dump_objects(
                     run([str(pw_dump)], env).stdout)
                 source_props = next((
                     item.get("info", {}).get("props", item.get("props", {}))
@@ -1062,7 +1063,7 @@ def main():
                          '{"name":"skyapo.test.null-target"}',
                          "Spa:String:JSON"], env, timeout=5)
                 if startup_playback_recovery:
-                    graph = json.loads(
+                    graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     target_id = next((
                         str(item.get("id")) for item in graph
@@ -1076,7 +1077,7 @@ def main():
                     run([str(pw_cli), "destroy", target_id], env, timeout=5)
                     deadline = time.monotonic() + 8
                     while time.monotonic() < deadline:
-                        graph = json.loads(
+                        graph = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         if not any(
                                 item.get("type", "").endswith(":Node") and
@@ -1147,7 +1148,7 @@ def main():
                 create_null_sink(null_target_manager, target_properties)
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
-                    graph = json.loads(
+                    graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     if any(
                             item.get("type", "").endswith(":Node") and
@@ -1174,7 +1175,7 @@ def main():
                     if daemon_process.poll() is not None:
                         raise RuntimeError(
                             "skyapod exited before publishing the smart-filter pair")
-                    graph = json.loads(
+                    graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     names = {
                         item.get("info", {}).get("props", item.get("props", {}))
@@ -1188,7 +1189,7 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not publish the complete smart-filter pair")
                 if mode.endswith(("-volume", "-mute")):
-                    playback_objects = json.loads(
+                    playback_objects = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     controls = (
                         [("skyapo.playback",
@@ -1320,7 +1321,7 @@ def main():
             else:
                 policy_graph = ""
                 if wireplumber_playback:
-                    graph = json.loads(
+                    graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     policy_graph = "\nPrivate WirePlumber graph: " + repr([
                         item for item in graph
@@ -1466,7 +1467,7 @@ def main():
                         "playback-wireplumber-lv2-latency",
                         "playback-wireplumber-pdc-recovery",
                         "playback-wireplumber-quantum-variation"):
-                playback_objects = json.loads(
+                playback_objects = pipewire_dump_objects(
                     run([str(pw_dump)], env).stdout)
                 playback_node = next((
                     str(item.get("id")) for item in playback_objects
@@ -1502,7 +1503,7 @@ def main():
                     deadline = time.monotonic() + 8
                     expected_link = False
                     while time.monotonic() < deadline:
-                        graph = json.loads(
+                        graph = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         nodes, links = {}, set()
                         node_props = {}
@@ -1721,7 +1722,7 @@ def main():
                         print("Playback graph is acyclic; unrelated playback "
                               "stays on its explicitly selected sink.")
                     if recovery_playback_target:
-                        objects = json.loads(
+                        objects = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         old_target_id = next((
                             str(item.get("id")) for item in objects
@@ -1754,7 +1755,7 @@ def main():
                         preserved_filter_route = False
                         missing_target_graph = ""
                         while time.monotonic() < deadline:
-                            graph = json.loads(
+                            graph = pipewire_dump_objects(
                                 run([str(pw_dump)], env, timeout=5).stdout)
                             graph_nodes = {}
                             graph_links = set()
@@ -1834,7 +1835,7 @@ def main():
                         rebound_status = ""
                         rebound_target_id = None
                         while time.monotonic() < deadline:
-                            objects = json.loads(
+                            objects = pipewire_dump_objects(
                                 run([str(pw_dump)], env, timeout=5).stdout)
                             rebound_target_id = next((
                                 str(item.get("id")) for item in objects
@@ -1881,7 +1882,7 @@ def main():
                               "independent monitor recording ratio to expected: "
                               f"{float(recovery_ratio.group(1)):.6f}.")
                     elif output_switch:
-                        objects = json.loads(
+                        objects = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         old_playback_node = next((
                             str(item.get("id")) for item in objects
@@ -1928,7 +1929,7 @@ def main():
                             result = run([str(cli), "status"], env, timeout=5,
                                          check=False)
                             switched_status = result.stdout
-                            objects = json.loads(
+                            objects = pipewire_dump_objects(
                                 run([str(pw_dump)], env, timeout=5).stdout)
                             switched_node = next((
                                 str(item.get("id")) for item in objects
@@ -1955,7 +1956,7 @@ def main():
                             raise RuntimeError(
                                 "in-place output switching unexpectedly recreated "
                                 "the SkyAPO playback node")
-                        graph = json.loads(
+                        graph = pipewire_dump_objects(
                             run([str(pw_dump)], env, timeout=5).stdout)
                         nodes, links = {}, set()
                         for item in graph:
@@ -2081,7 +2082,7 @@ def main():
                                 result = run([str(cli), "status"], env, timeout=5,
                                              check=False)
                                 switched_status = result.stdout
-                                objects = json.loads(
+                                objects = pipewire_dump_objects(
                                     run([str(pw_dump)], env, timeout=5).stdout)
                                 switched_node = next((
                                     str(item.get("id")) for item in objects
@@ -2110,7 +2111,7 @@ def main():
                                 raise RuntimeError(
                                     "repeated target switching recreated the playback "
                                     "node or stopped the ordinary app producer")
-                            graph = json.loads(
+                            graph = pipewire_dump_objects(
                                 run([str(pw_dump)], env, timeout=5).stdout)
                             nodes, links = {}, set()
                             for item in graph:
@@ -3382,7 +3383,7 @@ def main():
                         deadline = time.monotonic() + 8
                         target_available = False
                         while time.monotonic() < deadline:
-                            graph = json.loads(
+                            graph = pipewire_dump_objects(
                                 run([str(pw_dump)], env, timeout=5).stdout)
                             target_available = any(
                                 item.get("type", "").endswith(":Node") and

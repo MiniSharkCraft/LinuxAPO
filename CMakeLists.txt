@@ -416,6 +416,9 @@ add_test(NAME skyapo-config-watcher COMMAND skyapo-config-watcher-tests)
 add_test(NAME skyapo-default-sink-volume
   COMMAND skyapo-default-sink-volume-tests)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-pipewire-dump-parser
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_dump_parser_test.py)
   add_test(NAME skyapo-install-license-notices
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_license_notices_test.py
