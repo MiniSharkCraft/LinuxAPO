@@ -31,7 +31,8 @@ jobs:
           sudo apt-get install --yes \
             cmake g++ ninja-build pkg-config \
             libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
-            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev wireplumber
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev wireplumber \
+            dbus-daemon
 
       - name: Configure
         run: >-

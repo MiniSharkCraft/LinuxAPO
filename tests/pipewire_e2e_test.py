@@ -40,6 +40,26 @@ def wireplumber_command(executable):
     return [executable]
 
 
+def ensure_private_session_bus():
+    """Run the whole WirePlumber E2E process tree on a private D-Bus session."""
+    if (len(sys.argv) < 11 or
+            not sys.argv[10].startswith("playback-wireplumber") or
+            os.environ.get("SKYAPO_TEST_PRIVATE_DBUS") == "1"):
+        return
+
+    dbus_run_session = shutil.which("dbus-run-session")
+    if not dbus_run_session:
+        raise RuntimeError(
+            "WirePlumber E2E requires dbus-run-session; install dbus-daemon")
+    env = os.environ.copy()
+    env["SKYAPO_TEST_PRIVATE_DBUS"] = "1"
+    os.execvpe(
+        dbus_run_session,
+        [dbus_run_session, "--", sys.executable,
+         str(pathlib.Path(__file__).resolve()), *sys.argv[1:]],
+        env)
+
+
 class SystemdManagedDaemon:
     """Popen-like control for a transient per-user skyapod.service."""
 
@@ -438,6 +458,7 @@ def start_test_source(source, mono, env, source_log, name=None, serial=None,
 
 
 def main():
+    ensure_private_session_bus()
     if len(sys.argv) not in (11, 13, 14) or sys.argv[10] not in (
         "mono", "stereo", "surround51", "surround71", "mono-44100", "stereo-44100",
         "mono-48000", "stereo-48000", "mono-96000", "stereo-96000",
