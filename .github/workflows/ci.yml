@@ -112,9 +112,6 @@ jobs:
           fi
           namcap "$GITHUB_WORKSPACE/packaging/PKGBUILD"
           namcap "$GITHUB_WORKSPACE/packaging/${package[0]}"
-          SKYAPO_ALLOW_DISPOSABLE_PACMAN_TEST=1 \
-            python "$GITHUB_WORKSPACE/packaging/container_fresh_install_test.py" \
-            --render-test-binary "$render_test" "${package[0]}"
 
       - name: Stage package and renderer harness for clean-root test
         run: |
