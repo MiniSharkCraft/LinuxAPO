@@ -2745,6 +2745,14 @@ def main():
                             f"measurement:\n{monitor_log}")
                     source_process.send_signal(signal.SIGUSR1)
                     race_monitor.wait(timeout=3)
+                    if source_process.poll() is not None:
+                        source_log.flush()
+                        source_log.seek(0)
+                        raise RuntimeError(
+                            "the selected PipeWire test source exited during "
+                            "the PDC config-commit race "
+                            f"(status {source_process.returncode}):\n"
+                            f"{source_log.read()}")
                 finally:
                     release_marker.touch()
                 race_monitor_log.flush()
@@ -2854,6 +2862,14 @@ def main():
                 # control-event ordering without changing the PipeWire server.
                 source_process.send_signal(signal.SIGUSR1)
                 race_monitor.wait(timeout=8)
+                if source_process.poll() is not None:
+                    source_log.flush()
+                    source_log.seek(0)
+                    raise RuntimeError(
+                        "the selected PipeWire test source exited during "
+                        "the PDC format-event-order race "
+                        f"(status {source_process.returncode}):\n"
+                        f"{source_log.read()}")
                 race_monitor_log.flush()
                 race_monitor_log.seek(0)
                 silent_output = race_monitor_log.read()

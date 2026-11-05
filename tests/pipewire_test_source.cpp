@@ -76,9 +76,12 @@ struct Source {
             message ? message : "unknown error");
   }
 
-  static void stateChanged(void *data, pw_filter_state, pw_filter_state state,
-                           const char *error) {
+  static void stateChanged(void *data, pw_filter_state old,
+                           pw_filter_state state, const char *error) {
     auto &source = *static_cast<Source *>(data);
+    fprintf(stderr, "test source: filter state %s -> %s%s%s\n",
+            pw_filter_state_as_string(old), pw_filter_state_as_string(state),
+            error ? ": " : "", error ? error : "");
     if (state == PW_FILTER_STATE_ERROR ||
         state == PW_FILTER_STATE_UNCONNECTED) {
       if (state == PW_FILTER_STATE_ERROR)
