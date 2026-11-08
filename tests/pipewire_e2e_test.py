@@ -3932,13 +3932,21 @@ def main():
                             f"pw-dump failed ({graph_result.returncode}): "
                             f"{graph_result.stderr}")
                         tap_diagnostics = []
+                        source_log.flush()
+                        source_log.seek(0)
+                        source_format_events = [
+                            line.rstrip() for line in source_log
+                            if "test playback stream: negotiated format=" in
+                            line]
+                        source_log.seek(0, os.SEEK_END)
                         if server is not None and server.poll() is None:
-                            for tap_node in (
-                                    "skyapo.test.playback-app",
-                                    "skyapo.playback.dsp",
-                                    "skyapo.playback.stream"):
+                            for tap_node, tap_expected_db in (
+                                    ("skyapo.test.playback-app", "0"),
+                                    ("skyapo.playback.dsp", "-6"),
+                                    ("skyapo.playback.stream", "-6")):
                                 tap = subprocess.Popen(
-                                    [str(consumer), "--expected-db", "-6",
+                                    [str(consumer), "--expected-db",
+                                     tap_expected_db,
                                      "--expected-rate", str(sample_rate),
                                      "--duration-ms", "1000", "--capture-node",
                                      tap_node, "--signal-ready"],
@@ -3949,7 +3957,8 @@ def main():
                                         tap, f"diagnostic tap {tap_node}")
                                     tail, _ = tap.communicate(timeout=5)
                                     tap_diagnostics.append(
-                                        f"{tap_node} (exit {tap.returncode}):\n"
+                                        f"{tap_node} (expected {tap_expected_db} "
+                                        f"dB, exit {tap.returncode}):\n"
                                         f"{ready}{tail}")
                                 except Exception as tap_error:
                                     stop(tap, f"diagnostic tap {tap_node}")
@@ -3960,6 +3969,8 @@ def main():
                             "server restart did not measure the expected "
                             f"-6 dB output:\n{captured_playback}\n"
                             f"{playback_recovered_status}\n"
+                            "Playback source negotiated formats:\n" +
+                            "\n".join(source_format_events) + "\n"
                             "PipeWire graph at failed measurement:\n"
                             f"{graph_diagnostic}\n"
                             "Signal taps along the playback path:\n" +

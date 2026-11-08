@@ -5,9 +5,11 @@
 #include <spa/buffer/buffer.h>
 #include <spa/param/audio/format-utils.h>
 
+#include <algorithm>
 #include <cmath>
 #include <array>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -23,6 +25,7 @@ struct PlaybackStream {
   double phase{};
   float amplitude{0.1f};
   unsigned channels{2};
+  spa_audio_format format{SPA_AUDIO_FORMAT_F32};
   std::array<spa_audio_channel, MaxChannels> positions{
       SPA_AUDIO_CHANNEL_FL,  SPA_AUDIO_CHANNEL_FR, SPA_AUDIO_CHANNEL_FC,
       SPA_AUDIO_CHANNEL_LFE, SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR,
@@ -52,18 +55,65 @@ struct PlaybackStream {
     }
   }
 
+  static void paramChanged(void *data, uint32_t id, const spa_pod *param) {
+    auto &self = *static_cast<PlaybackStream *>(data);
+    if (id != SPA_PARAM_Format || !param)
+      return;
+    spa_audio_info_raw info{};
+    if (spa_format_audio_raw_parse(param, &info) < 0 ||
+        info.channels != self.channels ||
+        (info.format != SPA_AUDIO_FORMAT_F32 &&
+         info.format != SPA_AUDIO_FORMAT_F32P)) {
+      std::fprintf(stderr,
+                   "test playback stream: unsupported negotiated format\n");
+      self.failed = true;
+      pw_main_loop_quit(self.loop);
+      return;
+    }
+    self.format = info.format;
+    std::fprintf(stderr,
+                 "test playback stream: negotiated format=%u channels=%u "
+                 "rate=%u\n",
+                 static_cast<unsigned>(info.format), info.channels, info.rate);
+  }
+
   static void process(void *data) {
     auto &self = *static_cast<PlaybackStream *>(data);
     auto *buffer = pw_stream_dequeue_buffer(self.stream);
     if (!buffer || !buffer->buffer || buffer->buffer->n_datas == 0)
       return;
-    auto &audio = buffer->buffer->datas[0];
-    if (!audio.data || audio.maxsize < self.channels * sizeof(float)) {
+    const bool planar = self.format == SPA_AUDIO_FORMAT_F32P;
+    if ((planar && buffer->buffer->n_datas < self.channels) ||
+        (!planar && buffer->buffer->n_datas < 1)) {
       pw_stream_queue_buffer(self.stream, buffer);
       return;
     }
-    auto *samples = static_cast<float *>(audio.data);
-    const auto frames = audio.maxsize / (self.channels * sizeof(float));
+    std::array<spa_data *, MaxChannels> planes{};
+    unsigned frames = UINT32_MAX;
+    if (planar) {
+      for (unsigned channel = 0; channel < self.channels; ++channel) {
+        planes[channel] = &buffer->buffer->datas[channel];
+        if (!planes[channel]->data || !planes[channel]->chunk) {
+          pw_stream_queue_buffer(self.stream, buffer);
+          return;
+        }
+        frames =
+            std::min(frames, static_cast<unsigned>(planes[channel]->maxsize /
+                                                   sizeof(float)));
+      }
+    } else {
+      planes[0] = &buffer->buffer->datas[0];
+      if (!planes[0]->data || !planes[0]->chunk ||
+          planes[0]->maxsize < self.channels * sizeof(float)) {
+        pw_stream_queue_buffer(self.stream, buffer);
+        return;
+      }
+      frames = planes[0]->maxsize / (self.channels * sizeof(float));
+    }
+    if (frames == 0 || frames == UINT32_MAX) {
+      pw_stream_queue_buffer(self.stream, buffer);
+      return;
+    }
     constexpr double twoPi = 6.283185307179586476925286766559;
     constexpr double frequency = 440.0;
     constexpr double sampleRate = 48000.0;
@@ -74,12 +124,26 @@ struct PlaybackStream {
       self.phase += step;
       if (self.phase >= twoPi)
         self.phase -= twoPi;
-      for (unsigned channel = 0; channel < self.channels; ++channel)
-        samples[self.channels * frame + channel] = sample;
+      if (planar) {
+        for (unsigned channel = 0; channel < self.channels; ++channel)
+          static_cast<float *>(planes[channel]->data)[frame] = sample;
+      } else {
+        auto *samples = static_cast<float *>(planes[0]->data);
+        for (unsigned channel = 0; channel < self.channels; ++channel)
+          samples[self.channels * frame + channel] = sample;
+      }
     }
-    audio.chunk->offset = 0;
-    audio.chunk->stride = self.channels * sizeof(float);
-    audio.chunk->size = frames * self.channels * sizeof(float);
+    if (planar) {
+      for (unsigned channel = 0; channel < self.channels; ++channel) {
+        planes[channel]->chunk->offset = 0;
+        planes[channel]->chunk->stride = sizeof(float);
+        planes[channel]->chunk->size = frames * sizeof(float);
+      }
+    } else {
+      planes[0]->chunk->offset = 0;
+      planes[0]->chunk->stride = self.channels * sizeof(float);
+      planes[0]->chunk->size = frames * self.channels * sizeof(float);
+    }
     pw_stream_queue_buffer(self.stream, buffer);
   }
 
@@ -110,6 +174,7 @@ struct PlaybackStream {
       pw_stream_events value{};
       value.version = PW_VERSION_STREAM_EVENTS;
       value.state_changed = stateChanged;
+      value.param_changed = paramChanged;
       value.process = process;
       return value;
     }();
