@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Launch an isolated PipeWire graph and verify captured DSP output."""
 
+import json
 import os
 import pathlib
 import re
@@ -389,6 +390,8 @@ def wait_for_playback_application_route(process, pw_dump, env, channels,
     deadline = time.monotonic() + timeout
     graph = []
     active_channels = set()
+    active_channel_link_counts = {}
+    bypass_links = []
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(
@@ -410,6 +413,8 @@ def wait_for_playback_application_route(process, pw_dump, env, channels,
                 port_channels[str(item.get("id"))] = props.get(
                     "audio.channel")
         active_channels = set()
+        active_channel_link_counts = {}
+        bypass_links = []
         app_id = node_ids.get("skyapo.test.playback-app")
         playback_id = node_ids.get("skyapo.playback")
         if app_id and playback_id:
@@ -417,14 +422,23 @@ def wait_for_playback_application_route(process, pw_dump, env, channels,
                 if not item.get("type", "").endswith(":Link"):
                     continue
                 info = item.get("info", {})
-                if (str(info.get("output-node-id", "")) == app_id and
-                        str(info.get("input-node-id", "")) == playback_id and
-                        info.get("state") == "active"):
-                    channel = port_channels.get(
-                        str(info.get("output-port-id", "")))
-                    if channel:
-                        active_channels.add(channel)
-            if set(expected_channels) <= active_channels:
+                if (str(info.get("output-node-id", "")) != app_id or
+                        info.get("state") != "active"):
+                    continue
+                input_node = str(info.get("input-node-id", ""))
+                if input_node != playback_id:
+                    bypass_links.append(input_node)
+                    continue
+                channel = port_channels.get(
+                    str(info.get("output-port-id", "")))
+                if channel:
+                    active_channels.add(channel)
+                    active_channel_link_counts[channel] = (
+                        active_channel_link_counts.get(channel, 0) + 1)
+            if (set(expected_channels) <= active_channels and
+                    all(active_channel_link_counts.get(channel) == 1
+                        for channel in expected_channels) and
+                    not bypass_links):
                 print(
                     "Verified active PipeWire playback route: "
                     f"skyapo.test.playback-app ({app_id}) -> "
@@ -436,6 +450,8 @@ def wait_for_playback_application_route(process, pw_dump, env, channels,
         "ordinary playback did not establish active links to every SkyAPO "
         f"Playback channel; expected={expected_channels}, "
         f"active={sorted(active_channels)}, "
+        f"links_per_channel={active_channel_link_counts}, "
+        f"active_bypass_links={bypass_links}, "
         f"graph={summarize_graph_dump(json.dumps(graph))}")
 
 
@@ -1417,12 +1433,6 @@ def main():
                         raise RuntimeError(
                             f"{error}\n--- graph at first-fault monitor "
                             f"readiness failure ---\n{graph_summary}") from error
-                if startup_playback_recovery:
-                    consumer_args[consumer_args.index("--duration-ms") + 1] = "5000"
-                    playback_consumer = subprocess.Popen(
-                        consumer_args, env=env, text=True,
-                        stdout=playback_consumer_log,
-                        stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 15
             status = ""
             observed_dsp_initialization = False
@@ -1505,6 +1515,15 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not route the system default through SkyAPO "
                         f"within 5 seconds:\n{status}")
+                if startup_playback_recovery:
+                    wait_for_playback_application_route(
+                        second_source_process, pw_dump, env, channel_count)
+                    consumer_args[
+                        consumer_args.index("--duration-ms") + 1] = "5000"
+                    playback_consumer = subprocess.Popen(
+                        consumer_args, env=env, text=True,
+                        stdout=playback_consumer_log,
+                        stderr=subprocess.STDOUT)
                 if not playback_isolation and not startup_playback_recovery:
                     playback_client_args = [str(playback_client)]
                     if surround51:
@@ -2104,6 +2123,8 @@ def main():
                             raise RuntimeError(
                                 "playback graph did not rebind to the recreated selected sink:\n"
                                 f"{rebound_status}")
+                        wait_for_playback_application_route(
+                            second_source_process, pw_dump, env, channel_count)
                         recovery_consumer_args = consumer_args.copy()
                         recovery_consumer_args[
                             recovery_consumer_args.index("--duration-ms") + 1] = "5000"
@@ -2122,9 +2143,14 @@ def main():
                             r"RMS ratio to expected: ([0-9.]+)", recovery_result)
                         if (playback_consumer.returncode != 0 or not recovery_ratio or
                                 abs(float(recovery_ratio.group(1)) - 1.0) >= 0.03):
+                            recovery_graph = pipewire_dump_objects(
+                                run([str(pw_dump)], env, timeout=5,
+                                    check=False).stdout)
                             raise RuntimeError(
                                 "independent playback recording failed after target recovery:\n"
-                                f"{recovery_result}\n{rebound_status}")
+                                f"{recovery_result}\n{rebound_status}\n"
+                                f"PipeWire graph: "
+                                f"{summarize_graph_dump(json.dumps(recovery_graph))}")
                         print("Selected PipeWire playback sink removal/recreation recovered "
                               f"target node {old_target_id} -> {rebound_target_id}; "
                               "independent monitor recording ratio to expected: "
