@@ -1625,7 +1625,11 @@ def main():
                 print("Observed the DSP initialization status transition.")
             else:
                 print("DSP negotiated before the first status poll.")
-            callback_allocations = 1 if vst3_exception_failure else 0
+            # The virtual microphone has no consumer yet at this point. The
+            # exception plugin is exercised only after the independent
+            # recorder below links to the source, so startup must remain
+            # allocation-free for every mode.
+            callback_allocations = 0
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
                 f"Channel positions: {channel_positions}",
@@ -3005,7 +3009,7 @@ def main():
                         daemon_alive_status.stdout)
                 status = daemon_alive_status.stdout
 
-            if plugin_process_failure:
+            if plugin_process_failure and not vst3_exception_failure:
                 deadline = time.monotonic() + 8
                 failure_status = ""
                 while time.monotonic() < deadline:
@@ -4326,6 +4330,14 @@ def main():
                     raise RuntimeError(
                         "failed plugin status/daemon state was not retained "
                         f"after recording:\n{status}")
+                if vst3_exception_failure and (
+                        "Processed blocks: 0" in status or
+                        "Callback allocations: 1" not in status or
+                        "Callback deallocations: 1" not in status):
+                    raise RuntimeError(
+                        "VST3 exception did not occur inside an exercised DSP "
+                        "callback with the expected single exception-handling "
+                        f"allocation/deallocation:\n{status}")
                 failure_description = (
                     "VST3 non-standard latency exception" if
                     vst3_nonstd_latency_failure else
