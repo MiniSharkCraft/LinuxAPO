@@ -3900,6 +3900,7 @@ def main():
                         "--expected-rate", str(sample_rate),
                         "--duration-ms", "2500", "--capture-node",
                         "skyapo.test.null-target", "--signal-ready",
+                        "--stream-capture-sink",
                         "--name", "skyapo.test.consumer.after-server-restart"]
                     second_source_process = subprocess.Popen(
                         [str(playback_client)], env=env, text=True,

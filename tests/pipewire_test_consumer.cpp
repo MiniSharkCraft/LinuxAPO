@@ -64,6 +64,7 @@ struct Consumer {
   bool armMeasurementOnSignal{};
   bool internalFilter{};
   bool streamCapture{};
+  bool streamCaptureSink{};
   std::atomic<bool> streamStreaming{false};
   bool readinessReported{};
   double expectedDb{-6.0};
@@ -120,14 +121,17 @@ struct Consumer {
                     unsigned silenceLimitMs, std::string consumerNode,
                     bool onlyObserve, bool announceReady,
                     bool announceConnected, bool armOnSignal,
-                    bool useInternalFilter, bool useStreamCapture)
+                    bool useInternalFilter, bool useStreamCapture,
+                    bool useStreamCaptureSink)
       : channels(mono ? 1 : (surround51 ? 6 : (surround71 ? 8 : 2))),
         expectSilent(silent), acceptAnyAudio(anyAudio),
         ignoreSilentBlocks(ignoreSilent), observeOnly(onlyObserve),
         signalReady(announceReady), signalConnected(announceConnected),
         armMeasurementOnSignal(armOnSignal), internalFilter(useInternalFilter),
-        streamCapture(useStreamCapture), expectedDb(gainDb), expectedRate(rate),
-        durationMs(duration), maxConsecutiveSilenceMs(silenceLimitMs),
+        streamCapture(useStreamCapture),
+        streamCaptureSink(useStreamCaptureSink), expectedDb(gainDb),
+        expectedRate(rate), durationMs(duration),
+        maxConsecutiveSilenceMs(silenceLimitMs),
         captureNodeName(std::move(captureNode)),
         consumerNodeName(std::move(consumerNode)),
         channelNames(
@@ -781,9 +785,6 @@ struct Consumer {
     pw_registry_add_listener(registry, &registryHook, &registryEvents, this);
 
     const bool mono = channels == 1;
-    if (streamCapture && captureNodeName != "skyapo.virtual_mic")
-      throw std::runtime_error(
-          "--stream-capture is reserved for the virtual microphone target");
     const char *mediaClass =
         internalFilter ? "Filter/Audio"
                        : (streamCapture ? "Stream/Input/Audio" : "Audio/Sink");
@@ -810,6 +811,8 @@ struct Consumer {
           PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Test",
           PW_KEY_TARGET_OBJECT, captureNodeName.c_str(), "node.dont-fallback",
           "true", "node.dont-move", "true", nullptr);
+      if (streamCaptureSink)
+        pw_properties_set(properties, PW_KEY_STREAM_CAPTURE_SINK, "true");
       pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
       pw_properties_set(properties, SPA_KEY_AUDIO_POSITION, positions.c_str());
       stream = pw_stream_new(core, "SkyAPO Test Capture Client", properties);
@@ -1105,6 +1108,7 @@ int main(int argc, char **argv) {
   bool armMeasurementOnSignal = false;
   bool internalFilter = false;
   bool streamCapture = false;
+  bool streamCaptureSink = false;
   double expectedDb = -6.0;
   unsigned expectedRate = 0;
   unsigned durationMs = 3000;
@@ -1183,6 +1187,9 @@ int main(int argc, char **argv) {
       internalFilter = true;
     } else if (option == "--stream-capture") {
       streamCapture = true;
+    } else if (option == "--stream-capture-sink") {
+      streamCapture = true;
+      streamCaptureSink = true;
     } else if (option == "--arm-on-signal") {
       armMeasurementOnSignal = true;
     } else {
@@ -1199,7 +1206,8 @@ int main(int argc, char **argv) {
                            "[--name NODE-NAME] "
                            "[--observe-only] [--signal-ready] "
                            "[--signal-connected] [--arm-on-signal] "
-                           "[--internal-filter] [--stream-capture]\n");
+                           "[--internal-filter] [--stream-capture] "
+                           "[--stream-capture-sink]\n");
       return 2;
     }
   }
@@ -1215,7 +1223,8 @@ int main(int argc, char **argv) {
                       expectedRate, durationMs, std::move(captureNode),
                       maxConsecutiveSilenceMs, std::move(consumerNode),
                       observeOnly, signalReady, signalConnected,
-                      armMeasurementOnSignal, internalFilter, streamCapture);
+                      armMeasurementOnSignal, internalFilter, streamCapture,
+                      streamCaptureSink);
     if (expectIdenticalChannels && mono) {
       std::fprintf(
           stderr,
