@@ -4008,6 +4008,11 @@ def main():
                 consumer_args += ["--accept-any-audio", "--measure-source-lag"]
             if lv2_pdc_final or delay_pdc:
                 consumer_args += ["--expect-identical-channels"]
+            if delay_pdc:
+                # The consumer's FL and FR links become active independently.
+                # Start its measurement only after both are connected so the
+                # link-activation transient is not mistaken for PDC skew.
+                consumer_args.append("--signal-connected")
             if callback_transition_exception:
                 callback_exception_config.write_text("Preamp: -3 dB\n")
                 transition_reload = run(

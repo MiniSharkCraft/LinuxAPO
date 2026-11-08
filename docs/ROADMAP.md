@@ -126,6 +126,19 @@ failures from the hosted 101-test run on `548866e`; no full local or sanitizer
 suite was run for this test-only change. Physical-device validation remains
 open.
 
+Delay/PDC measurement fixture correction (2026-11-08): test #69 already
+verified capture-link recovery, but its recorder started the measurement timer
+before its own FL and FR links were both active. The recorded diagnostics
+showed each recorder link transitioning `paused` → `active`; the original
+measurement reported a `0.01454591` inter-channel difference and a best lag of
+`-109` samples. The fixture now uses the existing `--signal-connected` option,
+which arms measurement only after both recorder links are active. It still
+removes and recovers the capture link and retains the original `0.01` channel
+alignment limit. Local CTest #69 passed **1/1** (3.96 s): expected-level ratio
+`1.000005`, inter-channel difference `0.00000000`, best lag `0`, and callback
+allocation/deallocation counters `0/0`. This isolates PDC measurement from
+recorder-link startup; it is not physical-hardware or full-suite evidence.
+
 The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
