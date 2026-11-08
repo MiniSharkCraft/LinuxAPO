@@ -3968,6 +3968,12 @@ def main():
             elif surround71:
                 consumer_args.append("--surround71")
             consumer_args += ["--expected-rate", str(sample_rate)]
+            if wireplumber_playback:
+                # Exercise WirePlumber's real application-capture stream path.
+                # A pw_filter with Stream/Input/Audio properties is not a
+                # client stream and can leave one channel paused during the
+                # virtual source's PortConfig negotiation.
+                consumer_args.append("--stream-capture")
             if lv2_pdc_config_commit_race:
                 consumer_args.append("--accept-any-audio")
             if latency_probe:
