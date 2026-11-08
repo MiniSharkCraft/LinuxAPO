@@ -380,6 +380,65 @@ def connect_test_source_to_playback(pw_cli, pw_dump, env, source_name,
         f"expected={expected}, active={active}")
 
 
+def wait_for_playback_application_route(process, pw_dump, env, channels,
+                                        timeout=8):
+    """Wait until the test application's channels actively enter SkyAPO."""
+    expected_channels = (
+        ("MONO",) if channels == 1 else
+        ("FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR")[:channels])
+    deadline = time.monotonic() + timeout
+    graph = []
+    active_channels = set()
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                "WirePlumber playback stream exited before reaching "
+                "SkyAPO Playback")
+        graph = pipewire_dump_objects(
+            run([str(pw_dump)], env, timeout=5).stdout)
+        node_ids = {}
+        port_channels = {}
+        for item in graph:
+            props = item.get("info", {}).get(
+                "props", item.get("props", {}))
+            kind = item.get("type", "")
+            if kind.endswith(":Node"):
+                name = props.get("node.name")
+                if name in ("skyapo.test.playback-app", "skyapo.playback"):
+                    node_ids[name] = str(item.get("id"))
+            elif kind.endswith(":Port"):
+                port_channels[str(item.get("id"))] = props.get(
+                    "audio.channel")
+        active_channels = set()
+        app_id = node_ids.get("skyapo.test.playback-app")
+        playback_id = node_ids.get("skyapo.playback")
+        if app_id and playback_id:
+            for item in graph:
+                if not item.get("type", "").endswith(":Link"):
+                    continue
+                info = item.get("info", {})
+                if (str(info.get("output-node-id", "")) == app_id and
+                        str(info.get("input-node-id", "")) == playback_id and
+                        info.get("state") == "active"):
+                    channel = port_channels.get(
+                        str(info.get("output-port-id", "")))
+                    if channel:
+                        active_channels.add(channel)
+            if set(expected_channels) <= active_channels:
+                print(
+                    "Verified active PipeWire playback route: "
+                    f"skyapo.test.playback-app ({app_id}) -> "
+                    f"skyapo.playback ({playback_id}), channels "
+                    f"{', '.join(channel for channel in expected_channels if channel in active_channels)}.")
+                return
+        time.sleep(0.05)
+    raise RuntimeError(
+        "ordinary playback did not establish active links to every SkyAPO "
+        f"Playback channel; expected={expected_channels}, "
+        f"active={sorted(active_channels)}, "
+        f"graph={summarize_graph_dump(json.dumps(graph))}")
+
+
 def summarize_graph_dump(raw):
     objects = pipewire_dump_objects(raw)
     nodes = set()
@@ -1458,46 +1517,8 @@ def main():
                     # Do not let playback assertions pass while the ordinary
                     # app is still linked directly to the old sink. Confirm
                     # that each channel reaches the SkyAPO policy adapter.
-                    deadline = time.monotonic() + 8
-                    active_playback_links = 0
-                    graph = []
-                    while time.monotonic() < deadline:
-                        if second_source_process.poll() is not None:
-                            raise RuntimeError(
-                                "WirePlumber playback stream exited before it "
-                                "reached SkyAPO Playback")
-                        graph = pipewire_dump_objects(
-                            run([str(pw_dump)], env, timeout=5).stdout)
-                        node_ids = {}
-                        for item in graph:
-                            if not item.get("type", "").endswith(":Node"):
-                                continue
-                            props = item.get("info", {}).get(
-                                "props", item.get("props", {}))
-                            name = props.get("node.name")
-                            if name in ("skyapo.test.playback-app",
-                                        "skyapo.playback"):
-                                node_ids[name] = str(item.get("id"))
-                        active_playback_links = sum(
-                            1 for item in graph
-                            if item.get("type", "").endswith(":Link") and
-                            str(item.get("info", {}).get(
-                                "output-node-id", "")) ==
-                            node_ids.get("skyapo.test.playback-app") and
-                            str(item.get("info", {}).get(
-                                "input-node-id", "")) ==
-                            node_ids.get("skyapo.playback") and
-                            item.get("info", {}).get("state") == "active")
-                        if active_playback_links >= channel_count:
-                            break
-                        time.sleep(0.05)
-                    else:
-                        raise RuntimeError(
-                            "ordinary playback did not establish active links "
-                            "to every SkyAPO Playback channel before monitoring; "
-                            f"expected={channel_count}, "
-                            f"active={active_playback_links}, "
-                            f"graph={summarize_graph_dump(json.dumps(graph))}")
+                    wait_for_playback_application_route(
+                        second_source_process, pw_dump, env, channel_count)
                 if playback_isolation:
                     graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
@@ -3812,7 +3833,9 @@ def main():
                         if (result.returncode == 0 and
                                 "Playback graph: streaming / streaming, "
                                 "internal links 2/2, target links 2/2 channels"
-                                in playback_recovered_status):
+                                in playback_recovered_status and
+                                "PipeWire default sink: skyapo.playback" in
+                                playback_recovered_status):
                             break
                         time.sleep(0.1)
                     else:
@@ -3826,15 +3849,17 @@ def main():
                         "--duration-ms", "2500", "--capture-node",
                         "skyapo.test.null-target", "--signal-ready",
                         "--name", "skyapo.test.consumer.after-server-restart"]
+                    second_source_process = subprocess.Popen(
+                        [str(playback_client)], env=env, text=True,
+                        stdout=source_log, stderr=subprocess.STDOUT)
+                    wait_for_playback_application_route(
+                        second_source_process, pw_dump, env, channel_count)
                     playback_consumer = subprocess.Popen(
                         recovery_consumer_args, env=env, text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                     ready_output = wait_for_consumer_ready(
                         playback_consumer,
                         "post-restart independent playback monitor")
-                    second_source_process = subprocess.Popen(
-                        [str(playback_client)], env=env, text=True,
-                        stdout=source_log, stderr=subprocess.STDOUT)
                     try:
                         remaining_output, _ = playback_consumer.communicate(
                             timeout=10)
