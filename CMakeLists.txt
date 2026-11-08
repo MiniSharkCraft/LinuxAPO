@@ -997,6 +997,27 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;playback;recovery"
       ENVIRONMENT "SKYAPO_TEST_PLAYBACK_LINK_ALREADY_EXISTS=1")
   if(SKYAPO_WIREPLUMBER_EXECUTABLE)
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-configured-write-failure
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-configured-write-failure
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-configured-write-failure
+      PROPERTIES TIMEOUT 75
+        LABELS "pipewire;integration;playback;wireplumber;recovery"
+        ENVIRONMENT
+          "SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE=1")
     add_test(NAME skyapo-pipewire-e2e-playback-wireplumber
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py

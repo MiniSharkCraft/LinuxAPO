@@ -600,6 +600,7 @@ def main():
         "transition-format", "device-filter", "stage-warning",
         "systemd-crash-restart",
         "playback-wireplumber-systemd-crash-restart",
+        "playback-wireplumber-configured-write-failure",
         "device-switch", "delay-pdc", "source-consumer-latency",
         "playback-preamp", "playback-wireplumber",
         "playback-wireplumber-link-error",
@@ -636,6 +637,7 @@ def main():
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency|playback-preamp|playback-wireplumber|"
             "playback-wireplumber-link-error|"
+            "playback-wireplumber-configured-write-failure|"
             "playback-wireplumber-volume|playback-wireplumber-mute|"
             "playback-wireplumber-stage|"
             "playback-wireplumber-target-recovery|"
@@ -654,6 +656,8 @@ def main():
     playback_link_async_error = mode == "playback-wireplumber-link-error"
     if playback_link_async_error:
         mode = "playback-wireplumber"
+    playback_route_write_failure = (
+        mode == "playback-wireplumber-configured-write-failure")
     stable_playback_target = mode == "playback-wireplumber-target-recovery-stable-id"
     startup_playback_recovery = mode == "playback-wireplumber-startup-recovery"
     playback_isolation = mode == "playback-wireplumber"
@@ -1119,6 +1123,8 @@ def main():
                         f"through wpctl:\n{default_metadata}")
                 initial_configured_sink = metadata_node_name(
                     default_metadata, "default.configured.audio.sink")
+                initial_default_sink = metadata_node_name(
+                    default_metadata, "default.audio.sink")
 
             source_process = start_test_source(
                 source, mono, env, source_log,
@@ -1540,6 +1546,48 @@ def main():
                     f"daemon did not reach streaming state:\n{status}"
                     f"{policy_graph}")
             if wireplumber_playback:
+                if playback_route_write_failure:
+                    deadline = time.monotonic() + 5
+                    failure_status = ""
+                    while time.monotonic() < deadline:
+                        failure_status = run(
+                            [str(cli), "status"], env, timeout=5).stdout
+                        if ("cannot update WirePlumber's configured playback "
+                                "default: Input/output error" in failure_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "the configured-default write failure was not "
+                            "observed in runtime status:\n" + failure_status)
+
+                    deadline = time.monotonic() + 5
+                    restored_metadata = ""
+                    while time.monotonic() < deadline:
+                        restored_metadata = run(
+                            [metadata, "-n", "default"], env,
+                            timeout=5).stdout
+                        if (metadata_node_name(
+                                restored_metadata, "default.audio.sink") ==
+                                initial_default_sink):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "failed configured-default write left the active "
+                            "PipeWire sink partially changed; expected rollback "
+                            f"to {initial_default_sink!r}, got:\n"
+                            f"{restored_metadata}")
+                    if (metadata_node_name(
+                            restored_metadata,
+                            "default.configured.audio.sink") !=
+                            initial_configured_sink):
+                        raise RuntimeError(
+                            "failed configured-default write changed the saved "
+                            "WirePlumber route:\n" + restored_metadata)
+                    print("failed configured-default write preserved both "
+                          "original playback routes after WirePlumber recovery")
+                    return 0
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline and (
                         "PipeWire default sink: skyapo.playback" not in status):

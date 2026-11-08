@@ -522,6 +522,9 @@ struct Runtime {
   void reassertOwnedDefaultRoute() {
     if (!defaultMetadata)
       return;
+    const bool previousDefaultPresent = defaultMetadataPresent;
+    const std::string previousDefaultType = defaultMetadataType;
+    const std::string previousDefaultValue = defaultMetadataValue;
     defaultRoutePending = true;
     defaultRouteSetRequested = true;
     defaultRouteActiveConfirmed = defaultMetadataName == "skyapo.playback";
@@ -541,16 +544,42 @@ struct Runtime {
       return;
     }
     if (wirePlumberPresent) {
-      const int configuredResult = pw_metadata_set_property(
-          defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
-          "Spa:String:JSON", "{\"name\":\"skyapo.playback\"}");
+      int configuredResult = 0;
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      const char *failConfiguredWrite =
+          std::getenv("SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE");
+      if (failConfiguredWrite && std::strcmp(failConfiguredWrite, "1") == 0)
+        configuredResult = -EIO;
+      else
+#endif
+        configuredResult = pw_metadata_set_property(
+            defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
+            "Spa:String:JSON", "{\"name\":\"skyapo.playback\"}");
       if (configuredResult < 0) {
         defaultRoutePending = false;
         defaultRouteSetRequested = false;
-        defaultRouteError =
+        const std::string configuredError =
             std::string("cannot update WirePlumber's configured playback "
                         "default: ") +
             spa_strerror(configuredResult);
+        const int rollbackResult = pw_metadata_set_property(
+            defaultMetadata, PW_ID_CORE, "default.audio.sink",
+            previousDefaultPresent ? previousDefaultType.c_str() : nullptr,
+            previousDefaultPresent ? previousDefaultValue.c_str() : nullptr);
+        if (rollbackResult < 0) {
+          defaultRouteError = configuredError +
+                              "; cannot restore previous PipeWire default: " +
+                              spa_strerror(rollbackResult);
+        } else {
+          defaultRouteError = configuredError +
+                              "; requested restoration of the previous "
+                              "PipeWire default";
+          const int syncResult = requestCoreSync();
+          if (syncResult < 0)
+            defaultRouteError +=
+                "; cannot confirm PipeWire default rollback: " +
+                std::string(spa_strerror(syncResult));
+        }
         std::cerr << "skyapod: " << defaultRouteError << '\n';
         return;
       }
