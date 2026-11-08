@@ -3931,13 +3931,39 @@ def main():
                             if graph_result.returncode == 0 else
                             f"pw-dump failed ({graph_result.returncode}): "
                             f"{graph_result.stderr}")
+                        tap_diagnostics = []
+                        if server is not None and server.poll() is None:
+                            for tap_node in (
+                                    "skyapo.test.playback-app",
+                                    "skyapo.playback.dsp",
+                                    "skyapo.playback.stream"):
+                                tap = subprocess.Popen(
+                                    [str(consumer), "--expected-db", "-6",
+                                     "--expected-rate", str(sample_rate),
+                                     "--duration-ms", "1000", "--capture-node",
+                                     tap_node, "--signal-ready"],
+                                    env=env, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+                                try:
+                                    ready = wait_for_consumer_ready(
+                                        tap, f"diagnostic tap {tap_node}")
+                                    tail, _ = tap.communicate(timeout=5)
+                                    tap_diagnostics.append(
+                                        f"{tap_node} (exit {tap.returncode}):\n"
+                                        f"{ready}{tail}")
+                                except Exception as tap_error:
+                                    stop(tap, f"diagnostic tap {tap_node}")
+                                    tap_diagnostics.append(
+                                        f"{tap_node} tap failed: {tap_error}")
                         raise RuntimeError(
                             "independent playback recording after PipeWire "
                             "server restart did not measure the expected "
                             f"-6 dB output:\n{captured_playback}\n"
                             f"{playback_recovered_status}\n"
                             "PipeWire graph at failed measurement:\n"
-                            f"{graph_diagnostic}")
+                            f"{graph_diagnostic}\n"
+                            "Signal taps along the playback path:\n" +
+                            "\n".join(tap_diagnostics))
                     stop(second_source_process,
                          "post-restart ordinary playback stream")
                     second_source_process = None
