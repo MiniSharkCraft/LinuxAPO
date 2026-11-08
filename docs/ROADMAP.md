@@ -65,24 +65,46 @@ full EAPO parity, system-wide playback processing, or production-final.
 
 The active unpublished checkpoint is **v0.10.0 PipeWire playback** on
 `feature/v0.10-playback-candidate`; it remains a prerelease candidate, not a
-published version. Current committed fixture fixes are `fc2e167` (native
-input adapter) and `0e8b3af` (exact existing consumer-link adoption). The
-in-progress public playback frontend uses a native adapter and keeps the
-upstream DSP in a hidden fixed-port graph. Release native-controls/lifecycle
-CTest passed 1/1, including eight native-reference controls cases, readiness
-without a producer, silence through adapter recreation and nonuniform gain
-restoration. After the restoration-ack gate, a focused sequential ASan/UBSan
-run passed **9/9** (153.86 s): dump parser, stereo/mono fixtures, playback
-tests #46/#47, quantum variation #50, output switch #60, PDC recovery #91,
-and native controls/lifecycle #103. PipeWire subprocess tests ran with the
-existing `ASAN_OPTIONS=detect_leaks=0`; this is not LeakSanitizer evidence or a
-full sanitizer suite. The independent source review found no high-confidence
-blocker but noted this harness proves DSP output/topology rather than audio
-captured at the selected physical sink. These are private-graph results on
-uncommitted runtime changes, not complete WirePlumber 0.4/Ubuntu verification
-or physical-device evidence. Next: migrate the remaining policy-facing
-capture/consumer nodes, rerun the unchanged 0.4 playback reproduction, and
-obtain exact-commit hosted CI before closing #3.
+published version. Current playback commits include `fc2e167` (native input
+adapter), `0e8b3af` (exact existing consumer-link adoption), `0c61223` (native
+playback controls frontend), and `944ace4` (WirePlumber 0.4 PortConfig
+compatibility and E2E fixture correction). The playback frontend uses a
+native adapter and keeps the upstream DSP in a hidden fixed-port graph.
+Release native-controls/lifecycle CTest passed 1/1, including eight
+native-reference controls cases, readiness without a producer, silence through
+adapter recreation and nonuniform gain restoration. After the restoration-ack
+gate, a focused sequential ASan/UBSan run passed **9/9** (153.86 s): dump
+parser, stereo/mono fixtures, playback tests #46/#47, quantum variation #50,
+output switch #60, PDC recovery #91, and native controls/lifecycle #103.
+PipeWire subprocess tests ran with the existing
+`ASAN_OPTIONS=detect_leaks=0`; this is not LeakSanitizer evidence or a full
+sanitizer suite.
+
+The `944ace4` follow-up was reproduced against WirePlumber 0.4.17 before
+changing any assertions. The virtual source now refreshes its fixed output
+ports while paused after a `PortConfig` request, allowing WirePlumber's
+`si-audio-adapter` to complete activation. The playback-isolation fixture now
+passes the target's actual `object.serial` to `target.object` (WirePlumber 0.4
+matches that property by serial) and starts an ordinary stream only after the
+default sink is confirmed as `skyapo.playback`. No expected values or
+tolerances were relaxed. The private 0.4.17 graph passed: app → SkyAPO playback
+node → DSP stream → selected sink; playback node ID 53, DSP stream ID 63,
+target ID 39, 2/2 internal links and 2/2 target-channel links. The independent
+recording measured `0.999111` of expected output after the configured
+`-6 dB` Preamp; status reported DSP amplitude ratio `0.501187`, zero callback
+allocations/deallocations and zero overruns. The explicitly targeted separate
+sink measured `0.995706` of unity, and the longest near-silence interval during
+link recovery was `0.021 ms` against a `<250 ms` limit. CTest #46 and #47
+passed 1/1 each (18.38 s and 18.50 s); #48 passed on host WirePlumber 1.6.10
+(35.71 s). A complete local Release build passed at `--parallel 1`, as did
+clang-format 18, Python syntax, and `git diff --check`.
+
+On exact commit `944ace4`, hosted formatting, release metadata and ASan/UBSan
+checks passed; hosted `build-and-test` and Arch packaging were still running
+at the time of this checkpoint. These virtual-graph checks do not prove
+physical output playback: the workstation had an active EasyEffects route,
+Firefox and Discord streams, so no live route was changed. Physical output,
+hotplug, ordinary-client selection and hardware diversity remain open.
 The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
