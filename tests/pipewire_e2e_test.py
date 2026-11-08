@@ -267,23 +267,33 @@ def destroy_playback_internal_link(pw_cli, pw_dump, env):
         info = item.get("info", {})
         props = info.get("props", item.get("props", {}))
         if props.get("node.name") in (
-                "skyapo.playback", "skyapo.playback.stream"):
+                "skyapo.playback", "skyapo.playback.dsp",
+                "skyapo.playback.stream"):
             node_ids[props["node.name"]] = str(item.get("id"))
-    playback_id = node_ids.get("skyapo.playback")
+    frontend_id = node_ids.get("skyapo.playback")
+    playback_id = node_ids.get("skyapo.playback.dsp")
     stream_id = node_ids.get("skyapo.playback.stream")
-    if not playback_id or not stream_id:
+    if not frontend_id or not playback_id or not stream_id:
         raise RuntimeError(
             "pw-dump lacks SkyAPO playback DSP/stream nodes: "
             f"{node_ids}")
     candidates = []
+    frontend_links = []
     for item in objects:
         if not item.get("type", "").startswith("PipeWire:Interface:Link"):
             continue
         info = item.get("info", {})
         props = info.get("props", item.get("props", {}))
+        if (str(props.get("link.output.node", "")) == frontend_id and
+                str(props.get("link.input.node", "")) == playback_id):
+            frontend_links.append(item.get("id"))
         if (str(props.get("link.output.node", "")) == playback_id and
                 str(props.get("link.input.node", "")) == stream_id):
             candidates.append(item.get("id"))
+    if not frontend_links:
+        raise RuntimeError(
+            "could not find the public adapter -> SkyAPO DSP link; "
+            f"frontend={frontend_id}, DSP={playback_id}")
     if not candidates:
         raise RuntimeError(
             "could not find the SkyAPO DSP -> playback stream link; "
@@ -2032,7 +2042,7 @@ def main():
                                 "25000")
                         transition_consumer_args[
                             transition_consumer_args.index("--capture-node") + 1] = (
-                                "skyapo.playback")
+                                "skyapo.playback.dsp")
                         transition_consumer_args += [
                             "--name", "skyapo.test.playback-transition-consumer"]
                         if "--ignore-silent-blocks" in transition_consumer_args:

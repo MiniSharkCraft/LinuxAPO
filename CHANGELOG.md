@@ -2,6 +2,18 @@
 
 ## Unreleased — development after 0.9.0
 
+- Replace the public playback sink with a native PipeWire adapter feeding the
+  existing upstream-backed DSP graph. Restore gain/mute before reopening audio
+  after adapter recreation; keep fixed DSP nodes outside session-policy adapter
+  configuration. Capture/frontend migration and full WirePlumber 0.4 validation
+  remain unfinished.
+- Match native adapter monitor controls: `channelVolumes` and `mute` determine
+  post-DSP gain; scalar-only `volume` is metadata. Direct raw-node clients must
+  use channel volumes to change playback gain. Add native-reference controls,
+  stable-DSP recording and muted recreation regression coverage.
+- Publish the deterministic input fixture through a native stream adapter and
+  adopt exact existing consumer links when concurrent ownership returns
+  `EEXIST`, preserving numerical audio assertions.
 - Keep the unverified owner-supplied application artwork out of default builds
   and packages; branded icon bundling is an explicit CMake opt-in gated on
   confirmed redistribution rights.

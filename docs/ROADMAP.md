@@ -65,9 +65,25 @@ full EAPO parity, system-wide playback processing, or production-final.
 
 The active unpublished checkpoint is **v0.10.0 PipeWire playback** on
 `feature/v0.10-playback-candidate`; it remains a prerelease candidate, not a
-published version. The latest playback-routing commits are `ca2c920` and
-`cf9144f`. The historical entries below retain the test scope recorded at
-each checkpoint. New focused PipeWire E2E
+published version. Current committed fixture fixes are `fc2e167` (native
+input adapter) and `0e8b3af` (exact existing consumer-link adoption). The
+in-progress public playback frontend uses a native adapter and keeps the
+upstream DSP in a hidden fixed-port graph. Release native-controls/lifecycle
+CTest passed 1/1, including eight native-reference controls cases, readiness
+without a producer, silence through adapter recreation and nonuniform gain
+restoration. After the restoration-ack gate, a focused sequential ASan/UBSan
+run passed **9/9** (153.86 s): dump parser, stereo/mono fixtures, playback
+tests #46/#47, quantum variation #50, output switch #60, PDC recovery #91,
+and native controls/lifecycle #103. PipeWire subprocess tests ran with the
+existing `ASAN_OPTIONS=detect_leaks=0`; this is not LeakSanitizer evidence or a
+full sanitizer suite. The independent source review found no high-confidence
+blocker but noted this harness proves DSP output/topology rather than audio
+captured at the selected physical sink. These are private-graph results on
+uncommitted runtime changes, not complete WirePlumber 0.4/Ubuntu verification
+or physical-device evidence. Next: migrate the remaining policy-facing
+capture/consumer nodes, rerun the unchanged 0.4 playback reproduction, and
+obtain exact-commit hosted CI before closing #3.
+The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
 Release and **77/77** ASan/UBSan. Newer evidence supersedes those counts: full

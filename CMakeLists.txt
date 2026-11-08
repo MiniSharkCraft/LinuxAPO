@@ -1932,6 +1932,19 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   endif()
 endif()
 
+if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  add_test(NAME skyapo-pipewire-e2e-playback-native-controls
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/playback_native_controls_test.py
+      --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+      --pipewire-config ${SKYAPO_PIPEWIRE_CONFIG}
+      --pipewire ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      --pw-cli ${SKYAPO_PW_CLI_EXECUTABLE}
+      --pw-dump ${SKYAPO_PW_DUMP_EXECUTABLE})
+  set_tests_properties(skyapo-pipewire-e2e-playback-native-controls PROPERTIES
+    TIMEOUT 120 LABELS "pipewire;integration;playback;volume")
+endif()
+
 # PipeWire's pw_context_load_module currently retains allocations from external
 # modules at process exit. Keep LeakSanitizer enabled for independent tests and
 # suppress only these integration tests; ASan/UBSan remain active throughout.

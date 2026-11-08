@@ -143,6 +143,36 @@ struct PlaybackGraph::Impl {
   std::shared_ptr<const ConfigSourceSnapshot> acceptedConfigSources;
   std::string lastInternalLinkError;
   std::string lastSinkLinkError;
+  pw_node *frontend{};
+  uint32_t frontendId{SPA_ID_INVALID};
+  spa_hook frontendHook{};
+  spa_hook frontendProxyHook{};
+  bool frontendListenerAttached{};
+  bool frontendProxyListenerAttached{};
+  std::array<uint32_t, MaxChannels> frontendMonitorIds{};
+  std::array<uint32_t, MaxChannels> dspInputIds{};
+  struct FrontendLink {
+    Impl *owner{};
+    unsigned channel{};
+    pw_proxy *proxy{};
+    spa_hook proxyHook{};
+    spa_hook linkHook{};
+    uint32_t globalId{SPA_ID_INVALID};
+    bool proxyListenerAttached{};
+    bool linkListenerAttached{};
+    bool active{};
+  };
+  std::array<FrontendLink, MaxChannels> frontendLinks{};
+  std::string lastFrontendLinkError;
+  std::string frontendPositions;
+  std::array<float, MaxChannels> frontendRestoreVolumes{};
+  float frontendScalarMetadata{1.0f};
+  float frontendRestoreScalar{1.0f};
+  bool frontendRestoreMuted{};
+  bool frontendControlsRestored{};
+  bool frontendRecreateNeeded{};
+  std::atomic<bool> frontendFaulted{true};
+  std::vector<AudioPort> knownOutputPorts;
   pw_filter *filter{};
   pw_filter *streamFilter{};
   spa_hook filterHook{};
@@ -267,6 +297,12 @@ struct PlaybackGraph::Impl {
     for (unsigned channel = 0; channel < MaxChannels; ++channel) {
       sinkVolumes[channel].store(1.0f, std::memory_order_relaxed);
       streamVolumes[channel].store(1.0f, std::memory_order_relaxed);
+    }
+    frontendMonitorIds.fill(SPA_ID_INVALID);
+    dspInputIds.fill(SPA_ID_INVALID);
+    for (unsigned channel = 0; channel < channels; ++channel) {
+      frontendLinks[channel].owner = this;
+      frontendLinks[channel].channel = channel;
     }
     ownOutputIds.fill(SPA_ID_INVALID);
     streamInputIds.fill(SPA_ID_INVALID);
@@ -418,6 +454,7 @@ struct PlaybackGraph::Impl {
 
   void destroyResources() noexcept {
     destroying = true;
+    destroyFrontend();
     if (streamFilter) {
       pw_filter_disconnect(streamFilter);
     }
@@ -502,7 +539,8 @@ struct PlaybackGraph::Impl {
     const bool sinkReady =
         std::all_of(linked.begin(), linked.begin() + channels,
                     [](bool value) { return value; });
-    if (internalReady && sinkReady)
+    if (internalReady && sinkReady &&
+        !frontendFaulted.load(std::memory_order_acquire))
       linkRetryBackoffMs = 100;
   }
 
@@ -531,6 +569,18 @@ struct PlaybackGraph::Impl {
     detail::invokeControlCallback(
         [&] {
           self.linkRetryScheduled = false;
+          if (self.frontendRecreateNeeded) {
+            self.destroyFrontend();
+            try {
+              self.createFrontend(self.frontendPositions);
+              self.frontendRecreateNeeded = false;
+            } catch (const std::exception &exception) {
+              self.lastFrontendLinkError = self.error = exception.what();
+              self.scheduleLinkRetry();
+            }
+          }
+          for (unsigned channel = 0; channel < self.channels; ++channel)
+            self.createFrontendLink(channel);
           for (unsigned channel = 0; channel < self.channels; ++channel)
             if (!self.links[channel] &&
                 self.ownOutputIds[channel] != SPA_ID_INVALID &&
@@ -552,17 +602,15 @@ struct PlaybackGraph::Impl {
     for (const auto &port : ports)
       positions += " " + port.channel;
     positions += " ]";
-    // Publish a regular virtual sink. Runtime temporarily makes this the
-    // PipeWire default while the paired output stream sends processed audio to
-    // the selected physical sink. Keep both nodes out of node.link-group:
-    // WirePlumber 0.4 refuses to link nodes in the same group, and Smart
-    // Filters are not used by this regular-sink routing design.
+    // Only the native adapter is exposed to session policy. Fixed DSP
+    // filters use an internal class so WirePlumber never sends them PortConfig.
     auto *props = pw_properties_new(
-        PW_KEY_NODE_NAME, "skyapo.playback", PW_KEY_NODE_DESCRIPTION,
-        "SkyAPO Playback", PW_KEY_MEDIA_CLASS, "Audio/Sink", PW_KEY_MEDIA_TYPE,
-        "Audio", PW_KEY_NODE_AUTOCONNECT, "true", PW_KEY_NODE_WANT_DRIVER,
-        "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false", PW_KEY_AUDIO_CHANNELS,
-        std::to_string(channels).c_str(), PW_KEY_AUDIO_RATE,
+        PW_KEY_NODE_NAME, "skyapo.playback.dsp", PW_KEY_NODE_DESCRIPTION,
+        "SkyAPO Playback DSP", PW_KEY_MEDIA_CLASS, "Filter/Audio",
+        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_NODE_AUTOCONNECT, "false",
+        PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false",
+        PW_KEY_AUDIO_CHANNELS, std::to_string(channels).c_str(),
+        PW_KEY_AUDIO_RATE,
         std::to_string(sink.sampleRate ? sink.sampleRate : 48000).c_str(),
         PW_KEY_AUDIO_FORMAT, "F32", SPA_KEY_AUDIO_POSITION, positions.c_str(),
         nullptr);
@@ -585,7 +633,7 @@ struct PlaybackGraph::Impl {
         PW_KEY_NODE_NAME, "skyapo.playback.stream", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback Stream", PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
-        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.virtual", "true",
+        PW_KEY_MEDIA_CLASS, "Filter/Audio", "node.virtual", "true",
         PW_KEY_NODE_AUTOCONNECT, "false", "node.dont-fallback", "true",
         "node.linger", "true", nullptr);
     if (!streamProps)
@@ -682,6 +730,261 @@ struct PlaybackGraph::Impl {
         pw_filter_connect(streamFilter, PW_FILTER_FLAG_RT_PROCESS, nodeParams,
                           3) < 0)
       throw std::runtime_error("cannot connect SkyAPO playback filter");
+    createFrontend(positions);
+  }
+
+  void destroyFrontend() noexcept {
+    if (frontendListenerAttached) {
+      spa_hook_remove(&frontendHook);
+      frontendListenerAttached = false;
+    }
+    if (frontendProxyListenerAttached) {
+      spa_hook_remove(&frontendProxyHook);
+      frontendProxyListenerAttached = false;
+    }
+    for (unsigned channel = 0; channel < channels; ++channel)
+      destroyFrontendLink(channel);
+    if (frontend) {
+      pw_proxy_destroy(reinterpret_cast<pw_proxy *>(frontend));
+      frontend = nullptr;
+    }
+    frontendId = SPA_ID_INVALID;
+    frontendMonitorIds.fill(SPA_ID_INVALID);
+    frontendFaulted.store(true, std::memory_order_release);
+  }
+
+  void createFrontend(const std::string &positions) {
+    frontendPositions = positions;
+    frontendControlsRestored = false;
+    frontendRestoreScalar = frontendScalarMetadata;
+    frontendRestoreMuted = sinkMuted.load(std::memory_order_acquire);
+    for (unsigned channel = 0; channel < channels; ++channel)
+      frontendRestoreVolumes[channel] =
+          sinkVolumes[channel].load(std::memory_order_acquire);
+    auto *properties = pw_properties_new(
+        "factory.name", "support.null-audio-sink", PW_KEY_NODE_NAME,
+        "skyapo.playback", PW_KEY_NODE_DESCRIPTION, "SkyAPO Playback",
+        PW_KEY_MEDIA_CLASS, "Audio/Sink", PW_KEY_NODE_VIRTUAL, "true",
+        PW_KEY_AUDIO_CHANNELS, std::to_string(channels).c_str(),
+        SPA_KEY_AUDIO_POSITION, positions.c_str(), "monitor.channel-volumes",
+        "false", "adapter.auto-port-config",
+        "{ mode = dsp monitor = true position = preserve }", nullptr);
+    if (!properties)
+      throw std::runtime_error("cannot allocate playback adapter properties");
+    frontend = static_cast<pw_node *>(
+        pw_core_create_object(core, "adapter", PW_TYPE_INTERFACE_Node,
+                              PW_VERSION_NODE, &properties->dict, 0));
+    pw_properties_free(properties);
+    if (!frontend)
+      throw std::runtime_error("cannot create playback adapter");
+    static const auto events = [] {
+      pw_node_events value{};
+      value.version = PW_VERSION_NODE_EVENTS;
+      value.param = frontendParam;
+      return value;
+    }();
+    if (pw_node_add_listener(frontend, &frontendHook, &events, this) < 0)
+      throw std::runtime_error("cannot listen for playback adapter controls");
+    frontendListenerAttached = true;
+    static const auto proxyEvents = [] {
+      pw_proxy_events value{};
+      value.version = PW_VERSION_PROXY_EVENTS;
+      value.error = frontendError;
+      value.bound = frontendBound;
+      value.removed = frontendRemoved;
+      return value;
+    }();
+    pw_proxy_add_listener(reinterpret_cast<pw_proxy *>(frontend),
+                          &frontendProxyHook, &proxyEvents, this);
+    frontendProxyListenerAttached = true;
+    uint32_t params[] = {SPA_PARAM_Props};
+    if (pw_node_subscribe_params(frontend, params, 1) < 0)
+      throw std::runtime_error("cannot subscribe to playback adapter controls");
+    // Restore the public controls when recreating our own adapter. DSP gain
+    // stays after the Engine; the monitor itself deliberately remains unity.
+    uint8_t bytes[512];
+    spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes, sizeof(bytes));
+    const auto volumes = frontendRestoreVolumes;
+    const auto *controls = static_cast<spa_pod *>(spa_pod_builder_add_object(
+        &builder, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
+        SPA_POD_Float(frontendRestoreScalar), SPA_PROP_channelVolumes,
+        SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels, volumes.data()),
+        SPA_PROP_mute,
+        SPA_POD_Bool(sinkMuted.load(std::memory_order_acquire))));
+    if (!controls ||
+        pw_node_set_param(frontend, SPA_PARAM_Props, 0, controls) < 0)
+      throw std::runtime_error("cannot restore playback adapter controls");
+  }
+
+  static void frontendBound(void *data, uint32_t id) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    detail::invokeControlCallback(
+        [&] {
+          self.frontendId = id;
+          for (const auto &port : self.knownOutputPorts)
+            if (port.node == id)
+              for (unsigned channel = 0; channel < self.channels; ++channel)
+                if (port.channel == self.ports[channel].channel)
+                  self.frontendMonitorIds[channel] = port.id;
+          for (unsigned channel = 0; channel < self.channels; ++channel)
+            self.createFrontendLink(channel);
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  static void frontendRemoved(void *data) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    detail::invokeControlCallback(
+        [&] {
+          self.frontendFaulted.store(true, std::memory_order_release);
+          self.frontendRecreateNeeded = true;
+          self.lastFrontendLinkError = self.error =
+              "playback adapter disappeared";
+          self.scheduleLinkRetry();
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  static void frontendError(void *data, int, int,
+                            const char *message) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    detail::invokeControlCallback(
+        [&] {
+          self.lastFrontendLinkError = self.error =
+              message ? message : "playback adapter failed";
+          self.frontendFaulted.store(true, std::memory_order_release);
+          self.frontendRecreateNeeded = true;
+          self.scheduleLinkRetry();
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  static void frontendParam(void *data, int, uint32_t id, uint32_t, uint32_t,
+                            const spa_pod *param) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    detail::invokeControlCallback(
+        [&] {
+          if (id == SPA_PARAM_Props && param)
+            self.applyFrontendProps(param);
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  void destroyFrontendLink(unsigned channel) noexcept {
+    auto &link = frontendLinks[channel];
+    if (link.linkListenerAttached)
+      spa_hook_remove(&link.linkHook);
+    if (link.proxyListenerAttached)
+      spa_hook_remove(&link.proxyHook);
+    link.linkListenerAttached = link.proxyListenerAttached = false;
+    if (link.proxy)
+      pw_proxy_destroy(link.proxy);
+    link.proxy = nullptr;
+    link.globalId = SPA_ID_INVALID;
+    link.active = false;
+    frontendFaulted.store(true, std::memory_order_release);
+  }
+
+  void createFrontendLink(unsigned channel) {
+    auto &link = frontendLinks[channel];
+    if (destroying || link.proxy || frontendId == SPA_ID_INVALID ||
+        frontendMonitorIds[channel] == SPA_ID_INVALID ||
+        dspInputIds[channel] == SPA_ID_INVALID)
+      return;
+    auto *properties = pw_properties_new(nullptr, nullptr);
+    if (!properties) {
+      lastFrontendLinkError = error =
+          "cannot allocate playback adapter link properties";
+      scheduleLinkRetry();
+      return;
+    }
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", frontendId);
+    pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_PORT, "%u",
+                       frontendMonitorIds[channel]);
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u",
+                       pw_filter_get_node_id(filter));
+    pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
+                       dspInputIds[channel]);
+    link.proxy = static_cast<pw_proxy *>(
+        pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
+                              PW_VERSION_LINK, &properties->dict, 0));
+    pw_properties_free(properties);
+    if (!link.proxy) {
+      lastFrontendLinkError = error = "cannot link playback adapter to DSP";
+      scheduleLinkRetry();
+      return;
+    }
+    static const auto proxyEvents = [] {
+      pw_proxy_events value{};
+      value.version = PW_VERSION_PROXY_EVENTS;
+      value.error = frontendLinkError;
+      return value;
+    }();
+    pw_proxy_add_listener(link.proxy, &link.proxyHook, &proxyEvents, &link);
+    link.proxyListenerAttached = true;
+    static const auto events = [] {
+      pw_link_events value{};
+      value.version = PW_VERSION_LINK_EVENTS;
+      value.info = frontendLinkInfo;
+      return value;
+    }();
+    if (pw_link_add_listener(reinterpret_cast<pw_link *>(link.proxy),
+                             &link.linkHook, &events, &link) < 0) {
+      destroyFrontendLink(channel);
+      lastFrontendLinkError = error =
+          "cannot listen for playback adapter link state";
+      scheduleLinkRetry();
+      return;
+    }
+    link.linkListenerAttached = true;
+  }
+
+  static void frontendLinkError(void *data, int, int,
+                                const char *message) noexcept {
+    auto &link = *static_cast<FrontendLink *>(data);
+    auto &self = *link.owner;
+    detail::invokeControlCallback(
+        [&] {
+          self.lastFrontendLinkError = self.error =
+              message ? message : "playback adapter link failed";
+          self.destroyFrontendLink(link.channel);
+          self.scheduleLinkRetry();
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  static void frontendLinkInfo(void *data, const pw_link_info *info) noexcept {
+    auto &link = *static_cast<FrontendLink *>(data);
+    auto &self = *link.owner;
+    detail::invokeControlCallback(
+        [&] {
+          if (!info)
+            return;
+          link.globalId = info->id;
+          link.active = info->state == PW_LINK_STATE_ACTIVE;
+          if (info->state == PW_LINK_STATE_ERROR) {
+            self.lastFrontendLinkError = self.error =
+                info->error ? info->error : "playback adapter link failed";
+            self.destroyFrontendLink(link.channel);
+            self.scheduleLinkRetry();
+          } else {
+            self.updateFrontendRecoveryGate();
+          }
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
+  void updateFrontendRecoveryGate() {
+    const bool ready =
+        frontendControlsRestored &&
+        std::all_of(frontendLinks.begin(), frontendLinks.begin() + channels,
+                    [](const auto &link) { return link.active; });
+    frontendFaulted.store(!ready, std::memory_order_release);
+    if (ready) {
+      if (error == lastFrontendLinkError)
+        error.clear();
+      lastFrontendLinkError.clear();
+    }
   }
 
   void recreateStreamFilter() {
@@ -725,7 +1028,7 @@ struct PlaybackGraph::Impl {
         PW_KEY_NODE_NAME, "skyapo.playback.stream", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback Stream", PW_KEY_MEDIA_TYPE, "Audio",
         PW_KEY_MEDIA_CATEGORY, "Playback", PW_KEY_MEDIA_ROLE, "Music",
-        PW_KEY_MEDIA_CLASS, "Stream/Output/Audio", "node.virtual", "true",
+        PW_KEY_MEDIA_CLASS, "Filter/Audio", "node.virtual", "true",
         PW_KEY_NODE_AUTOCONNECT, "false", "node.dont-fallback", "true",
         "node.linger", "true", nullptr);
     if (!streamProps)
@@ -1251,6 +1554,9 @@ struct PlaybackGraph::Impl {
   static void handleGlobal(Impl &self, uint32_t id, const char *type,
                            const spa_dict *props) {
     if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
+        id == self.frontendId)
+      return;
+    if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
         property(props, PW_KEY_MEDIA_CLASS) == "Audio/Sink") {
       self.considerSink(id, props);
       self.watchSinkNode(id);
@@ -1308,11 +1614,28 @@ struct PlaybackGraph::Impl {
                                         "in", channel,
                                         property(props, PW_KEY_PORT_NAME)});
     }
+    if (direction == "out") {
+      uint32_t node{};
+      if (parseGlobalId(nodeId, node) &&
+          std::none_of(self.knownOutputPorts.begin(),
+                       self.knownOutputPorts.end(),
+                       [&](const auto &port) { return port.id == id; }))
+        self.knownOutputPorts.push_back(
+            {id, node, "out", channel, property(props, PW_KEY_PORT_NAME)});
+    }
     for (unsigned index = 0; index < self.channels; ++index) {
       if (channel != self.ports[index].channel)
         continue;
-      if (nodeId == std::to_string(pw_filter_get_node_id(self.filter)) &&
-          direction == "out" && self.ownOutputIds[index] == SPA_ID_INVALID) {
+      if (nodeId == std::to_string(self.frontendId) && direction == "out") {
+        self.frontendMonitorIds[index] = id;
+        self.createFrontendLink(index);
+      } else if (nodeId == std::to_string(pw_filter_get_node_id(self.filter)) &&
+                 direction == "in") {
+        self.dspInputIds[index] = id;
+        self.createFrontendLink(index);
+      } else if (nodeId == std::to_string(pw_filter_get_node_id(self.filter)) &&
+                 direction == "out" &&
+                 self.ownOutputIds[index] == SPA_ID_INVALID) {
         self.ownOutputIds[index] = id;
         self.createLink(index);
       } else if (nodeId ==
@@ -1413,6 +1736,31 @@ struct PlaybackGraph::Impl {
 
   static void handleGlobalRemove(Impl &self, uint32_t id) {
     self.removeObservedSinkLink(id);
+    if (id == self.frontendId) {
+      self.frontendId = SPA_ID_INVALID;
+      self.error = "playback adapter disappeared";
+      self.frontendFaulted.store(true, std::memory_order_release);
+      self.frontendRecreateNeeded = true;
+      self.scheduleLinkRetry();
+    }
+    self.knownOutputPorts.erase(
+        std::remove_if(self.knownOutputPorts.begin(),
+                       self.knownOutputPorts.end(),
+                       [&](const auto &port) { return port.id == id; }),
+        self.knownOutputPorts.end());
+    for (unsigned channel = 0; channel < self.channels; ++channel) {
+      const bool monitorRemoved = self.frontendMonitorIds[channel] == id;
+      const bool inputRemoved = self.dspInputIds[channel] == id;
+      if (monitorRemoved || inputRemoved ||
+          self.frontendLinks[channel].globalId == id) {
+        self.destroyFrontendLink(channel);
+        if (monitorRemoved)
+          self.frontendMonitorIds[channel] = SPA_ID_INVALID;
+        if (inputRemoved)
+          self.dspInputIds[channel] = SPA_ID_INVALID;
+        self.scheduleLinkRetry();
+      }
+    }
     self.knownInputPorts.erase(
         std::remove_if(self.knownInputPorts.begin(), self.knownInputPorts.end(),
                        [&](const AudioPort &port) { return port.id == id; }),
@@ -1730,6 +2078,66 @@ struct PlaybackGraph::Impl {
         self.controlCallbackFailed, self.faulted);
   }
 
+  void applyFrontendProps(const spa_pod *pod) {
+    if (!spa_pod_is_object(pod)) {
+      error = "invalid playback adapter Props";
+      return;
+    }
+    float scalar = 1.0f;
+    const auto *volume = spa_pod_find_prop(pod, nullptr, SPA_PROP_volume);
+    if (volume && (spa_pod_get_float(&volume->value, &scalar) < 0 ||
+                   !std::isfinite(scalar) || scalar < 0.0f)) {
+      error = "invalid playback adapter scalar volume";
+      return;
+    }
+    std::array<float, MaxChannels> next{};
+    const auto *channelVolume =
+        spa_pod_find_prop(pod, nullptr, SPA_PROP_channelVolumes);
+    if (channelVolume) {
+      const auto *value = &channelVolume->value;
+      if (SPA_POD_TYPE(value) != SPA_TYPE_Array ||
+          SPA_POD_ARRAY_N_VALUES(value) != channels ||
+          SPA_POD_ARRAY_VALUE_TYPE(value) != SPA_TYPE_Float ||
+          SPA_POD_ARRAY_VALUE_SIZE(value) != sizeof(float)) {
+        error = "invalid playback adapter channel volumes";
+        return;
+      }
+      std::memcpy(next.data(), SPA_POD_ARRAY_VALUES(value),
+                  channels * sizeof(float));
+      for (unsigned channel = 0; channel < channels; ++channel)
+        if (!std::isfinite(next[channel]) || next[channel] < 0.0f) {
+          error = "invalid playback adapter channel volume";
+          return;
+        }
+    }
+    const auto *mute = spa_pod_find_prop(pod, nullptr, SPA_PROP_mute);
+    bool muted = sinkMuted.load(std::memory_order_acquire);
+    if (mute && spa_pod_get_bool(&mute->value, &muted) < 0) {
+      error = "invalid playback adapter mute";
+      return;
+    }
+    // Subscription may report the new adapter's defaults before our restore
+    // request is acknowledged. Keep the old gain/mute and silence the DSP
+    // until matching controls and every monitor link are both ready.
+    if (!frontendControlsRestored) {
+      if (!channelVolume || !mute || !volume ||
+          next != frontendRestoreVolumes || muted != frontendRestoreMuted ||
+          scalar != frontendRestoreScalar)
+        return;
+      frontendControlsRestored = true;
+    }
+    frontendScalarMetadata = scalar;
+    // Match the native adapter's monitor contract: channelVolumes and mute
+    // control the monitor signal. Scalar volume is valid/readable metadata,
+    // but does not independently scale it. Keep this gain after the Engine.
+    if (channelVolume)
+      for (unsigned channel = 0; channel < channels; ++channel)
+        sinkVolumes[channel].store(next[channel], std::memory_order_release);
+    if (mute)
+      sinkMuted.store(muted, std::memory_order_release);
+    updateFrontendRecoveryGate();
+  }
+
   void applyVolumeProps(const spa_pod *pod,
                         std::array<std::atomic<float>, MaxChannels> &volumes,
                         std::atomic<bool> &muted, const char *nodeDescription) {
@@ -1838,7 +2246,8 @@ struct PlaybackGraph::Impl {
         pw_loop_signal_event(self.loop, self.formatEvent);
       return;
     }
-    if (self.faulted.load(std::memory_order_acquire)) {
+    if (self.faulted.load(std::memory_order_acquire) ||
+        self.frontendFaulted.load(std::memory_order_acquire)) {
       silence();
       return;
     }
@@ -1995,8 +2404,7 @@ void PlaybackGraph::selectSink(AudioDevice device,
 std::string PlaybackGraph::status() const {
   const auto &self = *impl_;
   std::ostringstream out;
-  out << "Playback node: SkyAPO Playback (skyapo.playback, "
-      << (self.filter ? pw_filter_get_node_id(self.filter) : SPA_ID_INVALID)
+  out << "Playback node: SkyAPO Playback (skyapo.playback, " << self.frontendId
       << ")\nPlayback stream node: skyapo.playback.stream ("
       << (self.streamFilter ? pw_filter_get_node_id(self.streamFilter)
                             : SPA_ID_INVALID)
@@ -2044,7 +2452,12 @@ bool PlaybackGraph::ready() const noexcept {
   return self.state == PW_FILTER_STATE_STREAMING &&
          self.streamState == PW_FILTER_STATE_STREAMING &&
          self.active.load(std::memory_order_acquire) != nullptr &&
-         self.sinkAvailable && !self.faulted.load(std::memory_order_acquire) &&
+         self.sinkAvailable && self.frontendId != SPA_ID_INVALID &&
+         !self.faulted.load(std::memory_order_acquire) &&
+         !self.frontendFaulted.load(std::memory_order_acquire) &&
+         std::all_of(self.frontendLinks.begin(),
+                     self.frontendLinks.begin() + self.channels,
+                     [](const auto &link) { return link.active; }) &&
          std::all_of(self.internalLinked.begin(),
                      self.internalLinked.begin() + self.channels,
                      [](bool value) { return value; }) &&
