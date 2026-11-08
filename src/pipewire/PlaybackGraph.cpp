@@ -137,6 +137,10 @@ struct PlaybackGraph::Impl {
   pw_core *core{};
   pw_loop *loop{};
   pw_registry *registry{};
+  spa_hook coreHook{};
+  bool coreListenerAttached{};
+  int initialRegistrySyncSequence{-1};
+  bool initialFrontendCreated{};
   AudioDevice sink;
   std::vector<AudioPort> ports;
   std::string configPath;
@@ -150,7 +154,7 @@ struct PlaybackGraph::Impl {
   bool frontendListenerAttached{};
   bool frontendProxyListenerAttached{};
   bool frontendLinksEnabled{};
-  bool wirePlumberPresent{};
+  bool sessionManagerPresent{};
   std::array<uint32_t, MaxChannels> frontendMonitorIds{};
   std::array<uint32_t, MaxChannels> dspInputIds{};
   struct FrontendLink {
@@ -269,10 +273,11 @@ struct PlaybackGraph::Impl {
 
   Impl(pw_core *ownerCore, pw_loop *ownerLoop, pw_registry *ownerRegistry,
        AudioDevice selectedSink, std::vector<AudioPort> sinkPorts,
-       std::string config)
+       std::string config, bool hasSessionManager)
       : core(ownerCore), loop(ownerLoop), registry(ownerRegistry),
         sink(std::move(selectedSink)), ports(std::move(sinkPorts)),
-        configPath(std::move(config)) {
+        configPath(std::move(config)),
+        sessionManagerPresent(hasSessionManager) {
     if (!core || !loop || !registry)
       throw std::invalid_argument("playback graph requires a PipeWire core");
     std::sort(
@@ -316,6 +321,10 @@ struct PlaybackGraph::Impl {
       linkContexts[channel] = {this, channel};
       sinkLinkContexts[channel] = {this, channel, true};
     }
+    frontendPositions = "[";
+    for (const auto &port : ports)
+      frontendPositions += " " + port.channel;
+    frontendPositions += " ]";
     formatEvent = pw_loop_add_event(loop, formatReady, this);
     if (!formatEvent)
       throw std::runtime_error("cannot create playback graph format event");
@@ -334,7 +343,15 @@ struct PlaybackGraph::Impl {
       throw std::runtime_error("cannot create playback adapter start timer");
     }
     try {
-      createFilters();
+      static const auto coreEvents = [] {
+        pw_core_events events{};
+        events.version = PW_VERSION_CORE_EVENTS;
+        events.done = initialRegistrySyncDone;
+        return events;
+      }();
+      if (pw_core_add_listener(core, &coreHook, &coreEvents, this) < 0)
+        throw std::runtime_error("cannot listen for PipeWire core events");
+      coreListenerAttached = true;
       static const auto registryEvents = [] {
         pw_registry_events events{};
         events.version = PW_VERSION_REGISTRY_EVENTS;
@@ -346,6 +363,15 @@ struct PlaybackGraph::Impl {
                                    this) < 0)
         throw std::runtime_error("cannot listen for playback graph ports");
       registryListenerAttached = true;
+      createFilters();
+      // Wait until the registry has delivered its initial globals before
+      // creating the public Audio/Sink adapter. In particular, the
+      // WirePlumber client must be known before frontendBound decides whether
+      // to defer our monitor links for policy PortConfig.
+      initialRegistrySyncSequence = pw_core_sync(core, PW_ID_CORE, 0);
+      if (initialRegistrySyncSequence < 0)
+        throw std::runtime_error(
+            "cannot synchronize the initial PipeWire registry");
     } catch (...) {
       destroyResources();
       throw;
@@ -512,6 +538,10 @@ struct PlaybackGraph::Impl {
       spa_hook_remove(&registryHook);
       registryListenerAttached = false;
     }
+    if (coreListenerAttached) {
+      spa_hook_remove(&coreHook);
+      coreListenerAttached = false;
+    }
     if (formatEvent)
       pw_loop_destroy_source(loop, formatEvent);
     if (linkRetryTimer)
@@ -611,10 +641,7 @@ struct PlaybackGraph::Impl {
   }
 
   void createFilters() {
-    std::string positions = "[";
-    for (const auto &port : ports)
-      positions += " " + port.channel;
-    positions += " ]";
+    const auto &positions = frontendPositions;
     // Only the native adapter is exposed to session policy. Fixed DSP
     // filters use an internal class so WirePlumber never sends them PortConfig.
     auto *props = pw_properties_new(
@@ -743,7 +770,37 @@ struct PlaybackGraph::Impl {
         pw_filter_connect(streamFilter, PW_FILTER_FLAG_RT_PROCESS, nodeParams,
                           3) < 0)
       throw std::runtime_error("cannot connect SkyAPO playback filter");
-    createFrontend(positions);
+  }
+
+  static void initialRegistrySyncDone(void *data, uint32_t id,
+                                      int sequence) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    if (id != PW_ID_CORE || sequence != self.initialRegistrySyncSequence ||
+        self.initialFrontendCreated || self.destroying)
+      return;
+    detail::invokeControlCallback(
+        [&] {
+          self.initialRegistrySyncSequence = -1;
+          if (self.sessionManagerPresent) {
+            self.createFrontend(self.frontendPositions);
+            self.initialFrontendCreated = true;
+            std::cerr << "skyapod: initial PipeWire registry synchronized; "
+                      << "session manager detected before playback adapter "
+                         "creation\n";
+          } else {
+            // WirePlumber may start slightly after PipeWire and register only
+            // after the initial registry barrier. Give its client global a
+            // bounded chance to arrive before exposing the Audio/Sink; its
+            // PortConfig must settle before we create monitor links.
+            timespec delay{0, 500000000};
+            if (pw_loop_update_timer(self.loop, self.frontendLinkStartTimer,
+                                     &delay, nullptr, false) < 0)
+              throw std::runtime_error(
+                  "cannot schedule initial session-manager discovery grace "
+                  "period");
+          }
+        },
+        self.controlCallbackFailed, self.faulted);
   }
 
   void destroyFrontend() noexcept {
@@ -841,7 +898,7 @@ struct PlaybackGraph::Impl {
               for (unsigned channel = 0; channel < self.channels; ++channel)
                 if (port.channel == self.ports[channel].channel)
                   self.frontendMonitorIds[channel] = port.id;
-          if (self.wirePlumberPresent) {
+          if (self.sessionManagerPresent) {
             // WirePlumber 0.4 configures Audio/Sink adapters immediately after
             // discovery. Starting this adapter through monitor links before
             // that transaction completes makes Format/PortConfig fail with
@@ -898,6 +955,17 @@ struct PlaybackGraph::Impl {
     auto &self = *static_cast<Impl *>(data);
     detail::invokeControlCallback(
         [&] {
+          if (!self.initialFrontendCreated) {
+            self.createFrontend(self.frontendPositions);
+            self.initialFrontendCreated = true;
+            std::cerr << "skyapod: created playback adapter after the "
+                      << "initial session-manager discovery grace period; "
+                      << "session manager "
+                      << (self.sessionManagerPresent ? "detected"
+                                                     : "not detected")
+                      << '\n';
+            return;
+          }
           self.frontendLinksEnabled = true;
           for (unsigned channel = 0; channel < self.channels; ++channel)
             self.createFrontendLink(channel);
@@ -1594,7 +1662,7 @@ struct PlaybackGraph::Impl {
       const auto binary = property(props, "application.process.binary");
       if (application == "WirePlumber" || application == "wireplumber" ||
           binary == "wireplumber")
-        self.wirePlumberPresent = true;
+        self.sessionManagerPresent = true;
       return;
     }
     if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
@@ -2405,9 +2473,10 @@ struct PlaybackGraph::Impl {
 PlaybackGraph::PlaybackGraph(pw_core *core, pw_loop *loop,
                              pw_registry *registry, AudioDevice device,
                              std::vector<AudioPort> ports,
-                             std::string configPath)
+                             std::string configPath, bool sessionManagerPresent)
     : impl_(std::make_unique<Impl>(core, loop, registry, std::move(device),
-                                   std::move(ports), std::move(configPath))) {}
+                                   std::move(ports), std::move(configPath),
+                                   sessionManagerPresent)) {}
 
 PlaybackGraph::~PlaybackGraph() = default;
 
@@ -2449,6 +2518,10 @@ void PlaybackGraph::reloadConfig(
 void PlaybackGraph::selectSink(AudioDevice device,
                                std::vector<AudioPort> ports) {
   impl_->selectSink(std::move(device), std::move(ports));
+}
+
+void PlaybackGraph::sessionManagerDetected() noexcept {
+  impl_->sessionManagerPresent = true;
 }
 
 std::string PlaybackGraph::status() const {

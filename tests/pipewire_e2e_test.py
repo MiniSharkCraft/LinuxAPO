@@ -1550,6 +1550,24 @@ def main():
                     # that each channel reaches the SkyAPO policy adapter.
                     wait_for_playback_application_route(
                         second_source_process, pw_dump, env, channel_count)
+                    if wireplumber_playback:
+                        daemon_log.flush()
+                        daemon_log.seek(0)
+                        startup_log = daemon_log.read()
+                        manager_ready = (
+                            "initial PipeWire registry synchronized; "
+                            "session manager detected before playback adapter "
+                            "creation" in startup_log or
+                            "created playback adapter after the initial "
+                            "session-manager discovery grace period; session manager "
+                            "detected" in startup_log)
+                        if not manager_ready:
+                            raise RuntimeError(
+                                "policy-managed playback route became active, but "
+                                "skyapod created its playback adapter before "
+                                "detecting the session manager:\n" + startup_log)
+                        print("PipeWire session-manager discovery completed before the "
+                              "SkyAPO playback adapter was exposed.")
                 if playback_isolation:
                     graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)

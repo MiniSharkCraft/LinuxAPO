@@ -16,7 +16,7 @@ class PlaybackGraph {
 public:
   PlaybackGraph(pw_core *core, pw_loop *loop, pw_registry *registry,
                 AudioDevice device, std::vector<AudioPort> ports,
-                std::string configPath);
+                std::string configPath, bool sessionManagerPresent = false);
   ~PlaybackGraph();
 
   PlaybackGraph(const PlaybackGraph &) = delete;
@@ -26,6 +26,7 @@ public:
   void reloadConfig(const std::string &configPath,
                     std::shared_ptr<const ConfigSourceSnapshot> sourceSnapshot);
   void selectSink(AudioDevice device, std::vector<AudioPort> ports);
+  void sessionManagerDetected() noexcept;
   std::string status() const;
   const AudioDevice &device() const noexcept;
   bool ready() const noexcept;

@@ -1137,7 +1137,8 @@ struct Runtime {
     try {
       playbackGraph = std::make_unique<skyapo::pipewire::PlaybackGraph>(
           core, pw_main_loop_get_loop(main), registry, *playbackDevice,
-          std::move(playbackPorts), config);
+          std::move(playbackPorts), config,
+          wirePlumberPresent || virtualMicConfiguredByPolicy);
       if (renderVolumeMonitor) {
         renderVolumeMonitor->setSinkOverride(playbackDevice->name);
         renderVolume = renderVolumeMonitor->snapshot();
@@ -1664,6 +1665,8 @@ struct Runtime {
       // so explicitly recreate its source ports while the node is suspended.
       r.outputPortConfigPending = true;
       r.virtualMicConfiguredByPolicy = true;
+      if (r.playbackGraph)
+        r.playbackGraph->sessionManagerDetected();
       if (r.state == PW_FILTER_STATE_PAUSED)
         r.rebuildOutputPortsForPortConfig();
     }
@@ -1806,8 +1809,11 @@ struct Runtime {
       const auto application = get(props, "application.name");
       const auto binary = get(props, "application.process.binary");
       if (application == "WirePlumber" || application == "wireplumber" ||
-          binary == "wireplumber")
+          binary == "wireplumber") {
         r.wirePlumberPresent = true;
+        if (r.playbackGraph)
+          r.playbackGraph->sessionManagerDetected();
+      }
     }
     if (!r.playbackGraph && type && props &&
         std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
