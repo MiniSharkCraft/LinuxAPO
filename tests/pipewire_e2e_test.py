@@ -375,8 +375,8 @@ def summarize_graph_dump(raw):
         props = info.get("props", item.get("props", {}))
         if item.get("type", "").endswith(":Node"):
             name = props.get("node.name", "")
-            if name in ("skyapo.virtual_mic", "skyapo.test.consumer",
-                        "skyapo.test.input"):
+            if (name.startswith("skyapo.") or
+                    name.startswith("skyapo.test.")):
                 nodes.add(str(item.get("id")))
                 summary.append(item)
     for item in objects:
@@ -828,7 +828,7 @@ def main():
         if transition_format or playback_pdc_recovery:
             env["SKYAPO_TEST_TRANSITION_MS"] = "500"
         config_candidate_pause = root / "config-candidate-pause"
-        if lv2_pdc_config_commit_race:
+        if lv2_pdc_config_commit_race or playback_pdc_recovery:
             env["SKYAPO_TEST_PAUSE_AFTER_CONFIG_CANDIDATE"] = str(
                 config_candidate_pause)
         if pdc_format_event_order:
@@ -1236,21 +1236,22 @@ def main():
                                 f"{changed.stdout}{changed.stderr}")
                 time.sleep(0.25)
                 if playback_pdc_recovery:
-                    # Keep an independent sink-monitor recorder running before
-                    # the test producer starts. Its capture includes the exact
-                    # first quantum where the LV2 fixture changes latency; a
-                    # later silence-only recording could miss audio leaked by
-                    # that faulting quantum.
+                    # Connect the recorder before playback starts, but defer
+                    # measurement until the candidate is ready to commit. This
+                    # excludes valid pre-fault audio while retaining the first
+                    # quantum processed by the unsafe candidate.
                     transition_fault_consumer = subprocess.Popen(
-                        [str(consumer), "--signal-ready", "--expect-silent",
+                        [str(consumer), "--signal-connected",
+                         "--arm-on-signal", "--expect-silent",
                          "--expected-rate",
-                         str(sample_rate), "--duration-ms", "5000",
+                         str(sample_rate), "--duration-ms", "30000",
                          "--capture-node", "skyapo.test.null-target"],
                         env=env, text=True, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT)
                     transition_fault_ready_output = wait_for_consumer_ready(
                         transition_fault_consumer,
-                        "first-fault playback monitor")
+                        "first-fault playback monitor",
+                        marker="SKYAPO_CONSUMER_CONNECTED")
                 playback_client_args = [str(playback_client)]
                 if surround51:
                     playback_client_args.append("--surround51")
@@ -2249,9 +2250,42 @@ def main():
                         "skyapo.playback", 2)
                 if playback_pdc_recovery:
                     pdc_recovery_config.write_text(rejected_dynamic_pdc)
-                    reload_result = run(
-                        [str(cli), "config", "reload"], env, timeout=10,
-                        check=False)
+                    reload_args = [str(cli), "config", "reload"]
+                    config_candidate_ready = pathlib.Path(
+                        str(config_candidate_pause) + ".ready")
+                    config_candidate_release = pathlib.Path(
+                        str(config_candidate_pause) + ".release")
+                    reload_process = subprocess.Popen(
+                        reload_args, env=env, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    try:
+                        deadline = time.monotonic() + 8
+                        while (time.monotonic() < deadline and
+                               not config_candidate_ready.exists()):
+                            if (reload_process.poll() is not None or
+                                    daemon_process.poll() is not None):
+                                raise RuntimeError(
+                                    "daemon or config reload exited before "
+                                    "the PDC candidate barrier")
+                            time.sleep(0.01)
+                        if not config_candidate_ready.exists():
+                            raise RuntimeError(
+                                "playback PDC test candidate did not reach "
+                                "the deterministic reload barrier")
+                        transition_fault_consumer.send_signal(signal.SIGUSR1)
+                        transition_fault_arm_output = wait_for_consumer_ready(
+                            transition_fault_consumer,
+                            "first-fault playback monitor arm",
+                            marker="SKYAPO_CONSUMER_MEASUREMENT_ARMED")
+                    finally:
+                        # Always release the daemon if a monitor/setup check
+                        # fails, so teardown never leaves its control loop
+                        # blocked at the test-only barrier.
+                        config_candidate_release.touch()
+                    reload_stdout, _ = reload_process.communicate(timeout=10)
+                    reload_result = subprocess.CompletedProcess(
+                        reload_args, reload_process.returncode,
+                        reload_stdout, "")
                     if (reload_result.returncode != 0 or
                             "Config reload succeeded" not in
                             reload_result.stdout):
@@ -2280,6 +2314,7 @@ def main():
                         timeout=12)
                     transition_fault_consumer = None
                     first_fault_audio = (transition_fault_ready_output +
+                                         transition_fault_arm_output +
                                          first_fault_audio)
                     first_fault_rms = re.search(r"RMS: ([0-9.]+)",
                                                 first_fault_audio)
@@ -2451,10 +2486,15 @@ def main():
                                  abs(float(ratio_match.group(1)) -
                                      expected_ratio) >= 0.03))
                 if playback_consumer.returncode != 0 or ratio_failed:
+                    graph = run([str(pw_dump)], env, timeout=5, check=False)
+                    graph_summary = (summarize_graph_dump(graph.stdout)
+                                     if graph.returncode == 0 else
+                                     f"pw-dump failed: {graph.stderr}")
                     raise RuntimeError(
                         "PipeWire playback path failed the numerical DSP/control "
                         f"assertion (exit {playback_consumer.returncode}):\n"
-                        f"{playback_result}\nstatus:\n{status}")
+                        f"{playback_result}\nstatus:\n{status}\n"
+                        f"PipeWire graph:\n{graph_summary}")
                 if playback_isolation:
                     if (not maximum_silence_match or
                             float(maximum_silence_match.group(1)) >= 250.0):
@@ -3909,6 +3949,12 @@ def main():
             elif (include_reload or transition_format or delay_pdc or
                   convolution or playback_stage):
                 consumer_args += ["--expected-db", str(expected_db)]
+            if mode == "playback-preamp":
+                # The playback verification consumer is also the selected
+                # playback target. Give this capture verification its own node
+                # name so the playback graph cannot route into and sum with
+                # the virtual-microphone recording sink.
+                consumer_args += ["--name", "skyapo.test.capture-monitor"]
             consumer_graph = ""
             consumer_graph_summary = ""
             try:

@@ -167,6 +167,15 @@ struct PlaybackGraph::Impl {
   std::array<spa_hook, MaxChannels> sinkLinkHooks{};
   std::array<spa_hook, MaxChannels> sinkProxyHooks{};
   std::array<uint32_t, MaxChannels> sinkLinkGlobalIds{};
+  struct ObservedSinkLink {
+    uint32_t id{SPA_ID_INVALID};
+    uint32_t outputNode{SPA_ID_INVALID};
+    uint32_t outputPort{SPA_ID_INVALID};
+    uint32_t inputNode{SPA_ID_INVALID};
+    uint32_t inputPort{SPA_ID_INVALID};
+  };
+  std::array<ObservedSinkLink, MaxChannels * 4> observedSinkLinks{};
+  size_t observedSinkLinkCount{};
   std::array<bool, MaxChannels> linked{};
   std::array<spa_hook, MaxChannels> proxyHooks{};
   std::array<bool, MaxChannels> internalLinked{};
@@ -175,6 +184,10 @@ struct PlaybackGraph::Impl {
   std::array<bool, MaxChannels> linkListenerAttached{};
   std::array<bool, MaxChannels> sinkProxyListenerAttached{};
   std::array<bool, MaxChannels> sinkLinkListenerAttached{};
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+  std::array<pw_proxy *, MaxChannels> testPreexistingSinkLinks{};
+  std::array<bool, MaxChannels> testSinkLinkAlreadyExistsInjected{};
+#endif
   struct LinkContext {
     Impl *owner{};
     unsigned channel{};
@@ -440,6 +453,13 @@ struct PlaybackGraph::Impl {
       destroyLink(channel);
       destroySinkLink(channel);
     }
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    for (auto *&link : testPreexistingSinkLinks) {
+      if (link)
+        pw_proxy_destroy(link);
+      link = nullptr;
+    }
+#endif
     if (registryListenerAttached) {
       spa_hook_remove(&registryHook);
       registryListenerAttached = false;
@@ -665,6 +685,8 @@ struct PlaybackGraph::Impl {
   }
 
   void recreateStreamFilter() {
+    const auto oldStreamNode =
+        streamFilter ? pw_filter_get_node_id(streamFilter) : SPA_ID_INVALID;
     if (streamFilter)
       pw_filter_disconnect(streamFilter);
     // Disconnect tears down the node, while listener removal is the explicit
@@ -679,6 +701,13 @@ struct PlaybackGraph::Impl {
     for (unsigned channel = 0; channel < channels; ++channel) {
       destroyLink(channel);
       destroySinkLink(channel);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+      if (testPreexistingSinkLinks[channel]) {
+        pw_proxy_destroy(testPreexistingSinkLinks[channel]);
+        testPreexistingSinkLinks[channel] = nullptr;
+      }
+      testSinkLinkAlreadyExistsInjected[channel] = false;
+#endif
       linked[channel] = false;
       streamInputs[channel] = nullptr;
       streamOutputs[channel] = nullptr;
@@ -689,6 +718,7 @@ struct PlaybackGraph::Impl {
       pw_filter_destroy(streamFilter);
       streamFilter = nullptr;
     }
+    clearObservedSinkLinks(oldStreamNode);
     streamState = PW_FILTER_STATE_UNCONNECTED;
 
     auto *streamProps = pw_properties_new(
@@ -1019,12 +1049,22 @@ struct PlaybackGraph::Impl {
   }
 
   void createSinkLink(unsigned channel) {
-    if (channel >= channels || sinkLinks[channel] || !sinkAvailable ||
-        sink.id == SPA_ID_INVALID ||
+    if (channel >= channels || !sinkAvailable || sink.id == SPA_ID_INVALID ||
         streamOutputIds[channel] == SPA_ID_INVALID ||
-        ports[channel].id == SPA_ID_INVALID ||
-        sinkLinkGlobalIds[channel] != SPA_ID_INVALID)
+        ports[channel].id == SPA_ID_INVALID)
       return;
+    if (sinkLinks[channel])
+      return;
+    if (sinkLinkGlobalIds[channel] != SPA_ID_INVALID) {
+      bindSinkLink(channel, sinkLinkGlobalIds[channel]);
+      return;
+    }
+    const auto observedLink = findObservedSinkLink(channel);
+    if (observedLink != SPA_ID_INVALID) {
+      sinkLinkGlobalIds[channel] = observedLink;
+      bindSinkLink(channel, observedLink);
+      return;
+    }
     auto *properties = pw_properties_new(nullptr, nullptr);
     if (!properties) {
       setSinkLinkError("cannot allocate playback sink-link properties");
@@ -1038,6 +1078,23 @@ struct PlaybackGraph::Impl {
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_NODE, "%u", sink.id);
     pw_properties_setf(properties, PW_KEY_LINK_INPUT_PORT, "%u",
                        ports[channel].id);
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    const char *injectExistingLink =
+        std::getenv("SKYAPO_TEST_PLAYBACK_LINK_ALREADY_EXISTS");
+    if (injectExistingLink && std::strcmp(injectExistingLink, "1") == 0 &&
+        !testSinkLinkAlreadyExistsInjected[channel]) {
+      testSinkLinkAlreadyExistsInjected[channel] = true;
+      testPreexistingSinkLinks[channel] = reinterpret_cast<pw_proxy *>(
+          pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
+                                PW_VERSION_LINK, &properties->dict, 0));
+      if (!testPreexistingSinkLinks[channel]) {
+        pw_properties_free(properties);
+        setSinkLinkError("test could not create the preexisting playback link");
+        scheduleLinkRetry();
+        return;
+      }
+    }
+#endif
     auto *createdLink =
         pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
                               PW_VERSION_LINK, &properties->dict, 0);
@@ -1049,6 +1106,87 @@ struct PlaybackGraph::Impl {
       scheduleLinkRetry();
       return;
     }
+    if (!attachSinkLinkListeners(channel))
+      return;
+    std::cerr << "skyapod: linking playback stream port "
+              << streamOutputIds[channel] << " -> selected sink port "
+              << ports[channel].id << " (" << ports[channel].channel
+              << ", link proxy " << pw_proxy_get_id(sinkLinks[channel])
+              << ")\n";
+  }
+
+  static bool parseGlobalId(const std::string &text, uint32_t &id) {
+    if (text.empty())
+      return false;
+    char *end = nullptr;
+    errno = 0;
+    const auto parsed = std::strtoul(text.c_str(), &end, 10);
+    if (errno || end == text.c_str() || !end || *end || parsed > UINT32_MAX)
+      return false;
+    id = static_cast<uint32_t>(parsed);
+    return true;
+  }
+
+  void rememberSinkLink(const ObservedSinkLink &link) {
+    const auto streamNode =
+        streamFilter ? pw_filter_get_node_id(streamFilter) : SPA_ID_INVALID;
+    if (link.outputNode != streamNode)
+      return;
+    for (size_t index = 0; index < observedSinkLinkCount; ++index) {
+      if (observedSinkLinks[index].id == link.id) {
+        observedSinkLinks[index] = link;
+        return;
+      }
+    }
+    if (observedSinkLinkCount == observedSinkLinks.size()) {
+      std::cerr
+          << "skyapod: ignoring excess links from SkyAPO playback stream\n";
+      return;
+    }
+    observedSinkLinks[observedSinkLinkCount++] = link;
+  }
+
+  void removeObservedSinkLink(uint32_t id) {
+    for (size_t index = 0; index < observedSinkLinkCount;) {
+      if (observedSinkLinks[index].id != id) {
+        ++index;
+        continue;
+      }
+      observedSinkLinks[index] = observedSinkLinks[--observedSinkLinkCount];
+      observedSinkLinks[observedSinkLinkCount] = {};
+    }
+  }
+
+  void clearObservedSinkLinks(uint32_t outputNode) {
+    if (outputNode == SPA_ID_INVALID)
+      return;
+    for (size_t index = 0; index < observedSinkLinkCount;) {
+      if (observedSinkLinks[index].outputNode != outputNode) {
+        ++index;
+        continue;
+      }
+      observedSinkLinks[index] = observedSinkLinks[--observedSinkLinkCount];
+      observedSinkLinks[observedSinkLinkCount] = {};
+    }
+  }
+
+  uint32_t findObservedSinkLink(unsigned channel) const {
+    if (channel >= channels || !streamFilter ||
+        streamOutputIds[channel] == SPA_ID_INVALID ||
+        sink.id == SPA_ID_INVALID || ports[channel].id == SPA_ID_INVALID)
+      return SPA_ID_INVALID;
+    const auto streamNode = pw_filter_get_node_id(streamFilter);
+    for (size_t index = 0; index < observedSinkLinkCount; ++index) {
+      const auto &link = observedSinkLinks[index];
+      if (link.outputNode == streamNode &&
+          link.outputPort == streamOutputIds[channel] &&
+          link.inputNode == sink.id && link.inputPort == ports[channel].id)
+        return link.id;
+    }
+    return SPA_ID_INVALID;
+  }
+
+  bool attachSinkLinkListeners(unsigned channel) {
     static const auto proxyEvents = [] {
       pw_proxy_events value{};
       value.version = PW_VERSION_PROXY_EVENTS;
@@ -1070,14 +1208,37 @@ struct PlaybackGraph::Impl {
       setSinkLinkError("cannot monitor SkyAPO playback sink link");
       destroySinkLink(channel);
       scheduleLinkRetry();
-      return;
+      return false;
     }
     sinkLinkListenerAttached[channel] = true;
-    std::cerr << "skyapod: linking playback stream port "
-              << streamOutputIds[channel] << " -> selected sink port "
-              << ports[channel].id << " (" << ports[channel].channel
-              << ", link proxy " << pw_proxy_get_id(sinkLinks[channel])
-              << ")\n";
+    return true;
+  }
+
+  void bindSinkLink(unsigned channel, uint32_t globalId) {
+    if (channel >= channels || globalId == SPA_ID_INVALID)
+      return;
+    if (sinkLinks[channel]) {
+      const auto boundId = pw_proxy_get_bound_id(sinkLinks[channel]);
+      if (boundId == globalId || boundId == SPA_ID_INVALID) {
+        sinkLinkGlobalIds[channel] = globalId;
+        return;
+      }
+      destroySinkLink(channel);
+    }
+    auto *boundLink = static_cast<pw_proxy *>(pw_registry_bind(
+        registry, globalId, PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, 0));
+    if (!boundLink) {
+      sinkLinkGlobalIds[channel] = globalId;
+      setSinkLinkError("cannot bind existing PipeWire playback sink link");
+      scheduleLinkRetry();
+      return;
+    }
+    sinkLinkGlobalIds[channel] = globalId;
+    sinkLinks[channel] = boundLink;
+    if (!attachSinkLinkListeners(channel))
+      return;
+    std::cerr << "skyapod: monitoring existing playback sink link " << globalId
+              << " (" << ports[channel].channel << ")\n";
   }
 
   static void global(void *data, uint32_t id, uint32_t, const char *type,
@@ -1095,34 +1256,35 @@ struct PlaybackGraph::Impl {
       self.watchSinkNode(id);
     }
     if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
-      const auto outputNode = property(props, PW_KEY_LINK_OUTPUT_NODE);
-      const auto inputNode = property(props, PW_KEY_LINK_INPUT_NODE);
-      const auto outputPortText = property(props, PW_KEY_LINK_OUTPUT_PORT);
-      const auto inputPortText = property(props, PW_KEY_LINK_INPUT_PORT);
-      char *end = nullptr;
-      const auto outputPort = std::strtoul(outputPortText.c_str(), &end, 10);
-      if (!end || *end)
+      ObservedSinkLink link{};
+      link.id = id;
+      if (!parseGlobalId(property(props, PW_KEY_LINK_OUTPUT_NODE),
+                         link.outputNode) ||
+          !parseGlobalId(property(props, PW_KEY_LINK_OUTPUT_PORT),
+                         link.outputPort) ||
+          !parseGlobalId(property(props, PW_KEY_LINK_INPUT_NODE),
+                         link.inputNode) ||
+          !parseGlobalId(property(props, PW_KEY_LINK_INPUT_PORT),
+                         link.inputPort))
         return;
-      const auto inputPort = std::strtoul(inputPortText.c_str(), &end, 10);
-      if (!end || *end)
-        return;
+      self.rememberSinkLink(link);
       for (unsigned channel = 0; channel < self.channels; ++channel) {
-        if (outputNode == std::to_string(pw_filter_get_node_id(self.filter)) &&
-            inputNode ==
-                std::to_string(pw_filter_get_node_id(self.streamFilter)) &&
-            self.ownOutputIds[channel] == outputPort &&
-            self.streamInputIds[channel] == inputPort) {
+        if (link.outputNode == pw_filter_get_node_id(self.filter) &&
+            link.inputNode == pw_filter_get_node_id(self.streamFilter) &&
+            self.ownOutputIds[channel] == link.outputPort &&
+            self.streamInputIds[channel] == link.inputPort) {
           self.internalLinkExists[channel] = true;
           self.internalLinked[channel] = true;
           self.linkGlobalIds[channel] = id;
           return;
         }
-        if (outputNode ==
-                std::to_string(pw_filter_get_node_id(self.streamFilter)) &&
-            inputNode == std::to_string(self.sink.id) &&
-            self.streamOutputIds[channel] == outputPort &&
-            self.ports[channel].id == inputPort) {
+        if (link.outputNode == pw_filter_get_node_id(self.streamFilter) &&
+            link.inputNode == self.sink.id &&
+            self.streamOutputIds[channel] == link.outputPort &&
+            self.ports[channel].id == link.inputPort) {
           self.sinkLinkGlobalIds[channel] = id;
+          if (!self.sinkLinks[channel])
+            self.bindSinkLink(channel, id);
           return;
         }
       }
@@ -1250,6 +1412,7 @@ struct PlaybackGraph::Impl {
   }
 
   static void handleGlobalRemove(Impl &self, uint32_t id) {
+    self.removeObservedSinkLink(id);
     self.knownInputPorts.erase(
         std::remove_if(self.knownInputPorts.begin(), self.knownInputPorts.end(),
                        [&](const AudioPort &port) { return port.id == id; }),
@@ -1467,7 +1630,8 @@ struct PlaybackGraph::Impl {
         self.controlCallbackFailed, self.faulted);
   }
 
-  static void proxyError(void *data, int, int, const char *message) noexcept {
+  static void proxyError(void *data, int, int result,
+                         const char *message) noexcept {
     auto &context = *static_cast<LinkContext *>(data);
     auto &self = *context.owner;
     detail::invokeControlCallback(
@@ -1475,6 +1639,17 @@ struct PlaybackGraph::Impl {
           if (context.sinkLink) {
             if (!self.sinkLinks[context.channel])
               return;
+            if (result == -EEXIST) {
+              auto existingId = self.sinkLinkGlobalIds[context.channel];
+              if (existingId == SPA_ID_INVALID)
+                existingId = self.findObservedSinkLink(context.channel);
+              if (existingId != SPA_ID_INVALID) {
+                self.destroySinkLink(context.channel);
+                self.sinkLinkGlobalIds[context.channel] = existingId;
+                self.bindSinkLink(context.channel, existingId);
+                return;
+              }
+            }
             self.setSinkLinkError(
                 message ? std::string("PipeWire playback sink link failed: ") +
                               message
