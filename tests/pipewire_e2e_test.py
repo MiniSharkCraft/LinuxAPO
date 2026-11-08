@@ -4573,18 +4573,27 @@ def main():
                         "WirePlumber playback test requires pw-metadata")
                 default_metadata = run(
                     [metadata, "-n", "default"], env, timeout=5).stdout
-                expected_default = (
-                    "skyapo.test.null-target-alt"
+                expected_defaults = (
+                    {"skyapo.test.null-target-alt"}
                     if mode in (
                         "playback-wireplumber",
                         "playback-wireplumber-target-recovery-stable-id") else
-                    "skyapo.test.null-target")
-                if ("key:'default.audio.sink' " not in default_metadata or
-                        f"value:'{{\"name\":\"{expected_default}\"}}'" not in
-                        default_metadata):
+                    {"skyapo.test.null-target"})
+                if stable_playback_target:
+                    # WirePlumber may resolve the restored configured default
+                    # to its stable-identity replacement, or keep the fallback
+                    # sink active; both are valid after the old node name was
+                    # recreated with a new name. The configured choice itself
+                    # is checked exactly below.
+                    expected_defaults.add(replacement_target_name)
+                restored_default = metadata_node_name(
+                    default_metadata, "default.audio.sink")
+                if restored_default not in expected_defaults:
                     raise RuntimeError(
                         "orderly daemon shutdown did not restore the original "
-                        "PipeWire default sink metadata:\n" + default_metadata)
+                        "PipeWire default sink metadata; expected one of "
+                        f"{sorted(expected_defaults)}, found "
+                        f"{restored_default!r}:\n{default_metadata}")
                 if (stable_playback_target and
                         metadata_node_name(default_metadata,
                                            "default.configured.audio.sink") !=
