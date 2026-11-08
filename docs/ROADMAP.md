@@ -126,18 +126,23 @@ failures from the hosted 101-test run on `548866e`; no full local or sanitizer
 suite was run for this test-only change. Physical-device validation remains
 open.
 
-Delay/PDC measurement fixture correction (2026-11-08): test #69 already
-verified capture-link recovery, but its recorder started the measurement timer
-before its own FL and FR links were both active. The recorded diagnostics
-showed each recorder link transitioning `paused` → `active`; the original
-measurement reported a `0.01454591` inter-channel difference and a best lag of
-`-109` samples. The fixture now uses the existing `--signal-connected` option,
-which arms measurement only after both recorder links are active. It still
-removes and recovers the capture link and retains the original `0.01` channel
-alignment limit. Local CTest #69 passed **1/1** (3.96 s): expected-level ratio
-`1.000005`, inter-channel difference `0.00000000`, best lag `0`, and callback
-allocation/deallocation counters `0/0`. This isolates PDC measurement from
-recorder-link startup; it is not physical-hardware or full-suite evidence.
+Delay/PDC measurement fixture correction (2026-11-08): the first correction
+added `--signal-connected`, but inspection of the consumer showed that this
+only delayed its timeout; it still accumulated channel-difference energy and
+correlation samples before both recorder links were active. Hosted CI on
+`843f698` reproduced the false skew: RMS ratio `0.999892`, inter-channel
+difference `0.01492720`, best lag `-109` samples, while logs showed FL and FR
+links each transitioning `paused` → `active`. The consumer now closes its
+measurement gate when `--signal-connected` is requested, counts only buffers
+after all channel links are active, and leaves `--arm-on-signal` monitors gated
+until their explicit signal. The DSP and channel-alignment threshold (`0.01`)
+are unchanged. After rebuilding the test consumer, local CTest #46, #47, #69
+and #88 passed **4/4** sequentially (48.57 s): #69 measured expected-level
+ratio `1.000007`, inter-channel difference `0.00000000`, best lag `0`, and
+callback allocation/deallocation counters `0/0`; #88 also passed its armed PDC
+config-commit race. This fixes measurement-window contamination in the test
+consumer, not a DSP algorithm defect. Hosted CI for the fix and physical
+hardware remain unverified.
 
 WirePlumber playback-control fixture ordering (2026-11-08): local test #52
 reproduced a `1.990547` ratio against expected output because the fixture set

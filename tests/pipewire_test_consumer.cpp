@@ -138,7 +138,10 @@ struct Consumer {
                         : (surround71
                                ? Surround71
                                : std::array<const char *, MaxChannels>{
-                                     "FL", "FR", "", "", "", "", "", ""}))) {}
+                                     "FL", "FR", "", "", "", "", "", ""}))) {
+    if (signalConnected)
+      measurementEnabled.store(false, std::memory_order_relaxed);
+  }
 
   static unsigned channelIndex(const char *channel, const Consumer &c) {
     for (unsigned i = 0; i < c.channels; ++i)
@@ -556,6 +559,12 @@ struct Consumer {
     };
     if (count == 0)
       c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
+    // Keep readiness polling independent from measurement, but do not let
+    // startup buffers or partially activated channels contaminate the sample
+    // window. --signal-connected enables this gate after every channel link
+    // is active; --arm-on-signal enables it only after the test's signal.
+    if (!c.measurementEnabled.load(std::memory_order_acquire))
+      return;
     double blockEnergy = 0.0;
     double blockChannelDifferenceEnergy = 0.0;
     std::array<double, MaxChannels> blockChannelEnergy{};
@@ -632,8 +641,6 @@ struct Consumer {
       c.recordedSamples += copyCount;
     }
     if (c.ignoreSilentBlocks && blockEnergy < 1.0e-12)
-      return;
-    if (!c.measurementEnabled.load(std::memory_order_acquire))
       return;
     double total = c.energy.load(std::memory_order_relaxed);
     while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
@@ -714,6 +721,8 @@ struct Consumer {
     if (consumer.signalReady && receivedBuffer &&
         (!consumer.signalConnected || connected)) {
       consumer.readinessReported = true;
+      if (consumer.signalConnected && !consumer.armMeasurementOnSignal)
+        consumer.measurementEnabled.store(true, std::memory_order_release);
       consumer.startDurationTimer();
       std::puts("SKYAPO_CONSUMER_READY");
       std::fflush(stdout);
@@ -721,6 +730,8 @@ struct Consumer {
     }
     if (consumer.signalConnected && !consumer.signalReady && connected) {
       consumer.readinessReported = true;
+      if (!consumer.armMeasurementOnSignal)
+        consumer.measurementEnabled.store(true, std::memory_order_release);
       consumer.startDurationTimer();
       std::puts("SKYAPO_CONSUMER_CONNECTED");
       std::fflush(stdout);
