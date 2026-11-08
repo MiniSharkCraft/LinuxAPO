@@ -91,6 +91,7 @@ struct Consumer {
   uint32_t sourceNode{Invalid};
   uint32_t ownNode{Invalid};
   std::atomic<uint64_t> frames{0};
+  std::atomic<uint64_t> processedBuffers{0};
   std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
   std::array<std::atomic<double>, MaxChannels> channelEnergy{};
@@ -548,6 +549,8 @@ struct Consumer {
   void processSamples(const std::array<const float *, MaxChannels> &channelData,
                       uint32_t count, unsigned rate, size_t stride) {
     auto &c = *this;
+    if (count != 0)
+      c.processedBuffers.fetch_add(1, std::memory_order_relaxed);
     const auto sampleAt = [&](unsigned channel, uint32_t frame) {
       return channelData[channel][static_cast<size_t>(frame) * stride];
     };
@@ -694,14 +697,6 @@ struct Consumer {
     auto &consumer = *static_cast<Consumer *>(data);
     if (consumer.readinessReported)
       return;
-    if (consumer.signalReady &&
-        consumer.frames.load(std::memory_order_acquire) != 0) {
-      consumer.readinessReported = true;
-      consumer.startDurationTimer();
-      std::puts("SKYAPO_CONSUMER_READY");
-      std::fflush(stdout);
-      return;
-    }
     const bool connected =
         consumer.streamCapture
             ? consumer.streamStreaming.load(std::memory_order_acquire)
@@ -710,7 +705,21 @@ struct Consumer {
                   (consumer.observeOnly ||
                    (consumer.linkStates[0] == PW_LINK_STATE_ACTIVE &&
                     consumer.linkStates[1] == PW_LINK_STATE_ACTIVE));
-    if (consumer.signalConnected && connected) {
+    // Readiness is independent of the measured-frame counter: an armed
+    // monitor deliberately keeps measurementEnabled=false until the test's
+    // config-commit barrier, but still needs proof that PipeWire delivered a
+    // real buffer before that barrier.
+    const bool receivedBuffer =
+        consumer.processedBuffers.load(std::memory_order_acquire) != 0;
+    if (consumer.signalReady && receivedBuffer &&
+        (!consumer.signalConnected || connected)) {
+      consumer.readinessReported = true;
+      consumer.startDurationTimer();
+      std::puts("SKYAPO_CONSUMER_READY");
+      std::fflush(stdout);
+      return;
+    }
+    if (consumer.signalConnected && !consumer.signalReady && connected) {
       consumer.readinessReported = true;
       consumer.startDurationTimer();
       std::puts("SKYAPO_CONSUMER_CONNECTED");

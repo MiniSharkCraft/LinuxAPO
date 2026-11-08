@@ -1317,23 +1317,6 @@ def main():
                                 f"Could not set {control_node_name} Props: "
                                 f"{changed.stdout}{changed.stderr}")
                 time.sleep(0.25)
-                if playback_pdc_recovery:
-                    # Connect the recorder before playback starts, but defer
-                    # measurement until the candidate is ready to commit. This
-                    # excludes valid pre-fault audio while retaining the first
-                    # quantum processed by the unsafe candidate.
-                    transition_fault_consumer = subprocess.Popen(
-                        [str(consumer), "--signal-connected",
-                         "--arm-on-signal", "--expect-silent",
-                         "--expected-rate",
-                         str(sample_rate), "--duration-ms", "30000",
-                         "--capture-node", "skyapo.test.null-target"],
-                        env=env, text=True, stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT)
-                    transition_fault_ready_output = wait_for_consumer_ready(
-                        transition_fault_consumer,
-                        "first-fault playback monitor",
-                        marker="SKYAPO_CONSUMER_CONNECTED")
                 if not playback_isolation:
                     playback_client_args = [str(playback_client)]
                     if surround51:
@@ -1343,6 +1326,37 @@ def main():
                     second_source_process = subprocess.Popen(
                         playback_client_args, env=env, text=True,
                         stdout=source_log, stderr=subprocess.STDOUT)
+                if playback_pdc_recovery:
+                    # Start playback first so the selected sink monitor has a
+                    # real PipeWire quantum to deliver. Keep measurement
+                    # disarmed until the candidate commit barrier; this
+                    # excludes valid pre-fault audio while retaining the first
+                    # quantum processed by the unsafe candidate.
+                    transition_fault_consumer = subprocess.Popen(
+                        [str(consumer), "--signal-connected",
+                         "--signal-ready",
+                         "--arm-on-signal", "--expect-silent",
+                         "--expected-rate",
+                         str(sample_rate), "--duration-ms", "30000",
+                         "--capture-node", "skyapo.test.null-target"],
+                        env=env, text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT)
+                    try:
+                        transition_fault_ready_output = wait_for_consumer_ready(
+                            transition_fault_consumer,
+                            "first-fault playback monitor",
+                            marker="SKYAPO_CONSUMER_READY")
+                    except RuntimeError as error:
+                        graph = run([str(pw_dump)], env, timeout=5,
+                                    check=False)
+                        graph_summary = (
+                            summarize_graph_dump(graph.stdout)
+                            if graph.returncode == 0 else
+                            f"pw-dump failed ({graph.returncode}): "
+                            f"{graph.stderr}")
+                        raise RuntimeError(
+                            f"{error}\n--- graph at first-fault monitor "
+                            f"readiness failure ---\n{graph_summary}") from error
                 if startup_playback_recovery:
                     consumer_args[consumer_args.index("--duration-ms") + 1] = "5000"
                     playback_consumer = subprocess.Popen(
