@@ -88,6 +88,7 @@ struct Consumer {
   std::atomic<uint64_t> frames{0};
   std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
+  std::array<std::atomic<double>, MaxChannels> channelEnergy{};
   std::atomic<bool> measurementEnabled{true};
   std::atomic<double> channelDifferenceEnergy{0.0};
   bool expectIdenticalChannels{};
@@ -427,6 +428,7 @@ struct Consumer {
       c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
     double blockEnergy = 0.0;
     double blockChannelDifferenceEnergy = 0.0;
+    std::array<double, MaxChannels> blockChannelEnergy{};
     uint64_t callbackUs = 0;
     if (c.measureSourceLag) {
       timespec now{};
@@ -442,9 +444,12 @@ struct Consumer {
         c.nullBufferCalls.fetch_add(1, std::memory_order_relaxed);
         return;
       }
-      for (uint32_t i = 0; i < count; ++i)
-        blockEnergy +=
-            static_cast<double>(channelData[ch][i]) * channelData[ch][i];
+      for (uint32_t i = 0; i < count; ++i) {
+        const double sample = channelData[ch][i];
+        const double sampleEnergy = sample * sample;
+        blockEnergy += sampleEnergy;
+        blockChannelEnergy[ch] += sampleEnergy;
+      }
     }
     if (c.maxConsecutiveSilenceMs) {
       constexpr float SilenceThreshold = 1.0e-7f;
@@ -511,6 +516,13 @@ struct Consumer {
     while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
                                            std::memory_order_relaxed)) {
     }
+    for (unsigned ch = 0; ch < c.channels; ++ch) {
+      double channelTotal = c.channelEnergy[ch].load(std::memory_order_relaxed);
+      while (!c.channelEnergy[ch].compare_exchange_weak(
+          channelTotal, channelTotal + blockChannelEnergy[ch],
+          std::memory_order_relaxed)) {
+      }
+    }
     if (c.expectIdenticalChannels) {
       double differenceTotal =
           c.channelDifferenceEnergy.load(std::memory_order_relaxed);
@@ -535,6 +547,8 @@ struct Consumer {
     if (measurementArmRequested) {
       measurementArmRequested = 0;
       consumer.energy.store(0.0, std::memory_order_release);
+      for (auto &channelEnergy : consumer.channelEnergy)
+        channelEnergy.store(0.0, std::memory_order_relaxed);
       consumer.frames.store(0, std::memory_order_release);
       consumer.measurementEnabled.store(true, std::memory_order_release);
       std::puts("SKYAPO_CONSUMER_MEASUREMENT_ARMED");
@@ -860,6 +874,12 @@ struct Consumer {
           "Expected RMS: %.8f\nRMS ratio to expected: %.6f\n",
           static_cast<unsigned long long>(capturedFrames), channels,
           sampleRate.load(), rms, expected, ratio);
+    }
+    for (unsigned ch = 0; ch < channels; ++ch) {
+      const double channelRms =
+          capturedFrames ? std::sqrt(channelEnergy[ch].load() / capturedFrames)
+                         : 0.0;
+      std::printf("Channel %s RMS: %.8f\n", channelNames[ch], channelRms);
     }
     if (expectIdenticalChannels)
       std::printf("Inter-channel difference ratio: %.8f\n",

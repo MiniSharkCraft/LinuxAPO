@@ -369,6 +369,10 @@ def connect_test_source_to_playback(pw_cli, pw_dump, env, source_name,
                         str(props.get("link.output.port", "")),
                         str(props.get("link.input.port", ""))))
         if expected <= active:
+            if env.get("SKYAPO_TEST_TRACE_PIPEWIRE_GRAPH") == "1":
+                snapshot = run([str(pw_dump)], env, timeout=5).stdout
+                print("PipeWire graph at established playback routing:\n" +
+                      summarize_graph_dump(snapshot))
             return
         time.sleep(0.05)
     raise RuntimeError(
@@ -401,6 +405,16 @@ def summarize_graph_dump(raw):
             if endpoints & nodes:
                 summary.append(item)
     return pformat(summary, width=100)
+
+
+def trace_graph_if_requested(label, pw_dump, env):
+    if env.get("SKYAPO_TEST_TRACE_PIPEWIRE_GRAPH") != "1":
+        return
+    result = run([str(pw_dump)], env, timeout=5, check=False)
+    summary = (summarize_graph_dump(result.stdout)
+               if result.returncode == 0 else
+               f"pw-dump failed ({result.returncode}): {result.stderr}")
+    print(f"PipeWire graph at {label}:\n{summary}")
 
 
 def start_private_pipewire(pipewire, config, env, logs, runtime):
@@ -2558,6 +2572,9 @@ def main():
                       "application -> SkyAPO DSP -> selected sink monitor -> "
                       "independent consumer; measured output/expected ratio "
                       f"{float(ratio_match.group(1)):.6f}.")
+                if mode == "playback-wireplumber":
+                    trace_graph_if_requested(
+                        "WirePlumber playback capture completed", pw_dump, env)
                 if playback_isolation:
                     try:
                         unrelated_playback_consumer.wait(timeout=12)
@@ -4006,7 +4023,7 @@ def main():
             consumer_graph = ""
             consumer_graph_summary = ""
             try:
-                if lv2_pdc_final:
+                if lv2_pdc_final or mode == "playback-wireplumber":
                     consumer_process = subprocess.Popen(
                         consumer_args, env=env, text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -4016,6 +4033,9 @@ def main():
                         check=False).stdout
                     consumer_graph_summary = summarize_graph_dump(
                         consumer_graph)
+                    if env.get("SKYAPO_TEST_TRACE_PIPEWIRE_GRAPH") == "1":
+                        print("PipeWire graph while virtual-microphone consumer "
+                              f"is connected:\n{consumer_graph_summary}")
                     consumer_stdout, consumer_stderr = consumer_process.communicate(
                         timeout=12)
                     captured = subprocess.CompletedProcess(
@@ -4030,7 +4050,7 @@ def main():
                 else:
                     captured = run(consumer_args, env, timeout=12)
             except RuntimeError as error:
-                if not lv2_pdc_final:
+                if not (lv2_pdc_final or mode == "playback-wireplumber"):
                     raise
                 current_status = run([str(cli), "status"], env,
                                      timeout=5, check=False)
@@ -4046,6 +4066,10 @@ def main():
                     f"{consumer_graph_summary}\n"
                     f"--- pw-dump at consumer failure ---\n"
                     f"{graph_summary}\n{graph.stderr}") from error
+            if mode == "playback-wireplumber":
+                trace_graph_if_requested(
+                    "WirePlumber virtual-microphone consumer capture",
+                    pw_dump, env)
             if lv2_pdc_final:
                 final_status = run([str(cli), "status"], env).stdout
                 if ("Plugin-reported latency sum: 32 samples "
