@@ -921,6 +921,39 @@ int main(int argc, char **argv) {
   }
   qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
 
+  {
+    MainWindow closingWindow(responseConfigPath,
+                             QString::fromLocal8Bit(argv[1]));
+    auto *closingAnalyze =
+        closingWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *closingSource =
+        closingWindow.findChild<QComboBox *>("analysisSource");
+    auto *closingResolution =
+        closingWindow.findChild<QComboBox *>("analysisResolution");
+    auto *closingRuntimeFormat =
+        closingWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *closingChannels =
+        closingWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *closingStatus =
+        closingWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!closingAnalyze || !closingSource || !closingResolution ||
+        !closingRuntimeFormat || !closingChannels || !closingStatus ||
+        closingResolution->findData(1U << 20) < 0) {
+      std::cerr << "could not prepare an in-flight analysis close test\n";
+      return 1;
+    }
+    closingSource->setCurrentIndex(1);
+    closingResolution->setCurrentIndex(closingResolution->findData(1U << 20));
+    closingRuntimeFormat->setChecked(false);
+    closingChannels->setValue(1);
+    closingAnalyze->click();
+    if (closingStatus->property("analysisState").toString() != "running") {
+      std::cerr << "analysis did not enter its worker state before close\n";
+      return 1;
+    }
+  }
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
 #endif
   QFile liveConfigAfterValid(liveConfigPath);
   if (!liveConfigAfterValid.open(QIODevice::ReadOnly) ||
