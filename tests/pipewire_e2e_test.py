@@ -49,7 +49,7 @@ def wireplumber_command(executable):
     return [executable]
 
 
-def start_wireplumber(executable, env, logs):
+def start_wireplumber(executable, env, log):
     """Give only WirePlumber a private session bus for its policy service."""
     command = wireplumber_command(executable)
     dbus_run_session = shutil.which("dbus-run-session")
@@ -58,7 +58,7 @@ def start_wireplumber(executable, env, logs):
             "WirePlumber E2E requires dbus-run-session; install dbus-daemon")
     return subprocess.Popen(
         [dbus_run_session, "--", *command], env=env, text=True,
-        stdout=logs, stderr=subprocess.STDOUT)
+        stdout=log, stderr=subprocess.STDOUT)
 
 
 class SystemdManagedDaemon:
@@ -492,10 +492,10 @@ def trace_graph_if_requested(label, pw_dump, env):
     print(f"PipeWire graph at {label}:\n{summary}")
 
 
-def start_private_pipewire(pipewire, config, env, logs, runtime):
+def start_private_pipewire(pipewire, config, env, log, runtime):
     process = subprocess.Popen(
         [str(pipewire), "--config", str(config)], env=env,
-        stdout=logs, stderr=subprocess.STDOUT)
+        stdout=log, stderr=subprocess.STDOUT)
     socket = runtime / "pipewire-0"
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -944,7 +944,9 @@ def main():
                 env["SKYAPO_TEST_TRANSITION_MS"] = "500"
             callback_exception_config.write_text(pathlib.Path(dsp_config).read_text())
             dsp_config = callback_exception_config
-        logs = (root / "pipewire.log").open("w+")
+        pipewire_log = (root / "pipewire-server.log").open("w+")
+        wireplumber_log = (root / "wireplumber-policy.log").open("w+")
+        pw_cli_log = (root / "pw-cli-target-manager.log").open("w+")
         source_log = (root / "source.log").open("w+")
         daemon_log = (root / "daemon.log").open("w+")
         race_monitor_log = (root / "pdc-config-commit-monitor.log").open("w+")
@@ -965,10 +967,10 @@ def main():
         unrelated_playback_log = (root / "unrelated-playback.log").open("w+")
         try:
             server = start_private_pipewire(
-                pipewire, rate_config, env, logs, runtime)
+                pipewire, rate_config, env, pipewire_log, runtime)
             if wireplumber_playback:
                 wireplumber_process = start_wireplumber(
-                    wireplumber, env, logs)
+                    wireplumber, env, wireplumber_log)
                 time.sleep(0.5)
                 if wireplumber_process.poll() is not None:
                     raise RuntimeError(
@@ -991,7 +993,7 @@ def main():
                         'node.virtual = true')
                 null_target_manager = subprocess.Popen(
                     [str(pw_cli)], env=env, text=True, stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=logs)
+                    stdout=subprocess.DEVNULL, stderr=pw_cli_log)
                 null_target_manager.stdin.write(
                     f"create-node adapter {target_properties}\n")
                 null_target_manager.stdin.flush()
@@ -3753,10 +3755,10 @@ def main():
                             "PipeWire socket remained after server shutdown")
                     print("Restarting private server and source…", flush=True)
                     server = start_private_pipewire(
-                        pipewire, pw_config, env, logs, runtime)
+                        pipewire, pw_config, env, pipewire_log, runtime)
                     if playback_server_restart:
                         wireplumber_process = start_wireplumber(
-                            wireplumber, env, logs)
+                            wireplumber, env, wireplumber_log)
                         time.sleep(0.5)
                         if wireplumber_process.poll() is not None:
                             raise RuntimeError(
@@ -3765,7 +3767,7 @@ def main():
                         null_target_manager = subprocess.Popen(
                             [str(pw_cli)], env=env, text=True,
                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                            stderr=logs)
+                            stderr=pw_cli_log)
                         null_target_manager.stdin.write(
                             f"create-node adapter {target_properties}\n")
                         null_target_manager.stdin.flush()
@@ -4566,7 +4568,9 @@ def main():
                 print(f"{state_format} state survived orderly shutdown/recreation; "
                       f"independent capture: {restored_capture.stdout.strip()}")
         except Exception:
-            for label, log in (("PipeWire server", logs),
+            for label, log in (("PipeWire server", pipewire_log),
+                               ("WirePlumber policy", wireplumber_log),
+                               ("persistent pw-cli target manager", pw_cli_log),
                                ("test source", source_log),
                                ("unrelated playback consumer",
                                 unrelated_playback_log),
@@ -4576,6 +4580,13 @@ def main():
                 details = log.read()
                 if details:
                     print(f"--- {label} log ---\n{details}", file=sys.stderr)
+            for label, process in (("PipeWire server", server),
+                                   ("WirePlumber policy", wireplumber_process),
+                                   ("persistent pw-cli target manager",
+                                    null_target_manager)):
+                if process is not None:
+                    print(f"{label} process exit status at failure: "
+                          f"{process.poll()}", file=sys.stderr)
             raise
         finally:
             try:
@@ -4606,7 +4617,8 @@ def main():
                 print(f"E2E cleanup warning: {cleanup_error}", file=sys.stderr)
             finally:
                 for log in (daemon_log, source_log, playback_consumer_log,
-                            unrelated_playback_log, race_monitor_log, logs):
+                            unrelated_playback_log, race_monitor_log,
+                            pipewire_log, wireplumber_log, pw_cli_log):
                     log.flush()
                     log.close()
 
