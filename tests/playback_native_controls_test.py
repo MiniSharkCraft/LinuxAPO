@@ -75,10 +75,14 @@ def main():
                     item for item in objects
                     if item.get("type", "").endswith(":Node")}
 
-            def wait_for(description, predicate, timeout=8):
+            def wait_for(description, predicate, timeout=8,
+                         expected_to_finish=()):
+                expected_to_finish = set(expected_to_finish)
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
-                    if any(process.poll() is not None for process in processes):
+                    if any(process.poll() is not None
+                           for process in processes
+                           if process not in expected_to_finish):
                         raise RuntimeError(f"process exited while waiting for {description}")
                     value = predicate()
                     if value:
@@ -243,9 +247,11 @@ def main():
                     return (item if item and item["info"]["props"]["object.serial"]
                             != old_frontend_serial else None)
 
-                frontend = wait_for("owned frontend recreation", recreated_frontend)
+                frontend = wait_for("owned frontend recreation", recreated_frontend,
+                                    expected_to_finish=(recorder,))
                 wait_for("restored nonuniform gain and mute", lambda:
-                         controls_match(read_controls("skyapo.playback"), expected))
+                         controls_match(read_controls("skyapo.playback"), expected),
+                         expected_to_finish=(recorder,))
                 objects = graph()
                 if nodes(objects)["skyapo.playback.dsp"]["id"] != stable_dsp:
                     raise RuntimeError("frontend recreation replaced the stable DSP node")
@@ -266,7 +272,8 @@ def main():
                         f"create-link {app_id} {output_port} {frontend['id']} {input_port}\n")
                 manager.stdin.flush()
                 wait_for("recreated complete signal path", lambda:
-                         assert_chain(graph(), True))
+                         assert_chain(graph(), True),
+                         expected_to_finish=(recorder,))
                 remaining, _ = recorder.communicate(timeout=8)
                 recorder_output = ready_output + remaining
                 diagnostics.append("Muted recreation recorder:\n" + recorder_output)

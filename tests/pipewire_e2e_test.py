@@ -3924,11 +3924,20 @@ def main():
                         captured_playback)
                     if (playback_consumer.returncode != 0 or not ratio or
                             abs(float(ratio.group(1)) - 1.0) >= 0.03):
+                        graph_result = run([str(pw_dump)], env, timeout=5,
+                                           check=False)
+                        graph_diagnostic = (
+                            summarize_graph_dump(graph_result.stdout)
+                            if graph_result.returncode == 0 else
+                            f"pw-dump failed ({graph_result.returncode}): "
+                            f"{graph_result.stderr}")
                         raise RuntimeError(
                             "independent playback recording after PipeWire "
                             "server restart did not measure the expected "
                             f"-6 dB output:\n{captured_playback}\n"
-                            f"{playback_recovered_status}")
+                            f"{playback_recovered_status}\n"
+                            "PipeWire graph at failed measurement:\n"
+                            f"{graph_diagnostic}")
                     stop(second_source_process,
                          "post-restart ordinary playback stream")
                     second_source_process = None
