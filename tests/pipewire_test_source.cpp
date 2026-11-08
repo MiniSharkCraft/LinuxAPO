@@ -1,5 +1,6 @@
 // Deterministic PipeWire source for opt-in end-to-end/reconnect tests.
-#include <pipewire/filter.h>
+#include <pipewire/stream.h>
+#include <algorithm>
 #include <pipewire/keys.h>
 #include <pipewire/link.h>
 #include <pipewire/pipewire.h>
@@ -47,7 +48,7 @@ constexpr std::array<const char *, MaxChannels> Surround71 = {
     "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"};
 struct Source {
   pw_main_loop *loop{};
-  pw_filter *filter{};
+  pw_stream *stream{};
   unsigned channels{2};
   std::string nodeName;
   std::string deviceSerial;
@@ -59,7 +60,6 @@ struct Source {
   spa_hook registryHook{};
   uint32_t ownNode{SPA_ID_INVALID};
   uint32_t targetNode{SPA_ID_INVALID};
-  std::array<void *, MaxChannels> ports{};
   std::array<uint32_t, MaxChannels> ownPortIds{
       SPA_ID_INVALID, SPA_ID_INVALID, SPA_ID_INVALID, SPA_ID_INVALID,
       SPA_ID_INVALID, SPA_ID_INVALID, SPA_ID_INVALID, SPA_ID_INVALID};
@@ -69,6 +69,7 @@ struct Source {
   std::array<pw_proxy *, MaxChannels> links{};
   std::array<const char *, MaxChannels> channelNames{};
   double phase{};
+  uint64_t generatedFrames{};
   bool latencyProbe{};
   bool pdcTriggerStaging{};
   bool failed{};
@@ -85,57 +86,49 @@ struct Source {
             message ? message : "unknown error");
   }
 
-  static void stateChanged(void *data, pw_filter_state old,
-                           pw_filter_state state, const char *error) {
+  static void stateChanged(void *data, pw_stream_state old,
+                           pw_stream_state state, const char *error) {
     auto &source = *static_cast<Source *>(data);
-    fprintf(stderr, "test source: filter state %s -> %s%s%s\n",
-            pw_filter_state_as_string(old), pw_filter_state_as_string(state),
+    fprintf(stderr, "test source: stream state %s -> %s%s%s\n",
+            pw_stream_state_as_string(old), pw_stream_state_as_string(state),
             error ? ": " : "", error ? error : "");
-    if (state == PW_FILTER_STATE_ERROR ||
-        state == PW_FILTER_STATE_UNCONNECTED) {
-      if (state == PW_FILTER_STATE_ERROR)
+    if (state == PW_STREAM_STATE_ERROR ||
+        state == PW_STREAM_STATE_UNCONNECTED) {
+      if (state == PW_STREAM_STATE_ERROR)
         fprintf(stderr, "test source: %s\n", error ? error : "PipeWire error");
-      source.failed = state == PW_FILTER_STATE_ERROR;
+      source.failed = state == PW_STREAM_STATE_ERROR;
       pw_main_loop_quit(source.loop);
     }
   }
 
-  static void paramChanged(void *data, void *port, uint32_t id,
-                           const spa_pod *param) {
+  static void process(void *data) {
     auto &source = *static_cast<Source *>(data);
-    if (port || !param)
+    auto *buffer = pw_stream_dequeue_buffer(source.stream);
+    if (!buffer)
       return;
-    if (id == SPA_PARAM_Format) {
-      spa_audio_info_raw info{};
-      if (spa_format_audio_raw_parse(param, &info) < 0 ||
-          info.channels != source.channels ||
-          (info.format != SPA_AUDIO_FORMAT_F32P &&
-           info.format != SPA_AUDIO_FORMAT_F32)) {
-        fprintf(stderr, "test source: unsupported format request\n");
-        source.failed = true;
-        pw_main_loop_quit(source.loop);
-        return;
-      }
+    auto *audio = buffer->buffer;
+    if (!audio || audio->n_datas != source.channels) {
+      pw_stream_queue_buffer(source.stream, buffer);
+      return;
     }
-    pw_filter_update_params(source.filter, nullptr, &param, 1);
-  }
-
-  static void process(void *data, spa_io_position *position) {
-    auto &source = *static_cast<Source *>(data);
-    const uint32_t frames = position->clock.duration;
+    uint32_t frames = UINT32_MAX;
     std::array<float *, MaxChannels> buffers{};
     for (unsigned c = 0; c < source.channels; ++c) {
-      buffers[c] = static_cast<float *>(
-          pw_filter_get_dsp_buffer(source.ports[c], frames));
-      if (!buffers[c])
+      auto &plane = audio->datas[c];
+      if (!plane.data || !plane.chunk) {
+        pw_stream_queue_buffer(source.stream, buffer);
         return;
+      }
+      frames = std::min(frames, plane.maxsize / uint32_t{sizeof(float)});
+      buffers[c] = static_cast<float *>(plane.data);
     }
+    if (buffer->requested)
+      frames =
+          static_cast<uint32_t>(std::min(uint64_t{frames}, buffer->requested));
     constexpr double twoPi = 6.283185307179586476925286766559;
     constexpr double frequency = 440.0;
-    const double rate = position->clock.rate.num
-                            ? static_cast<double>(position->clock.rate.denom) /
-                                  position->clock.rate.num
-                            : 48000.0;
+    // The adapter resamples our fixed 48 kHz stream to the graph rate.
+    constexpr double rate = 48000.0;
     const double step = twoPi * frequency / rate;
     const auto enabled = signalEnabled;
     const auto stage = pdcSignalStage;
@@ -148,8 +141,10 @@ struct Source {
     }
     for (uint32_t i = 0; i < frames; ++i) {
       if (source.latencyProbe) {
-        const uint64_t graphFrame = position->clock.position + i;
-        if (source.channels == 2 && graphFrame % 8192u == 0) {
+        // Keep pulse spacing in the stream's 48 kHz frame domain; the
+        // native adapter may run against a different graph clock rate.
+        const uint64_t streamFrame = source.generatedFrames + i;
+        if (source.channels == 2 && streamFrame % 8192u == 0) {
           const uint32_t timestampUs = static_cast<uint32_t>(
               callbackUs + static_cast<uint64_t>(i * 1000000.0 / rate));
           buffers[0][i] =
@@ -180,6 +175,15 @@ struct Source {
           source.phase -= twoPi;
       }
     }
+    for (unsigned c = 0; c < source.channels; ++c) {
+      auto &chunk = *audio->datas[c].chunk;
+      chunk.offset = 0;
+      chunk.stride = sizeof(float);
+      chunk.size = frames * sizeof(float);
+    }
+    source.generatedFrames += frames;
+    buffer->size = frames;
+    pw_stream_queue_buffer(source.stream, buffer);
   }
 
   explicit Source(unsigned channelCount, std::string name, std::string serial,
@@ -302,7 +306,6 @@ struct Source {
       return value;
     }();
     pw_registry_add_listener(registry, &registryHook, &registryEvents, this);
-    const bool mono = channels == 1;
     const char *description = nodeName == "skyapo.test.mono"
                                   ? "SkyAPO Deterministic Mono Input"
                                   : "SkyAPO Deterministic Test Input";
@@ -331,34 +334,25 @@ struct Source {
       pw_properties_set(properties, "device.serial", deviceSerial.c_str());
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     pw_properties_set(properties, SPA_KEY_AUDIO_POSITION, positions.c_str());
-    filter = pw_filter_new(core, "SkyAPO Test Input", properties);
-    if (!filter) {
+    // Native adapters own the PortConfig lifecycle. Auto-configure actual
+    // DSP ports as well, so manual-link tests work without a session manager.
+    pw_properties_set(properties, "adapter.auto-port-config",
+                      "{ mode = dsp position = preserve }");
+    stream = pw_stream_new(core, "SkyAPO Test Input", properties);
+    if (!stream) {
       pw_core_disconnect(core);
       pw_context_destroy(context);
-      throw std::runtime_error("cannot create source filter");
+      throw std::runtime_error("cannot create source stream");
     }
-    static const pw_filter_events events = [] {
-      pw_filter_events value{};
-      value.version = PW_VERSION_FILTER_EVENTS;
+    static const pw_stream_events events = [] {
+      pw_stream_events value{};
+      value.version = PW_VERSION_STREAM_EVENTS;
       value.state_changed = stateChanged;
-      value.param_changed = paramChanged;
       value.process = process;
       return value;
     }();
     spa_hook hook{};
-    pw_filter_add_listener(filter, &hook, &events, this);
-    for (unsigned c = 0; c < channels; ++c) {
-      const auto portName = std::string("capture_") + channelNames[c];
-      ports[c] = pw_filter_add_port(
-          filter, PW_DIRECTION_OUTPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, 1,
-          pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-                            PW_KEY_PORT_NAME, portName.c_str(),
-                            PW_KEY_AUDIO_CHANNEL, channelNames[c], nullptr),
-          nullptr, 0);
-    }
-    bool missingPort = false;
-    for (unsigned c = 0; c < channels; ++c)
-      missingPort = missingPort || !ports[c];
+    pw_stream_add_listener(stream, &hook, &events, this);
     spa_audio_info_raw info{};
     info.format = SPA_AUDIO_FORMAT_F32P;
     info.rate = 48000;
@@ -389,30 +383,26 @@ struct Source {
     uint8_t formatBytes[1024];
     spa_pod_builder builder =
         SPA_POD_BUILDER_INIT(formatBytes, sizeof(formatBytes));
-    std::array<float, MaxChannels> unityVolumes{};
-    unityVolumes.fill(1.0f);
     const spa_pod *params[] = {
-        spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info),
-        spa_format_audio_raw_build(&builder, SPA_PARAM_Format, &info),
-        static_cast<spa_pod *>(spa_pod_builder_add_object(
-            &builder, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props, SPA_PROP_volume,
-            SPA_POD_Float(1.0f), SPA_PROP_mute, SPA_POD_Bool(false),
-            SPA_PROP_channelVolumes,
-            SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
-                          unityVolumes.data())))};
-    if (missingPort || !params[0] || !params[1] || !params[2] ||
-        pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 3) < 0) {
-      pw_filter_destroy(filter);
+        spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info)};
+    if (!params[0] ||
+        pw_stream_connect(
+            stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+            static_cast<pw_stream_flags>(
+                PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS |
+                (playbackStream ? PW_STREAM_FLAG_AUTOCONNECT : 0)),
+            params, 1) < 0) {
+      pw_stream_destroy(stream);
       pw_core_disconnect(core);
       pw_context_destroy(context);
       throw std::runtime_error("cannot publish test source");
     }
-    ownNode = pw_filter_get_node_id(filter);
+    ownNode = pw_stream_get_node_id(stream);
     pw_main_loop_run(loop);
     for (auto *link : links)
       if (link)
         pw_proxy_destroy(link);
-    pw_filter_destroy(filter);
+    pw_stream_destroy(stream);
     spa_hook_remove(&registryHook);
     spa_hook_remove(&coreHook);
     pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
