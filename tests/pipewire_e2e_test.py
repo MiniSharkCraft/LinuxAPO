@@ -1265,6 +1265,30 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not publish the complete smart-filter pair")
                 if mode.endswith(("-volume", "-mute")):
+                    # The registry exposes the Audio/Sink before WirePlumber
+                    # finishes PortConfig and selects it as the default. Wait
+                    # for the runtime graph to own the route before setting
+                    # Props, otherwise policy initialization can overwrite a
+                    # control change made against the early node.
+                    deadline = time.monotonic() + 8
+                    playback_status = ""
+                    while time.monotonic() < deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        playback_status = result.stdout
+                        if (result.returncode == 0 and
+                                "Playback graph: streaming / streaming, "
+                                "internal links 2/2, target links 2/2 channels"
+                                in playback_status and
+                                "PipeWire default sink: skyapo.playback" in
+                                playback_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "WirePlumber playback graph did not own the "
+                            "default route before control setup:\n"
+                            f"{playback_status}")
                     playback_objects = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
                     controls = (

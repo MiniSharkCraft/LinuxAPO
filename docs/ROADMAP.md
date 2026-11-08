@@ -139,6 +139,18 @@ alignment limit. Local CTest #69 passed **1/1** (3.96 s): expected-level ratio
 allocation/deallocation counters `0/0`. This isolates PDC measurement from
 recorder-link startup; it is not physical-hardware or full-suite evidence.
 
+WirePlumber playback-control fixture ordering (2026-11-08): local test #52
+reproduced a `1.990547` ratio against expected output because the fixture set
+volume controls as soon as the nodes appeared in the registry, before the
+daemon reported a fully connected playback graph and owned default route. The
+fixture now waits for streaming state, 2/2 internal and target links, and
+`PipeWire default sink: skyapo.playback` before changing Props. The `−18 dB`
+expectation and tolerances are unchanged. Focused CTest #52 and #53 passed
+**2/2** sequentially: playback output/expected ratio `0.995268`, virtual-mic
+ratio `1.000027`, and the mute case remained silent. Both runs reported
+0 callback allocations/deallocations; this is private WirePlumber evidence,
+not a physical-output or full hosted-suite result.
+
 The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
