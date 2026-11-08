@@ -651,7 +651,8 @@ protected:
     int curveIndex = 0;
     for (const auto &curve : curves) {
       if (selectedInputChannel != QStringLiteral("All channels") &&
-          !curve.channel.startsWith(selectedInputChannel + QStringLiteral(" → ")))
+          !curve.channel.startsWith(selectedInputChannel +
+                                    QStringLiteral(" → ")))
         continue;
       QPainterPath path;
       bool started = false;
@@ -817,11 +818,11 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   analysisForm->addRow(tr("Resolution:"), responseResolutionCombo);
   analysisControlsLayout->addLayout(analysisForm);
   analysisControlsLayout->addWidget(analysisUseRuntimeFormat);
-  analysisControlsLayout->addWidget(new QLabel(tr("Manual sample rate:"),
-                                               analysisControls));
+  analysisControlsLayout->addWidget(
+      new QLabel(tr("Manual sample rate:"), analysisControls));
   analysisControlsLayout->addWidget(analysisSampleRate);
-  analysisControlsLayout->addWidget(new QLabel(tr("Input channels:"),
-                                               analysisControls));
+  analysisControlsLayout->addWidget(
+      new QLabel(tr("Input channels:"), analysisControls));
   analysisControlsLayout->addWidget(analysisChannels);
   analysisStatusLabel = new QLabel(
       tr("No response calculated. This is a theoretical configuration view."),
@@ -1208,9 +1209,9 @@ void MainWindow::analyzeResponse() {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
-    auto *worker = QThread::create(
-        [self, snapshot, snapshotPath, sourceName, useCurrentFile,
-         requestedRevision, fftFrames, sampleRate, channels] {
+    auto *worker = QThread::create([self, snapshot, snapshotPath, sourceName,
+                                    useCurrentFile, requestedRevision,
+                                    fftFrames, sampleRate, channels] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
       if (!self)
@@ -1266,10 +1267,9 @@ void MainWindow::analyzeResponse() {
                     .arg(fftFrames)
                     .arg(requestedRevision));
             self->analysisPeakGainLabel->setText(
-                std::isfinite(peakGainDb)
-                    ? self->tr("Peak sampled gain: %1 dB")
-                          .arg(peakGainDb, 0, 'f', 2)
-                    : self->tr("Peak gain: N/A"));
+                std::isfinite(peakGainDb) ? self->tr("Peak sampled gain: %1 dB")
+                                                .arg(peakGainDb, 0, 'f', 2)
+                                          : self->tr("Peak gain: N/A"));
             self->clearResponsePlot({});
             auto *plot = new ResponsePlot(std::move(result.curves),
                                           self->responsePlotContainer);
