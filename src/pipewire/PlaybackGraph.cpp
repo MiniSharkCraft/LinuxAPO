@@ -27,6 +27,7 @@
 #include <pipewire/proxy.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
+#include <spa/utils/result.h>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -2017,15 +2018,32 @@ struct PlaybackGraph::Impl {
                 info.channels != self.channels ||
                 (info.format != SPA_AUDIO_FORMAT_F32P &&
                  info.format != SPA_AUDIO_FORMAT_F32)) {
-              self.error = "unsupported SkyAPO playback format request";
+              std::ostringstream message;
+              message << "unsupported SkyAPO playback format request (format="
+                      << info.format << ", rate=" << info.rate
+                      << ", channels=" << info.channels
+                      << ", expected=" << self.channels << ')';
+              self.error = message.str();
+              std::cerr << "skyapod: " << self.error << '\n';
               return;
             }
+            std::cerr << "skyapod: accepting playback DSP format (format="
+                      << info.format << ", rate=" << info.rate
+                      << ", channels=" << info.channels << ")\n";
           }
           // WirePlumber configures Audio/Sink nodes through the SPA
           // AudioAdapter session-item contract. The fixed playback ports
           // already exist, so acknowledge the format/port configuration and
           // expose the standard controls expected by the adapter.
-          pw_filter_update_params(self.filter, nullptr, &param, 1);
+          const int updateResult =
+              pw_filter_update_params(self.filter, nullptr, &param, 1);
+          if (updateResult < 0) {
+            self.error =
+                std::string("cannot acknowledge playback parameter: ") +
+                spa_strerror(updateResult);
+            std::cerr << "skyapod: " << self.error << '\n';
+            return;
+          }
           if (id == SPA_PARAM_PortConfig) {
             uint8_t bytes[512];
             std::array<float, MaxChannels> volumes{};
@@ -2069,11 +2087,29 @@ struct PlaybackGraph::Impl {
                 info.channels != self.channels ||
                 (info.format != SPA_AUDIO_FORMAT_F32P &&
                  info.format != SPA_AUDIO_FORMAT_F32)) {
-              self.error = "unsupported SkyAPO playback stream format request";
+              std::ostringstream message;
+              message << "unsupported SkyAPO playback stream format request "
+                         "(format="
+                      << info.format << ", rate=" << info.rate
+                      << ", channels=" << info.channels
+                      << ", expected=" << self.channels << ')';
+              self.error = message.str();
+              std::cerr << "skyapod: " << self.error << '\n';
               return;
             }
+            std::cerr << "skyapod: accepting playback stream format (format="
+                      << info.format << ", rate=" << info.rate
+                      << ", channels=" << info.channels << ")\n";
           }
-          pw_filter_update_params(self.streamFilter, nullptr, &param, 1);
+          const int updateResult =
+              pw_filter_update_params(self.streamFilter, nullptr, &param, 1);
+          if (updateResult < 0) {
+            self.error =
+                std::string("cannot acknowledge playback stream parameter: ") +
+                spa_strerror(updateResult);
+            std::cerr << "skyapod: " << self.error << '\n';
+            return;
+          }
           if (id == SPA_PARAM_PortConfig) {
             uint8_t bytes[512];
             std::array<float, MaxChannels> volumes{};
