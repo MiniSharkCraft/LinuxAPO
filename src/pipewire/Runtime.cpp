@@ -145,6 +145,7 @@ struct Runtime {
   std::array<spa_hook, MaxChannels> linkHooks{};
   std::array<uint32_t, MaxChannels> linkGlobalIds{};
   std::array<bool, MaxChannels> linked{};
+  bool outputPortConfigPending{};
   std::vector<float> work;
   std::unique_ptr<Engine> activeEngine;
   std::unique_ptr<Engine> pendingEngine;
@@ -1435,6 +1436,8 @@ struct Runtime {
     r.state = state;
     std::cerr << "skyapod: virtual mic " << pw_filter_state_as_string(state)
               << '\n';
+    if (state == PW_FILTER_STATE_PAUSED && r.outputPortConfigPending)
+      r.rebuildOutputPortsForPortConfig();
     if (state == PW_FILTER_STATE_ERROR)
       r.fail(error ? error : "filter error");
     if (state == PW_FILTER_STATE_UNCONNECTED &&
@@ -1573,6 +1576,63 @@ struct Runtime {
       r.fail(e.what());
     }
   }
+  void rebuildOutputPortsForPortConfig() noexcept {
+    if (!outputPortConfigPending || state != PW_FILTER_STATE_PAUSED ||
+        !filter || cleaning || stopping)
+      return;
+
+    const auto previousAudioMode = audioMode.load(std::memory_order_seq_cst);
+    const bool resumeAfterRebuild = previousAudioMode == AudioMode::Running;
+    if (resumeAfterRebuild) {
+      if (!quiesceAndDrain()) {
+        fail("timed out draining audio callbacks for PipeWire PortConfig");
+        return;
+      }
+    } else if (!waitForCallbacksToDrain()) {
+      audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+      fail("timed out draining audio callbacks for PipeWire PortConfig");
+      return;
+    }
+
+    try {
+      for (unsigned channel = 0; channel < channels; ++channel) {
+        if (outputs[channel]) {
+          const int result = pw_filter_remove_port(outputs[channel]);
+          outputs[channel] = nullptr;
+          if (result < 0)
+            throw std::runtime_error("cannot remove virtual-source output " +
+                                     ports[channel].channel + ": " +
+                                     std::to_string(result));
+        }
+      }
+      for (unsigned channel = 0; channel < channels; ++channel) {
+        const auto name = "capture_" + ports[channel].channel;
+        auto *properties = pw_properties_new(
+            PW_KEY_FORMAT_DSP, "32 bit float mono audio", PW_KEY_PORT_NAME,
+            name.c_str(), PW_KEY_AUDIO_CHANNEL, ports[channel].channel.c_str(),
+            nullptr);
+        if (!properties)
+          throw std::runtime_error("cannot allocate virtual-source output " +
+                                   ports[channel].channel + " properties");
+        outputs[channel] = pw_filter_add_port(filter, PW_DIRECTION_OUTPUT,
+                                              PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                                              1, properties, nullptr, 0);
+        if (!outputs[channel])
+          throw std::runtime_error("cannot recreate virtual-source output " +
+                                   ports[channel].channel);
+      }
+      outputPortConfigPending = false;
+      std::cerr << "skyapod: refreshed fixed virtual-microphone output ports "
+                   "for PipeWire PortConfig\n";
+    } catch (const std::exception &exception) {
+      audioMode.store(AudioMode::Faulted, std::memory_order_seq_cst);
+      fail(exception.what());
+      return;
+    }
+
+    if (resumeAfterRebuild)
+      resumeAudio();
+  }
   static void paramChanged(void *data, void *port, uint32_t id,
                            const spa_pod *param) {
     auto &r = *static_cast<Runtime *>(data);
@@ -1589,6 +1649,14 @@ struct Runtime {
         r.fail("unsupported virtual-source format request");
         return;
       }
+    }
+    if (id == SPA_PARAM_PortConfig) {
+      // WirePlumber's si-audio-adapter completes DSP PortConfig only after a
+      // ports-changed notification. This filter keeps a fixed channel layout,
+      // so explicitly recreate its source ports while the node is suspended.
+      r.outputPortConfigPending = true;
+      if (r.state == PW_FILTER_STATE_PAUSED)
+        r.rebuildOutputPortsForPortConfig();
     }
     // Fixed DSP ports are already configured. Acknowledge the node format
     // and signal Props so WirePlumber can finish its adapter transaction.
@@ -2127,8 +2195,9 @@ struct Runtime {
     auto *props = pw_properties_new(
         PW_KEY_NODE_NAME, "skyapo.virtual_mic", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Virtual Mic", PW_KEY_MEDIA_CLASS, "Audio/Source",
-        PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_WANT_DRIVER, "true",
-        PW_KEY_NODE_PAUSE_ON_IDLE, "false", nullptr);
+        PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_AUTOCONNECT, "true",
+        PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false",
+        nullptr);
     pw_properties_setf(props, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     // DSP ports already exist and must not be rebuilt by a session manager.
     std::string positions = "[ ";

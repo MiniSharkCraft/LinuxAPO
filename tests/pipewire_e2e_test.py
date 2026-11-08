@@ -1262,29 +1262,15 @@ def main():
                         transition_fault_consumer,
                         "first-fault playback monitor",
                         marker="SKYAPO_CONSUMER_CONNECTED")
-                playback_client_args = [str(playback_client)]
-                if surround51:
-                    playback_client_args.append("--surround51")
-                elif surround71:
-                    playback_client_args.append("--surround71")
-                second_source_process = subprocess.Popen(
-                    playback_client_args, env=env, text=True,
-                    stdout=source_log, stderr=subprocess.STDOUT)
-                if playback_isolation:
-                    unrelated_playback_process = subprocess.Popen(
-                        [str(playback_client), "--target",
-                         "skyapo.test.null-target-alt", "--name",
-                         "skyapo.test.unrelated-playback-app"],
-                        env=env, text=True, stdout=source_log,
-                        stderr=subprocess.STDOUT)
-                    unrelated_playback_consumer = subprocess.Popen(
-                        [str(consumer), "--expected-db", "0",
-                         "--expected-rate", str(sample_rate),
-                         "--duration-ms", "5000", "--capture-node",
-                         "skyapo.test.null-target-alt", "--name",
-                         "skyapo.test.unrelated.consumer"],
-                        env=env, text=True, stdout=unrelated_playback_log,
-                        stderr=subprocess.STDOUT)
+                if not playback_isolation:
+                    playback_client_args = [str(playback_client)]
+                    if surround51:
+                        playback_client_args.append("--surround51")
+                    elif surround71:
+                        playback_client_args.append("--surround71")
+                    second_source_process = subprocess.Popen(
+                        playback_client_args, env=env, text=True,
+                        stdout=source_log, stderr=subprocess.STDOUT)
                 if startup_playback_recovery:
                     consumer_args[consumer_args.index("--duration-ms") + 1] = "5000"
                     playback_consumer = subprocess.Popen(
@@ -1373,6 +1359,52 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not route the system default through SkyAPO "
                         f"within 5 seconds:\n{status}")
+                if playback_isolation:
+                    graph = pipewire_dump_objects(
+                        run([str(pw_dump)], env, timeout=5).stdout)
+                    alternate_target = next((
+                        item for item in graph
+                        if item.get("type", "").endswith(":Node") and
+                        item.get("info", {}).get(
+                            "props", item.get("props", {})).get(
+                                "node.name") ==
+                        "skyapo.test.null-target-alt"), None)
+                    alternate_serial = (
+                        alternate_target.get("info", {}).get(
+                            "props", alternate_target.get("props", {})).get(
+                                "object.serial")
+                        if alternate_target else None)
+                    if alternate_serial is None:
+                        raise RuntimeError(
+                            "PipeWire did not expose the alternate target's "
+                            "object.serial")
+                    playback_client_args = [str(playback_client)]
+                    if surround51:
+                        playback_client_args.append("--surround51")
+                    elif surround71:
+                        playback_client_args.append("--surround71")
+                    # Start a normal application only after SkyAPO has become
+                    # the confirmed default sink. Otherwise WirePlumber
+                    # correctly connects it to the old default, and that
+                    # existing stream does not follow a later default change.
+                    second_source_process = subprocess.Popen(
+                        playback_client_args, env=env, text=True,
+                        stdout=source_log, stderr=subprocess.STDOUT)
+                    unrelated_playback_process = subprocess.Popen(
+                        [str(playback_client), "--target",
+                         str(alternate_serial), "--name",
+                         "skyapo.test.unrelated-playback-app"],
+                        env=env, text=True, stdout=source_log,
+                        stderr=subprocess.STDOUT)
+                    unrelated_playback_consumer = subprocess.Popen(
+                        [str(consumer), "--expected-db", "0",
+                         "--expected-rate", str(sample_rate),
+                         "--duration-ms", "5000", "--capture-node",
+                         "skyapo.test.null-target-alt", "--name",
+                         "skyapo.test.unrelated.consumer",
+                         "--internal-filter"],
+                        env=env, text=True, stdout=unrelated_playback_log,
+                        stderr=subprocess.STDOUT)
                 if (not startup_playback_recovery and
                         not playback_pdc_recovery and
                         not playback_quantum_variation):
