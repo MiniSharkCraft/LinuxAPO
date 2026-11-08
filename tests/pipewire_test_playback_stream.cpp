@@ -36,14 +36,17 @@ struct PlaybackStream {
     pw_main_loop_quit(self.loop);
   }
 
-  static void stateChanged(void *data, pw_stream_state, pw_stream_state state,
-                           const char *error) {
+  static void stateChanged(void *data, pw_stream_state oldState,
+                           pw_stream_state state, const char *error) {
     auto &self = *static_cast<PlaybackStream *>(data);
+    std::fprintf(stderr, "test playback stream: state %s -> %s",
+                 pw_stream_state_as_string(oldState),
+                 pw_stream_state_as_string(state));
+    if (error)
+      std::fprintf(stderr, ": %s", error);
+    std::fputc('\n', stderr);
     if (state == PW_STREAM_STATE_ERROR ||
         state == PW_STREAM_STATE_UNCONNECTED) {
-      if (state == PW_STREAM_STATE_ERROR)
-        std::fprintf(stderr, "test playback stream: %s\n",
-                     error ? error : "PipeWire stream error");
       self.failed = state == PW_STREAM_STATE_ERROR;
       pw_main_loop_quit(self.loop);
     }
