@@ -638,13 +638,24 @@ struct Consumer {
     pw_registry_add_listener(registry, &registryHook, &registryEvents, this);
 
     const bool mono = channels == 1;
+    const bool captureStream =
+        !internalFilter && captureNodeName == "skyapo.virtual_mic";
+    const char *mediaClass =
+        internalFilter ? "Filter/Audio"
+                       : (captureStream ? "Stream/Input/Audio" : "Audio/Sink");
     auto *properties = pw_properties_new(
         PW_KEY_NODE_NAME, consumerNodeName.c_str(), PW_KEY_NODE_DESCRIPTION,
-        "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS,
-        internalFilter ? "Filter/Audio" : "Audio/Sink", PW_KEY_MEDIA_TYPE,
-        "Audio", PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_ALWAYS_PROCESS,
-        "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false", "wireplumber.is-virtual",
-        "true", nullptr);
+        "SkyAPO PipeWire Test Consumer", PW_KEY_MEDIA_CLASS, mediaClass,
+        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_NODE_WANT_DRIVER, "true",
+        PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false",
+        nullptr);
+    if (captureStream) {
+      pw_properties_set(properties, PW_KEY_MEDIA_CATEGORY, "Capture");
+      pw_properties_set(properties, PW_KEY_MEDIA_ROLE, "Test");
+      pw_properties_set(properties, PW_KEY_NODE_AUTOCONNECT, "false");
+    } else {
+      pw_properties_set(properties, "wireplumber.is-virtual", "true");
+    }
     pw_properties_setf(properties, PW_KEY_AUDIO_CHANNELS, "%u", channels);
     std::string positions = "[";
     for (unsigned channel = 0; channel < channels; ++channel)
