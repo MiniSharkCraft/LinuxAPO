@@ -516,7 +516,7 @@ def main():
                 "Format: F32 planar DSP", f"Sample rate: {sample_rate} Hz",
                 "Quantum: 1024",
                 "Callback allocations: 0", "Callback deallocations: 0",
-                "Default render endpoint: unavailable"]
+                "Default render endpoint: unavailable (no default audio sink volume)"]
             if stage_warning:
                 expected_status.append(
                     "Config warnings:\n  " + str(dsp_config) + ":1: "
