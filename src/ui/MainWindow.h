@@ -12,6 +12,7 @@
 class QComboBox;
 class QCheckBox;
 class QCloseEvent;
+class QDockWidget;
 class QLabel;
 class QLineEdit;
 class QMenu;
@@ -20,6 +21,8 @@ class QScrollArea;
 class QSpinBox;
 class QTimer;
 class QThread;
+class QVBoxLayout;
+class QWidget;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -51,6 +54,8 @@ private:
   void setRowDiagnostic(int index, const QString &diagnostic);
   void openDiagnosticSource();
   void analyzeResponse();
+  void clearResponsePlot(const QString &message);
+  void markResponseAnalysisStale();
   void showAbout();
   void refreshRecentFilesMenu();
   void openRecentFile();
@@ -76,9 +81,16 @@ private:
   QPushButton *responseButton{};
   QComboBox *responseSourceCombo{};
   QComboBox *responseResolutionCombo{};
+  QComboBox *analysisChannelCombo{};
   QCheckBox *analysisUseRuntimeFormat{};
   QSpinBox *analysisSampleRate{};
   QSpinBox *analysisChannels{};
+  QDockWidget *responseDock{};
+  QWidget *responsePlotContainer{};
+  QVBoxLayout *responsePlotLayout{};
+  QLabel *analysisStatusLabel{};
+  QLabel *analysisSummaryLabel{};
+  QLabel *analysisPeakGainLabel{};
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
@@ -91,5 +103,8 @@ private:
   bool daemonControlPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};
+  quint64 responseAnalysisRevision{};
+  bool responseAnalysisUsesCurrentFile{};
+  bool responseAnalysisHasResult{};
   QString saveAsError;
 };

@@ -33,6 +33,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QDialog>
+#include <QDockWidget>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -719,7 +720,20 @@ int main(int argc, char **argv) {
   }
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
   auto *responseButton = liveWindow.findChild<QPushButton *>("analyzeResponse");
+  auto *responseDock =
+      liveWindow.findChild<QDockWidget *>("responseAnalysisDock");
+  auto *analysisStatus = liveWindow.findChild<QLabel *>("analysisResultStatus");
+  auto *analysisSummary = liveWindow.findChild<QLabel *>("analysisSummary");
+  auto *analysisPeakGain = liveWindow.findChild<QLabel *>("analysisPeakGain");
+  auto *analysisLatency = liveWindow.findChild<QLabel *>("analysisLatency");
+  auto *analysisInitialization =
+      liveWindow.findChild<QLabel *>("analysisInitializationTime");
+  auto *analysisCpu = liveWindow.findChild<QLabel *>("analysisCpuUsage");
+  auto *viewMenu = liveWindow.findChild<QMenu *>("viewMenu");
+  auto *toggleAnalysisAction =
+      liveWindow.findChild<QAction *>("toggleAnalysisPanel");
   auto *responseSource = liveWindow.findChild<QComboBox *>("analysisSource");
+  auto *analysisChannel = liveWindow.findChild<QComboBox *>("analysisChannel");
   auto *responseResolution =
       liveWindow.findChild<QComboBox *>("analysisResolution");
   auto *useLiveAnalysisFormat =
@@ -727,51 +741,45 @@ int main(int argc, char **argv) {
   auto *analysisSampleRate =
       liveWindow.findChild<QSpinBox *>("analysisSampleRate");
   auto *analysisChannels = liveWindow.findChild<QSpinBox *>("analysisChannels");
-  bool responseDialogOpened = false;
-  bool responseDialogFailed = false;
   double responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
   qlonglong responseBinCount = -1;
   QString responseFormatLabel;
-  QString responseFailureText;
-  QTimer responseDialogCloser;
-  responseDialogCloser.setInterval(10);
-  QObject::connect(&responseDialogCloser, &QTimer::timeout, &application, [&] {
-    for (auto *widget : QApplication::topLevelWidgets()) {
-      auto *dialog = qobject_cast<QDialog *>(widget);
-      if (!dialog)
-        continue;
-      if (dialog->windowTitle() == "Calculated filter response") {
-        responseDialogOpened = true;
-        if (auto *plot = dialog->findChild<QWidget *>("responsePlot")) {
-          responseGainAt1kHz =
-              plot->property("responseAt1000HzLtoLDb").toDouble();
-          responseBinCount = plot->property("analysisBinCount").toLongLong();
-        }
-        for (auto *label : dialog->findChildren<QLabel *>())
-          if (label->text().contains("FFT samples"))
-            responseFormatLabel = label->text();
-        dialog->accept();
-        responseDialogCloser.stop();
-      } else if (dialog->windowTitle() == "Response analysis") {
-        responseDialogFailed = true;
-        for (auto *label : dialog->findChildren<QLabel *>())
-          responseFailureText += label->text();
-        dialog->accept();
-        responseDialogCloser.stop();
-      }
-    }
-  });
-  if (!responseButton || !responseSource || !responseResolution ||
-      !useLiveAnalysisFormat || !analysisSampleRate || !analysisChannels ||
-      responseResolution->count() != 14 ||
+  if (!responseButton || !responseDock || !analysisStatus || !analysisSummary ||
+      !viewMenu || !toggleAnalysisAction || !analysisPeakGain ||
+      !analysisLatency || !analysisInitialization || !analysisCpu ||
+      responseDock->isHidden() || !responseSource || !analysisChannel ||
+      !responseResolution || !useLiveAnalysisFormat || !analysisSampleRate ||
+      !analysisChannels || responseResolution->count() != 14 ||
       responseResolution->currentData().toUInt() != 16384U ||
       responseResolution->itemData(0).toUInt() != 128U ||
       responseResolution->itemData(responseResolution->count() - 1).toUInt() !=
           (1U << 20) ||
       responseSource->count() != 2 ||
       responseSource->itemText(0) != "config.txt" ||
-      responseSource->itemText(1) != "Current file") {
+      responseSource->itemText(1) != "Current file" ||
+      analysisChannel->findText("L") < 0 ||
+      analysisChannel->findText("R") < 0) {
     std::cerr << "response analysis source/resolution controls are missing\n";
+    return 1;
+  }
+  if (liveWindow.dockWidgetArea(responseDock) != Qt::BottomDockWidgetArea) {
+    std::cerr << "response analysis is not docked below the editor\n";
+    return 1;
+  }
+  liveWindow.resize(1080, 760);
+  liveWindow.show();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  toggleAnalysisAction->trigger();
+  if (!responseDock->isHidden()) {
+    std::cerr << "View menu did not hide the Analysis Panel (hidden="
+              << responseDock->isHidden()
+              << ", visible=" << responseDock->isVisible()
+              << ", checked=" << toggleAnalysisAction->isChecked() << ")\n";
+    return 1;
+  }
+  toggleAnalysisAction->trigger();
+  if (responseDock->isHidden()) {
+    std::cerr << "View menu did not restore the Analysis Panel\n";
     return 1;
   }
   if (!useLiveAnalysisFormat->isChecked() || analysisSampleRate->isEnabled() ||
@@ -801,21 +809,26 @@ int main(int argc, char **argv) {
     return 1;
   }
   const auto runResponseAndCaptureGain = [&] {
-    responseDialogOpened = false;
-    responseDialogFailed = false;
     responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
     responseBinCount = -1;
     responseFormatLabel.clear();
-    responseDialogCloser.start();
+    analysisSummary->clear();
     responseButton->click();
     QElapsedTimer responseWait;
     responseWait.start();
-    while (!responseDialogOpened && !responseDialogFailed &&
+    while (!analysisStatus->text().startsWith("Calculated response") &&
+           !analysisStatus->text().startsWith("Analysis failed") &&
            responseWait.elapsed() < 5000) {
       QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
       QThread::msleep(5);
     }
-    return responseDialogOpened && !responseDialogFailed &&
+    auto *plot = liveWindow.findChild<QWidget *>("responsePlot");
+    if (plot) {
+      responseGainAt1kHz = plot->property("responseAt1000HzLtoLDb").toDouble();
+      responseBinCount = plot->property("analysisBinCount").toLongLong();
+    }
+    responseFormatLabel = analysisSummary->text();
+    return analysisStatus->text().startsWith("Calculated response") && plot &&
            std::isfinite(responseGainAt1kHz) && responseBinCount == 4096;
   };
   responseSource->setCurrentIndex(0);
@@ -836,27 +849,34 @@ int main(int argc, char **argv) {
               << responseGainAt1kHz << " dB\n";
     return 1;
   }
+  if (!analysisPeakGain->text().contains("Peak sampled gain: -3.00 dB") ||
+      !analysisLatency->text().contains("N/A") ||
+      !analysisInitialization->text().contains("N/A") ||
+      !analysisCpu->text().contains("N/A")) {
+    std::cerr << "analysis panel fabricated or omitted unavailable metrics\n";
+    return 1;
+  }
   useLiveAnalysisFormat->setChecked(true);
-  responseFailureText.clear();
-  responseDialogFailed = false;
-  responseDialogCloser.start();
   responseButton->click();
   QElapsedTimer unavailableFormatWait;
   unavailableFormatWait.start();
-  while (!responseDialogFailed && unavailableFormatWait.elapsed() < 5000) {
+  while (!analysisStatus->text().startsWith("Analysis failed") &&
+         unavailableFormatWait.elapsed() < 5000) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
-  if (!responseDialogFailed ||
-      !responseFailureText.contains("not streaming with a known sample rate") ||
+  if (!analysisStatus->text().contains(
+          "not streaming with a known sample rate") ||
       !responseButton->isEnabled()) {
     std::cerr << "response analysis fabricated/failed to report an unknown "
                  "live format\n";
     return 1;
   }
   qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
+  analysisChannel->setCurrentText("R");
+  const bool liveFormatResponseSucceeded = runResponseAndCaptureGain();
   if (analysisSampleRate->isEnabled() || analysisChannels->isEnabled() ||
-      !runResponseAndCaptureGain() ||
+      !liveFormatResponseSucceeded ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
       !responseFormatLabel.contains("96000 Hz") ||
       !responseFormatLabel.contains("2 channels")) {
@@ -865,12 +885,47 @@ int main(int argc, char **argv) {
               << responseFormatLabel.toStdString() << '\n';
     return 1;
   }
+  if (liveWindow.findChild<QWidget *>("responsePlot")
+              ->property("selectedInputChannel")
+              .toString() != "R" ||
+      QSettings().value(QStringLiteral("analysis/channel")).toString() != "R") {
+    std::cerr << "analysis channel selection was not applied or persisted\n";
+    return 1;
+  }
   qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+  liveGain->setValue(-2.0);
+  if (!analysisStatus->text().startsWith("Stale response") ||
+      analysisStatus->property("analysisState").toString() != "stale") {
+    std::cerr << "the response panel continued to present an outdated curve "
+                 "as current after an editor change\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
+  responseButton->click();
+  liveGain->setValue(-1.0);
+  QElapsedTimer staleAnalysisWait;
+  staleAnalysisWait.start();
+  while (
+      !analysisStatus->text().contains("changed while analysis was running") &&
+      staleAnalysisWait.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!analysisStatus->text().contains("changed while analysis was running") ||
+      analysisStatus->property("analysisState").toString() != "failed" ||
+      !responseButton->isEnabled() ||
+      liveWindow.findChild<QWidget *>("responsePlot")) {
+    std::cerr << "an in-flight analysis result survived a config edit or did "
+                 "not restore panel controls\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+
 #endif
   QFile liveConfigAfterValid(liveConfigPath);
   if (!liveConfigAfterValid.open(QIODevice::ReadOnly) ||
       liveConfigAfterValid.readAll() != "Preamp: -3 dB\n") {
-    std::cerr << "live validation changed the on-disk config\n";
+    std::cerr << "response analysis changed the on-disk config\n";
     return 1;
   }
 
@@ -1170,9 +1225,29 @@ int main(int argc, char **argv) {
                      temporary.path() + QStringLiteral("/settings"));
   QSettings uiSettings;
   uiSettings.clear();
+  int savedAnalysisDockHeight = -1;
   {
     MainWindow preferencesWindow(configPath, QString::fromLocal8Bit(argv[1]));
-    preferencesWindow.resize(777, 555);
+    preferencesWindow.resize(1100, 760);
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+    auto *dock = preferencesWindow.findChild<QDockWidget *>(
+        QStringLiteral("responseAnalysisDock"));
+    if (!dock) {
+      std::cerr << "editor did not create the Analysis Panel dock\n";
+      return 1;
+    }
+    preferencesWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    preferencesWindow.resizeDocks({dock}, {260}, Qt::Vertical);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    savedAnalysisDockHeight = dock->height();
+    if (savedAnalysisDockHeight < 100) {
+      std::cerr << "could not resize the Analysis Panel before saving state\n";
+      return 1;
+    }
+    dock->hide();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+#endif
     preferencesWindow.close();
   }
   if (uiSettings.value(QStringLiteral("ui/geometry")).toByteArray().isEmpty() ||
@@ -1184,13 +1259,40 @@ int main(int argc, char **argv) {
   }
   const QByteArray savedWindowGeometry =
       uiSettings.value(QStringLiteral("ui/geometry")).toByteArray();
+  const QByteArray savedWindowState =
+      uiSettings.value(QStringLiteral("ui/state")).toByteArray();
   uiSettings.clear();
   uiSettings.setValue(QStringLiteral("ui/geometry"), savedWindowGeometry);
+  uiSettings.setValue(QStringLiteral("ui/state"), savedWindowState);
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.size() != QSize(777, 555)) {
-    std::cerr << "editor did not restore its saved window geometry\n";
+  if (!window.restoreGeometry(savedWindowGeometry)) {
+    std::cerr << "editor could not restore its saved window geometry\n";
     return 1;
   }
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  auto *restoredAnalysisDock =
+      window.findChild<QDockWidget *>(QStringLiteral("responseAnalysisDock"));
+  auto *restoredAnalysisAction =
+      window.findChild<QAction *>(QStringLiteral("toggleAnalysisPanel"));
+  if (!restoredAnalysisDock || !restoredAnalysisAction ||
+      !restoredAnalysisDock->isHidden() ||
+      window.dockWidgetArea(restoredAnalysisDock) != Qt::BottomDockWidgetArea) {
+    std::cerr << "editor did not restore the hidden bottom Analysis Panel\n";
+    return 1;
+  }
+  window.show();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  restoredAnalysisAction->trigger();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  if (restoredAnalysisDock->isHidden() ||
+      std::abs(restoredAnalysisDock->height() - savedAnalysisDockHeight) > 8) {
+    std::cerr << "editor did not restore the Analysis Panel dock height; saved="
+              << savedAnalysisDockHeight
+              << " restored=" << restoredAnalysisDock->height() << '\n';
+    return 1;
+  }
+  window.hide();
+#endif
   const auto recentFiles =
       uiSettings.value(QStringLiteral("ui/recentFiles")).toStringList();
   auto *recentMenu =
@@ -1725,21 +1827,42 @@ int main(int argc, char **argv) {
   }
   bool pickerWasValid = false;
   bool pickerWasAccepted = false;
-  QTimer::singleShot(200, &window, [&] {
+  int pickerChoiceCount = -1;
+  QTimer pickerPoll;
+  pickerPoll.setInterval(10);
+  QObject::connect(&pickerPoll, &QTimer::timeout, &window, [&] {
     for (auto *candidate : window.findChildren<QDialog *>()) {
       if (candidate->objectName() != "pluginPicker")
         continue;
       auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
       auto *add = candidate->findChild<QPushButton *>("addPluginButton");
-      pickerWasValid = choices && choices->count() == 1 &&
-                       choices->item(0)->text().contains("Test Gain") && add;
+      pickerChoiceCount = choices ? choices->count() : -1;
+      int testGainRow = -1;
+      if (choices) {
+        for (int row = 0; row < choices->count(); ++row) {
+          const auto *item = choices->item(row);
+          if (item->text().contains("Test Gain") &&
+              item->data(Qt::UserRole).toString() ==
+                  QStringLiteral(
+                      "Plugin: LV2 https://example.test/plugins/gain")) {
+            testGainRow = row;
+            break;
+          }
+        }
+      }
+      pickerWasValid = testGainRow >= 0 && add;
       if (pickerWasValid) {
+        choices->setCurrentRow(testGainRow);
         add->click();
         pickerWasAccepted = true;
+      } else {
+        candidate->reject();
       }
+      pickerPoll.stop();
       break;
     }
   });
+  pickerPoll.start();
   addPluginAction->trigger();
   QElapsedTimer pickerWait;
   pickerWait.start();
@@ -1747,8 +1870,11 @@ int main(int argc, char **argv) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
+  pickerPoll.stop();
   if (!pickerWasValid || !pickerWasAccepted) {
-    std::cerr << "plugin picker did not present discovered catalog entries\n";
+    std::cerr << "plugin picker did not present the single discovered catalog "
+                 "entry; count="
+              << pickerChoiceCount << '\n';
     return 1;
   }
   bool insertedPluginDirective = false;

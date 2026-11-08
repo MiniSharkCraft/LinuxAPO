@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFile>
@@ -33,6 +34,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -600,7 +602,13 @@ public:
         setProperty("responseAt1000HzLtoLDb", closest->y());
       break;
     }
-    setMinimumSize(700, 380);
+    setMinimumSize(440, 220);
+  }
+
+  void setSelectedInputChannel(QString channel) {
+    selectedInputChannel = std::move(channel);
+    setProperty("selectedInputChannel", selectedInputChannel);
+    update();
   }
 
 protected:
@@ -642,6 +650,9 @@ protected:
                                QColor(50, 160, 100), QColor(150, 80, 180)};
     int curveIndex = 0;
     for (const auto &curve : curves) {
+      if (selectedInputChannel != QStringLiteral("All channels") &&
+          !curve.channel.startsWith(selectedInputChannel + QStringLiteral(" → ")))
+        continue;
       QPainterPath path;
       bool started = false;
       for (const auto &point : curve.points) {
@@ -666,6 +677,7 @@ protected:
 
 private:
   QVector<ResponseCurve> curves;
+  QString selectedInputChannel{QStringLiteral("All channels")};
 };
 #endif
 
@@ -716,6 +728,24 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
         savedIndex >= 0 ? savedIndex
                         : responseResolutionCombo->findData(16384U));
   }
+  analysisChannelCombo = new QComboBox(root);
+  analysisChannelCombo->setObjectName(QStringLiteral("analysisChannel"));
+  analysisChannelCombo->addItems(
+      {tr("All channels"), QStringLiteral("L"), QStringLiteral("R"),
+       QStringLiteral("C"), QStringLiteral("LFE"), QStringLiteral("RL"),
+       QStringLiteral("RR"), QStringLiteral("SL"), QStringLiteral("SR")});
+  {
+    QSettings settings;
+    const QString savedChannel =
+        settings.value(QStringLiteral("analysis/channel"), QStringLiteral("L"))
+            .toString();
+    const int savedIndex = analysisChannelCombo->findText(savedChannel);
+    analysisChannelCombo->setCurrentIndex(savedIndex >= 0 ? savedIndex : 1);
+  }
+  connect(analysisChannelCombo, &QComboBox::currentTextChanged, this,
+          [](const QString &channel) {
+            QSettings().setValue(QStringLiteral("analysis/channel"), channel);
+          });
   connect(responseResolutionCombo,
           qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
             QSettings settings;
@@ -732,14 +762,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   toolbar->addWidget(checkButton);
   toolbar->addWidget(reloadButton);
   toolbar->addWidget(addButton);
-  toolbar->addWidget(new QLabel(tr("Analyze from:"), root));
-  toolbar->addWidget(responseSourceCombo);
-  toolbar->addWidget(new QLabel(tr("FFT:"), root));
-  toolbar->addWidget(responseResolutionCombo);
-  toolbar->addWidget(responseButton);
   outer->addLayout(toolbar);
 
-  auto *analysisFormatRow = new QHBoxLayout;
   analysisUseRuntimeFormat =
       new QCheckBox(tr("Use live PipeWire format"), root);
   analysisUseRuntimeFormat->setObjectName(
@@ -781,13 +805,68 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
             QSettings().setValue(QStringLiteral("analysis/channels"), value);
           });
   updateManualFormatEnabled();
-  analysisFormatRow->addWidget(analysisUseRuntimeFormat);
-  analysisFormatRow->addWidget(new QLabel(tr("Manual rate:"), root));
-  analysisFormatRow->addWidget(analysisSampleRate);
-  analysisFormatRow->addWidget(new QLabel(tr("Channels:"), root));
-  analysisFormatRow->addWidget(analysisChannels);
-  analysisFormatRow->addStretch(1);
-  outer->addLayout(analysisFormatRow);
+
+  auto *analysisPanel = new QWidget(this);
+  auto *analysisPanelLayout = new QHBoxLayout(analysisPanel);
+  auto *analysisControls = new QWidget(analysisPanel);
+  analysisControls->setMaximumWidth(330);
+  auto *analysisControlsLayout = new QVBoxLayout(analysisControls);
+  auto *analysisForm = new QFormLayout;
+  analysisForm->addRow(tr("Analyze from:"), responseSourceCombo);
+  analysisForm->addRow(tr("Channel:"), analysisChannelCombo);
+  analysisForm->addRow(tr("Resolution:"), responseResolutionCombo);
+  analysisControlsLayout->addLayout(analysisForm);
+  analysisControlsLayout->addWidget(analysisUseRuntimeFormat);
+  analysisControlsLayout->addWidget(new QLabel(tr("Manual sample rate:"),
+                                               analysisControls));
+  analysisControlsLayout->addWidget(analysisSampleRate);
+  analysisControlsLayout->addWidget(new QLabel(tr("Input channels:"),
+                                               analysisControls));
+  analysisControlsLayout->addWidget(analysisChannels);
+  analysisStatusLabel = new QLabel(
+      tr("No response calculated. This is a theoretical configuration view."),
+      analysisControls);
+  analysisStatusLabel->setObjectName(QStringLiteral("analysisResultStatus"));
+  analysisStatusLabel->setWordWrap(true);
+  analysisStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  analysisControlsLayout->addWidget(analysisStatusLabel);
+  analysisSummaryLabel = new QLabel(analysisControls);
+  analysisSummaryLabel->setObjectName(QStringLiteral("analysisSummary"));
+  analysisSummaryLabel->setWordWrap(true);
+  analysisControlsLayout->addWidget(analysisSummaryLabel);
+  analysisPeakGainLabel = new QLabel(tr("Peak gain: N/A"), analysisControls);
+  analysisPeakGainLabel->setObjectName(QStringLiteral("analysisPeakGain"));
+  analysisPeakGainLabel->setToolTip(
+      tr("Calculated from the theoretical Engine response; this is not a live "
+         "clipping or hardware measurement."));
+  analysisControlsLayout->addWidget(analysisPeakGainLabel);
+  auto *analysisLatencyLabel =
+      new QLabel(tr("Latency: N/A (not measured)"), analysisControls);
+  analysisLatencyLabel->setObjectName(QStringLiteral("analysisLatency"));
+  analysisControlsLayout->addWidget(analysisLatencyLabel);
+  auto *analysisInitializationLabel = new QLabel(
+      tr("Initialization time: N/A (not measured)"), analysisControls);
+  analysisInitializationLabel->setObjectName(
+      QStringLiteral("analysisInitializationTime"));
+  analysisControlsLayout->addWidget(analysisInitializationLabel);
+  auto *analysisCpuLabel =
+      new QLabel(tr("CPU usage: N/A (not measured)"), analysisControls);
+  analysisCpuLabel->setObjectName(QStringLiteral("analysisCpuUsage"));
+  analysisControlsLayout->addWidget(analysisCpuLabel);
+  analysisControlsLayout->addWidget(responseButton);
+  analysisControlsLayout->addStretch(1);
+  analysisPanelLayout->addWidget(analysisControls);
+
+  responsePlotContainer = new QWidget(analysisPanel);
+  responsePlotContainer->setObjectName(QStringLiteral("analysisPlotContainer"));
+  responsePlotLayout = new QVBoxLayout(responsePlotContainer);
+  responsePlotLayout->setContentsMargins(0, 0, 0, 0);
+  analysisPanelLayout->addWidget(responsePlotContainer, 1);
+
+  responseDock = new QDockWidget(tr("Analysis Panel"), this);
+  responseDock->setObjectName(QStringLiteral("responseAnalysisDock"));
+  responseDock->setAllowedAreas(Qt::BottomDockWidgetArea);
+  responseDock->setWidget(analysisPanel);
 
   auto *deviceRow = new QHBoxLayout;
   deviceCombo = new QComboBox(root);
@@ -936,6 +1015,17 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   aboutAction->setObjectName(QStringLiteral("aboutSkyAPO"));
   connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
   setCentralWidget(root);
+  addDockWidget(Qt::BottomDockWidgetArea, responseDock);
+  auto *viewMenu = new QMenu(tr("View"), this);
+  viewMenu->setObjectName(QStringLiteral("viewMenu"));
+  menuBar()->insertMenu(helpMenu->menuAction(), viewMenu);
+  auto *toggleAnalysisAction = responseDock->toggleViewAction();
+  toggleAnalysisAction->setObjectName(QStringLiteral("toggleAnalysisPanel"));
+  toggleAnalysisAction->setText(tr("Analysis Panel"));
+  viewMenu->addAction(toggleAnalysisAction);
+  responseDock->show();
+  clearResponsePlot(tr("Choose Analyze response to calculate the selected "
+                       "configuration."));
   QSettings settings;
   const QByteArray savedGeometry =
       settings.value(QStringLiteral("ui/geometry")).toByteArray();
@@ -945,6 +1035,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
       settings.value(QStringLiteral("ui/state")).toByteArray();
   if (!savedState.isEmpty())
     restoreState(savedState);
+  else
+    resizeDocks({responseDock}, {240}, Qt::Vertical);
 
   validationTimer = new QTimer(this);
   validationTimer->setSingleShot(true);
@@ -1057,17 +1149,22 @@ void MainWindow::analyzeResponse() {
   if (configPath.isEmpty())
     return;
   const bool useCurrentFile = responseSourceCombo->currentData().toBool();
+  const quint64 requestedRevision = configRevision;
   const QString sourcePath = useCurrentFile ? configPath : defaultConfigPath();
+  const QString sourceName =
+      useCurrentFile ? tr("Current file") : tr("Default config.txt");
   QByteArray contents;
   if (useCurrentFile) {
     contents = document.serialize();
   } else {
     QFile source(sourcePath);
     if (!source.open(QIODevice::ReadOnly)) {
-      QMessageBox::warning(
-          this, tr("Response analysis"),
-          tr("Could not read the default configuration '%1': %2")
+      responseAnalysisHasResult = false;
+      analysisStatusLabel->setText(
+          tr("Analysis failed: Could not read '%1': %2")
               .arg(sourcePath, source.errorString()));
+      analysisSummaryLabel->clear();
+      clearResponsePlot(analysisStatusLabel->text());
       return;
     }
     contents = source.readAll();
@@ -1077,9 +1174,12 @@ void MainWindow::analyzeResponse() {
       directory + QStringLiteral("/.skyapo-response-XXXXXX"));
   if (!snapshot->open() || snapshot->write(contents) != contents.size() ||
       !snapshot->flush()) {
-    QMessageBox::warning(this, tr("Response analysis"),
-                         tr("Could not create a config snapshot: %1")
-                             .arg(snapshot->errorString()));
+    responseAnalysisHasResult = false;
+    analysisStatusLabel->setText(
+        tr("Analysis failed: Could not create a config snapshot: %1")
+            .arg(snapshot->errorString()));
+    analysisSummaryLabel->clear();
+    clearResponsePlot(analysisStatusLabel->text());
     return;
   }
   const QString snapshotPath =
@@ -1091,55 +1191,97 @@ void MainWindow::analyzeResponse() {
   const unsigned selectedChannels =
       static_cast<unsigned>(analysisChannels->value());
   snapshot->close();
+  responseAnalysisHasResult = false;
+  analysisStatusLabel->setProperty("analysisState", "running");
+  analysisPeakGainLabel->setText(tr("Peak gain: N/A"));
+  analysisStatusLabel->setText(tr("Analyzing %1…").arg(sourceName));
+  analysisSummaryLabel->setText(
+      tr("Theoretical response; this does not measure live audio."));
+  clearResponsePlot(analysisStatusLabel->text());
   responseButton->setEnabled(false);
   responseButton->setText(useRuntimeFormat ? tr("Reading format…")
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
-  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames](
+  const auto startAnalysis = [self, snapshot, snapshotPath, sourceName,
+                              useCurrentFile, requestedRevision, fftFrames](
                                  unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
-    auto *worker = QThread::create([self, snapshot, snapshotPath, fftFrames,
-                                    sampleRate, channels] {
+    auto *worker = QThread::create(
+        [self, snapshot, snapshotPath, sourceName, useCurrentFile,
+         requestedRevision, fftFrames, sampleRate, channels] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
       if (!self)
         return;
       QMetaObject::invokeMethod(
           self,
-          [self, snapshot, fftFrames, sampleRate, channels,
+          [self, snapshot, sourceName, useCurrentFile, requestedRevision,
+           fftFrames, sampleRate, channels,
            result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
             self->responseButton->setEnabled(true);
             self->responseButton->setText(self->tr("Analyze response"));
-            if (!result.error.isEmpty()) {
-              QMessageBox::warning(self, self->tr("Response analysis"),
-                                   result.error);
+            if (useCurrentFile && self->configRevision != requestedRevision) {
+              self->analysisStatusLabel->setProperty("analysisState", "failed");
+              self->analysisStatusLabel->setText(
+                  self->tr("Analysis failed: the current configuration "
+                           "changed while analysis was running. Re-run it "
+                           "for the latest edits."));
+              self->analysisSummaryLabel->clear();
+              self->clearResponsePlot(self->analysisStatusLabel->text());
               return;
             }
-            QDialog dialog(self);
-            dialog.setWindowTitle(self->tr("Calculated filter response"));
-            auto *layout = new QVBoxLayout(&dialog);
-            layout->addWidget(new QLabel(
-                self->tr("EAPO Engine impulse response · %1 Hz · %2 %3 · "
-                         "%4 FFT samples · all input/output channel paths")
+            if (!result.error.isEmpty()) {
+              self->analysisStatusLabel->setProperty("analysisState", "failed");
+              self->analysisStatusLabel->setText(
+                  self->tr("Analysis failed: %1").arg(result.error));
+              self->analysisSummaryLabel->clear();
+              self->clearResponsePlot(self->analysisStatusLabel->text());
+              return;
+            }
+            double peakGainDb = -std::numeric_limits<double>::infinity();
+            for (const auto &curve : result.curves)
+              for (const auto &point : curve.points)
+                if (std::isfinite(point.y()))
+                  peakGainDb = std::max(peakGainDb, point.y());
+            self->responseAnalysisUsesCurrentFile = useCurrentFile;
+            self->responseAnalysisRevision = requestedRevision;
+            self->responseAnalysisHasResult = true;
+            self->analysisStatusLabel->setText(
+                self->tr("Calculated response (theoretical)."));
+            self->analysisStatusLabel->setProperty("analysisState", "current");
+            self->analysisSummaryLabel->setText(
+                self->tr("EAPO Engine impulse response · %1 · %2 Hz · %3 %4 · "
+                         "%5 FFT samples · config revision %6 · all "
+                         "input/output channel paths")
+                    .arg(sourceName)
                     .arg(sampleRate)
                     .arg(channels)
                     .arg(channels == 1 ? self->tr("channel")
                                        : self->tr("channels"))
-                    .arg(fftFrames),
-                &dialog));
-            layout->addWidget(
-                new ResponsePlot(std::move(result.curves), &dialog));
-            auto *close = new QPushButton(self->tr("Close"), &dialog);
-            QObject::connect(close, &QPushButton::clicked, &dialog,
-                             &QDialog::accept);
-            layout->addWidget(close, 0, Qt::AlignRight);
-            dialog.resize(820, 500);
-            dialog.exec();
+                    .arg(fftFrames)
+                    .arg(requestedRevision));
+            self->analysisPeakGainLabel->setText(
+                std::isfinite(peakGainDb)
+                    ? self->tr("Peak sampled gain: %1 dB")
+                          .arg(peakGainDb, 0, 'f', 2)
+                    : self->tr("Peak gain: N/A"));
+            self->clearResponsePlot({});
+            auto *plot = new ResponsePlot(std::move(result.curves),
+                                          self->responsePlotContainer);
+            plot->setSelectedInputChannel(
+                self->analysisChannelCombo->currentText());
+            QObject::connect(self->analysisChannelCombo,
+                             &QComboBox::currentTextChanged, plot,
+                             [plot](const QString &channel) {
+                               plot->setSelectedInputChannel(channel);
+                             });
+            self->responsePlotLayout->addWidget(plot, 1);
+            self->responseDock->show();
           },
           Qt::QueuedConnection);
     });
@@ -1166,20 +1308,50 @@ void MainWindow::analyzeResponse() {
     if (result != 0 || !parseStreamingFormat(output, sampleRate, channels)) {
       self->responseButton->setEnabled(true);
       self->responseButton->setText(self->tr("Analyze response"));
+      self->responseAnalysisHasResult = false;
+      self->analysisStatusLabel->setProperty("analysisState", "failed");
       const QString detail =
           QString::fromUtf8(error.isEmpty() ? output : error).trimmed();
-      QMessageBox::warning(
-          self, self->tr("Response analysis"),
-          self->tr("The daemon is not streaming with a known sample "
-                   "rate and channel count. Start SkyAPO, or disable "
-                   "'Use live PipeWire format' and choose a manual "
-                   "analysis format.%1")
+      self->analysisStatusLabel->setText(
+          self->tr("Analysis failed: the daemon is not streaming with a known "
+                   "sample rate and channel count. Start SkyAPO, or disable "
+                   "'Use live PipeWire format' and choose a manual analysis "
+                   "format.%1")
               .arg(detail.isEmpty() ? QString{}
                                     : QStringLiteral("\n") + detail));
+      self->analysisSummaryLabel->clear();
+      self->clearResponsePlot(self->analysisStatusLabel->text());
       return;
     }
     startAnalysis(sampleRate, channels);
   });
+#endif
+}
+
+void MainWindow::clearResponsePlot(const QString &message) {
+  if (!responsePlotLayout)
+    return;
+  while (auto *item = responsePlotLayout->takeAt(0)) {
+    delete item->widget();
+    delete item;
+  }
+  if (message.isEmpty())
+    return;
+  auto *placeholder = new QLabel(message, responsePlotContainer);
+  placeholder->setObjectName(QStringLiteral("analysisPlotPlaceholder"));
+  placeholder->setAlignment(Qt::AlignCenter);
+  placeholder->setWordWrap(true);
+  responsePlotLayout->addWidget(placeholder, 1);
+}
+
+void MainWindow::markResponseAnalysisStale() {
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  if (responseAnalysisHasResult && responseAnalysisUsesCurrentFile) {
+    analysisStatusLabel->setText(
+        tr("Stale response: the current configuration changed after this "
+           "analysis. Analyze again to update it."));
+    analysisStatusLabel->setProperty("analysisState", "stale");
+  }
 #endif
 }
 
@@ -1330,6 +1502,7 @@ void MainWindow::openConfig(const QString &path) {
     QMessageBox::critical(this, tr("Open failed"), file.errorString());
     return;
   }
+  markResponseAnalysisStale();
   configPath = QFileInfo(path).absoluteFilePath();
   rememberConfig(configPath);
   document.load(file.readAll());
@@ -1759,6 +1932,7 @@ void MainWindow::markModified() {
   modified = true;
   clearRowDiagnostics();
   ++configRevision;
+  markResponseAnalysisStale();
   updateTitle();
   validationLabel->setText(tr("Checking unsaved configuration edits…"));
   scheduleLiveValidation();
@@ -1989,6 +2163,7 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   configPath = destination;
   modified = false;
   ++configRevision;
+  markResponseAnalysisStale();
   pathEdit->setText(configPath);
   rebuildRows();
   rememberConfig(configPath);
