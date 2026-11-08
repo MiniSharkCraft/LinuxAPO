@@ -1317,7 +1317,7 @@ def main():
                                 f"Could not set {control_node_name} Props: "
                                 f"{changed.stdout}{changed.stderr}")
                 time.sleep(0.25)
-                if not playback_isolation:
+                if startup_playback_recovery:
                     playback_client_args = [str(playback_client)]
                     if surround51:
                         playback_client_args.append("--surround51")
@@ -1338,7 +1338,8 @@ def main():
                          "--arm-on-signal", "--expect-silent",
                          "--expected-rate",
                          str(sample_rate), "--duration-ms", "30000",
-                         "--capture-node", "skyapo.test.null-target"],
+                         "--capture-node", "skyapo.test.null-target",
+                         "--internal-filter"],
                         env=env, text=True, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT)
                     try:
@@ -1445,6 +1446,58 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not route the system default through SkyAPO "
                         f"within 5 seconds:\n{status}")
+                if not playback_isolation and not startup_playback_recovery:
+                    playback_client_args = [str(playback_client)]
+                    if surround51:
+                        playback_client_args.append("--surround51")
+                    elif surround71:
+                        playback_client_args.append("--surround71")
+                    second_source_process = subprocess.Popen(
+                        playback_client_args, env=env, text=True,
+                        stdout=source_log, stderr=subprocess.STDOUT)
+                    # Do not let playback assertions pass while the ordinary
+                    # app is still linked directly to the old sink. Confirm
+                    # that each channel reaches the SkyAPO policy adapter.
+                    deadline = time.monotonic() + 8
+                    active_playback_links = 0
+                    graph = []
+                    while time.monotonic() < deadline:
+                        if second_source_process.poll() is not None:
+                            raise RuntimeError(
+                                "WirePlumber playback stream exited before it "
+                                "reached SkyAPO Playback")
+                        graph = pipewire_dump_objects(
+                            run([str(pw_dump)], env, timeout=5).stdout)
+                        node_ids = {}
+                        for item in graph:
+                            if not item.get("type", "").endswith(":Node"):
+                                continue
+                            props = item.get("info", {}).get(
+                                "props", item.get("props", {}))
+                            name = props.get("node.name")
+                            if name in ("skyapo.test.playback-app",
+                                        "skyapo.playback"):
+                                node_ids[name] = str(item.get("id"))
+                        active_playback_links = sum(
+                            1 for item in graph
+                            if item.get("type", "").endswith(":Link") and
+                            str(item.get("info", {}).get(
+                                "output-node-id", "")) ==
+                            node_ids.get("skyapo.test.playback-app") and
+                            str(item.get("info", {}).get(
+                                "input-node-id", "")) ==
+                            node_ids.get("skyapo.playback") and
+                            item.get("info", {}).get("state") == "active")
+                        if active_playback_links >= channel_count:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "ordinary playback did not establish active links "
+                            "to every SkyAPO Playback channel before monitoring; "
+                            f"expected={channel_count}, "
+                            f"active={active_playback_links}, "
+                            f"graph={summarize_graph_dump(json.dumps(graph))}")
                 if playback_isolation:
                     graph = pipewire_dump_objects(
                         run([str(pw_dump)], env, timeout=5).stdout)
@@ -2635,9 +2688,14 @@ def main():
                           "link recovery: "
                           f"{float(maximum_silence_match.group(1)):.3f} ms "
                           "(budget <250 ms).")
-                print("PipeWire playback recording verified: ordinary test "
-                      "application -> SkyAPO DSP -> selected sink monitor -> "
-                      "independent consumer; measured output/expected ratio "
+                playback_origin = (
+                    "ordinary test playback application"
+                    if wireplumber_playback else
+                    "deterministic PipeWire test source")
+                print("PipeWire playback recording verified: "
+                      f"{playback_origin} -> SkyAPO DSP -> selected sink "
+                      "monitor -> independent consumer; measured "
+                      "output/expected ratio "
                       f"{float(ratio_match.group(1)):.6f}.")
                 if mode == "playback-wireplumber":
                     trace_graph_if_requested(
