@@ -8,6 +8,27 @@ an unpublished v0.10.0 playback-and-hardening candidate, subject to the gates
 in the canonical roadmap. No version bump or release tag has been made for the
 uncommitted worktree changes.
 
+Playback graph and fixture correction (2026-11-08; commit `48a8f2c` on
+`feature/v0.10-playback-candidate`, PR #11): registry inspection identified two
+separate causes. An existing stream-to-target link could produce `-EEXIST`
+and leave the daemon retrying instead of monitoring the existing link; the
+control-loop implementation now binds the matching registry link. Separately,
+the test reused its playback target as the virtual-microphone recorder, summing
+two processed streams. Capture verification now has its own node name; gain
+and silence assertions were not relaxed. CTest #46 (playback-preamp) and #47
+(existing-target-link fault injection) passed in Release and ASan/UBSan, within
+focused groups of **7/7** each (core, realtime safety, dump parser, playback,
+existing-link recovery, quantum variation and playback PDC recovery). Sanitizer
+recording ratios to the expected -6 dB output were 0.999994 and 0.999998;
+DSP status reported 0.501187 gain and zero audited callback allocations and
+deallocations. The PDC recorder is armed at the existing candidate barrier so
+it measures the fault boundary rather than valid audio preceding the reload;
+the silence threshold remains 1e-6. Pinned clang-format 18 and diff whitespace
+checks passed. These are private PipeWire graph tests, not physical playback
+validation or a full-suite result. Hosted Linux CI run `42435608592` was still
+in progress when this checkpoint was recorded; its result must be checked
+before treating the candidate as verified by hosted CI.
+
 Artwork gate correction (2026-10-16): the owner-supplied application icon has
 unverified redistribution rights, so CMake now omits it from default Qt
 resources, desktop metadata, and installed PNGs. Release automation accepts
