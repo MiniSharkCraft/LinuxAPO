@@ -1784,7 +1784,8 @@ def main():
                                 "--expected-rate", str(sample_rate),
                                 "--duration-ms", "2000", "--capture-node",
                                 "skyapo.test.null-target", "--name",
-                                "skyapo.test.consumer.post-recovery"]
+                                "skyapo.test.consumer.post-recovery",
+                                "--internal-filter"]
                             post_recovery = run(
                                 post_recovery_args, env, timeout=8)
                             post_recovery_ratio = re.search(
@@ -2754,7 +2755,8 @@ def main():
                         [str(consumer), "--expected-rate", str(sample_rate),
                          "--expected-db", "-6", "--duration-ms", "5000",
                          "--capture-node", "skyapo.test.null-target",
-                         "--ignore-silent-blocks"], env, timeout=12)
+                         "--ignore-silent-blocks", "--internal-filter"],
+                        env, timeout=12)
                     retained_ratio = re.search(
                         r"RMS ratio to expected: ([0-9.]+)",
                         verify_last_good.stdout)
@@ -2810,7 +2812,8 @@ def main():
                         [str(consumer), "--expected-rate", "44100",
                          "--expected-db", "-6", "--duration-ms", "5000",
                          "--capture-node", "skyapo.test.null-target",
-                         "--ignore-silent-blocks"], env, timeout=12)
+                         "--ignore-silent-blocks", "--internal-filter"],
+                        env, timeout=12)
                     reconfigured_ratio = re.search(
                         r"RMS ratio to expected: ([0-9.]+)",
                         verify_reconfigured.stdout)
@@ -2839,7 +2842,8 @@ def main():
                         [str(consumer), "--expected-rate", "44100",
                          "--expected-db", "-3", "--duration-ms", "5000",
                          "--capture-node", "skyapo.test.null-target",
-                         "--ignore-silent-blocks"], env, timeout=12)
+                         "--ignore-silent-blocks", "--internal-filter"],
+                        env, timeout=12)
                     recovered_ratio = re.search(
                         r"RMS ratio to expected: ([0-9.]+)",
                         verify_recovered.stdout)
