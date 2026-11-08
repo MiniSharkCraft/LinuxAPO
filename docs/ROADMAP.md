@@ -105,6 +105,27 @@ at the time of this checkpoint. These virtual-graph checks do not prove
 physical output playback: the workstation had an active EasyEffects route,
 Firefox and Discord streams, so no live route was changed. Physical output,
 hotplug, ordinary-client selection and hardware diversity remain open.
+
+WirePlumber default-target fixture correction (2026-11-08; follow-up to
+`548866e`): local reproduction showed test #56 processed audio through the
+playback graph and recovered its selected sink, but its shutdown assertion
+failed. The fixture initialized `default.audio.sink` with `pw-metadata` alone;
+that bypassed WirePlumber's own default-target state. When the test sink was
+removed, WirePlumber selected the alternate sink and re-applied that fallback
+after `skyapod` had correctly restored the original PipeWire metadata. The
+fixture now selects the initial sink with `wpctl set-default` and verifies the
+metadata before starting the daemon. Existing shutdown expectations and audio
+thresholds are unchanged. On the local PipeWire 1.6.10/WirePlumber 0.5.18
+environment, focused CTest #48, #56 and #57 passed **3/3** sequentially
+(59.08 s): ordinary application routing, target removal/recreation, and stable
+device identity. Playback RMS ratios were 0.999113, 0.999996 and 1.000004;
+unrelated playback measured 0.993585 at unity. The virtual-microphone capture
+checks also passed, and callback allocation/deallocation counters were 0/0.
+This changes only the integration fixture and does not resolve the other
+failures from the hosted 101-test run on `548866e`; no full local or sanitizer
+suite was run for this test-only change. Physical-device validation remains
+open.
+
 The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**

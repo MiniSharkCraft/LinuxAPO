@@ -985,10 +985,38 @@ def main():
                 if not metadata:
                     raise RuntimeError(
                         "WirePlumber playback test requires pw-metadata")
-                run([metadata, "-n", "default", "0",
-                     "default.audio.sink",
-                     '{"name":"skyapo.test.null-target"}',
-                     "Spa:String:JSON"], env, timeout=5)
+                wpctl = shutil.which("wpctl")
+                if not wpctl:
+                    raise RuntimeError(
+                        "WirePlumber playback test requires wpctl")
+                graph = pipewire_dump_objects(
+                    run([str(pw_dump)], env, timeout=5).stdout)
+                initial_target_id = next((
+                    str(item.get("id")) for item in graph
+                    if item.get("type", "").endswith(":Node") and
+                    item.get("info", {}).get("props", item.get("props", {}))
+                    .get("node.name") == "skyapo.test.null-target"), None)
+                if initial_target_id is None:
+                    raise RuntimeError(
+                        "cannot identify initial WirePlumber playback target")
+                # Keep WirePlumber's selected target and PipeWire's default
+                # metadata in sync. Writing only core metadata with pw-metadata
+                # lets WirePlumber restore its separate fallback after shutdown.
+                run([wpctl, "set-default", initial_target_id], env, timeout=5)
+                deadline = time.monotonic() + 5
+                default_metadata = ""
+                expected_default_metadata = (
+                    "value:'{\"name\":\"skyapo.test.null-target\"}'")
+                while time.monotonic() < deadline:
+                    default_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if expected_default_metadata in default_metadata:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        "WirePlumber did not confirm the initial playback target "
+                        f"through wpctl:\n{default_metadata}")
 
             source_process = start_test_source(
                 source, mono, env, source_log,
