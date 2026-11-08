@@ -650,9 +650,8 @@ struct PlaybackGraph::Impl {
         PW_KEY_NODE_NAME, "skyapo.playback.dsp", PW_KEY_NODE_DESCRIPTION,
         "SkyAPO Playback DSP", PW_KEY_MEDIA_CLASS, "Filter/Audio",
         PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_NODE_AUTOCONNECT, "false",
-        PW_KEY_NODE_WANT_DRIVER, "true", PW_KEY_NODE_PAUSE_ON_IDLE, "false",
-        PW_KEY_AUDIO_CHANNELS, std::to_string(channels).c_str(),
-        PW_KEY_AUDIO_RATE,
+        PW_KEY_NODE_PAUSE_ON_IDLE, "false", PW_KEY_AUDIO_CHANNELS,
+        std::to_string(channels).c_str(), PW_KEY_AUDIO_RATE,
         std::to_string(sink.sampleRate ? sink.sampleRate : 48000).c_str(),
         PW_KEY_AUDIO_FORMAT, "F32", SPA_KEY_AUDIO_POSITION, positions.c_str(),
         nullptr);
