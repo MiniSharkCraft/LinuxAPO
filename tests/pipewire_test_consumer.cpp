@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +39,8 @@ struct Consumer {
   struct LinkWatch {
     Consumer *consumer{};
     unsigned channel{};
+    pw_proxy *rejected{};
+    spa_hook rejectedHook{};
   };
 
   pw_main_loop *loop{};
@@ -72,6 +75,13 @@ struct Consumer {
   std::array<pw_proxy *, MaxChannels> links{};
   std::array<LinkWatch, MaxChannels> linkWatches{};
   std::array<pw_link_state, MaxChannels> linkStates{};
+  std::array<bool, MaxChannels> awaitingExisting{};
+  std::array<bool, MaxChannels> linkListenerAttached{};
+  std::array<uint32_t, MaxChannels> adoptedLinkIds{};
+  struct ObservedLink {
+    uint32_t id{}, outputNode{}, outputPort{}, inputNode{}, inputPort{};
+  };
+  std::vector<ObservedLink> observedLinks;
   uint32_t sourceNode{Invalid};
   uint32_t ownNode{Invalid};
   std::atomic<uint64_t> frames{0};
@@ -132,6 +142,18 @@ struct Consumer {
     auto &watch = *static_cast<LinkWatch *>(data);
     if (!info)
       return;
+    auto &consumer = *watch.consumer;
+    if (info->output_node_id != consumer.sourceNode ||
+        info->output_port_id != consumer.outputIds[watch.channel] ||
+        info->input_node_id != consumer.ownNode ||
+        info->input_port_id != consumer.inputIds[watch.channel] ||
+        info->state == PW_LINK_STATE_ERROR) {
+      consumer.failed.store(true, std::memory_order_relaxed);
+      std::fprintf(stderr,
+                   "test consumer: invalid link endpoints or link error\n");
+      pw_main_loop_quit(consumer.loop);
+      return;
+    }
     auto &state = watch.consumer->linkStates[watch.channel];
     if (state != info->state)
       std::fprintf(stderr, "test consumer: link %s state %s\n",
@@ -141,10 +163,69 @@ struct Consumer {
     state = info->state;
   }
 
+  void watchLink(unsigned channel) {
+    static const pw_link_events events = [] {
+      pw_link_events value{};
+      value.version = PW_VERSION_LINK_EVENTS;
+      value.info = linkInfo;
+      return value;
+    }();
+    linkWatches[channel].consumer = this;
+    linkWatches[channel].channel = channel;
+    pw_proxy_add_object_listener(links[channel], &linkHooks[channel], &events,
+                                 &linkWatches[channel]);
+    linkListenerAttached[channel] = true;
+  }
+
+  void destroyLink(unsigned channel) {
+    if (linkListenerAttached[channel])
+      spa_hook_remove(&linkHooks[channel]);
+    linkListenerAttached[channel] = false;
+    if (links[channel])
+      pw_proxy_destroy(links[channel]);
+    links[channel] = nullptr;
+    adoptedLinkIds[channel] = Invalid;
+    linkStates[channel] = PW_LINK_STATE_UNLINKED;
+  }
+
+  void adoptExistingLink(unsigned channel) {
+    if (!awaitingExisting[channel] || links[channel])
+      return;
+    const auto found = std::find_if(
+        observedLinks.begin(), observedLinks.end(), [&](const auto &link) {
+          return link.outputNode == sourceNode &&
+                 link.outputPort == outputIds[channel] &&
+                 link.inputNode == ownNode &&
+                 link.inputPort == inputIds[channel];
+        });
+    if (found == observedLinks.end())
+      return;
+    links[channel] = static_cast<pw_proxy *>(pw_registry_bind(
+        registry, found->id, PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, 0));
+    if (!links[channel]) {
+      failed.store(true, std::memory_order_relaxed);
+      pw_main_loop_quit(loop);
+      return;
+    }
+    adoptedLinkIds[channel] = found->id;
+    awaitingExisting[channel] = false;
+    std::fprintf(
+        stderr, "test consumer: adopting existing link %u (%u/%u -> %u/%u)\n",
+        found->id, sourceNode, outputIds[channel], ownNode, inputIds[channel]);
+    watchLink(channel);
+  }
+
+  static void rejectedLinkRemoved(void *data) {
+    auto &watch = *static_cast<LinkWatch *>(data);
+    spa_hook_remove(&watch.rejectedHook);
+    pw_proxy_destroy(watch.rejected);
+    watch.rejected = nullptr;
+  }
+
   void linkChannel(unsigned channel) {
     if (channel >= channels || sourceNode == Invalid || ownNode == Invalid ||
         outputIds[channel] == Invalid || inputIds[channel] == Invalid ||
-        links[channel])
+        links[channel] || awaitingExisting[channel])
       return;
     auto *properties = pw_properties_new(nullptr, nullptr);
     pw_properties_setf(properties, PW_KEY_LINK_OUTPUT_NODE, "%u", sourceNode);
@@ -157,17 +238,8 @@ struct Consumer {
         pw_core_create_object(core, "link-factory", PW_TYPE_INTERFACE_Link,
                               PW_VERSION_LINK, &properties->dict, 0));
     pw_properties_free(properties);
-    if (links[channel]) {
-      static const pw_link_events events = [] {
-        pw_link_events value{};
-        value.version = PW_VERSION_LINK_EVENTS;
-        value.info = linkInfo;
-        return value;
-      }();
-      linkWatches[channel] = {this, channel};
-      pw_proxy_add_object_listener(links[channel], &linkHooks[channel], &events,
-                                   &linkWatches[channel]);
-    }
+    if (links[channel])
+      watchLink(channel);
     if (!links[channel]) {
       failed.store(true, std::memory_order_relaxed);
       std::fprintf(stderr, "test consumer: cannot link channel %s\n",
@@ -181,6 +253,31 @@ struct Consumer {
     auto &c = *static_cast<Consumer *>(data);
     if (!props)
       return;
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
+      ObservedLink link{};
+      link.id = id;
+      const auto parse = [&](const char *key, uint32_t &value) {
+        const auto *text = spa_dict_lookup(props, key);
+        if (!text)
+          return false;
+        char *end = nullptr;
+        errno = 0;
+        const auto parsed = std::strtoul(text, &end, 10);
+        if (errno || end == text || *end || parsed > UINT32_MAX)
+          return false;
+        value = static_cast<uint32_t>(parsed);
+        return true;
+      };
+      if (!parse(PW_KEY_LINK_OUTPUT_NODE, link.outputNode) ||
+          !parse(PW_KEY_LINK_OUTPUT_PORT, link.outputPort) ||
+          !parse(PW_KEY_LINK_INPUT_NODE, link.inputNode) ||
+          !parse(PW_KEY_LINK_INPUT_PORT, link.inputPort))
+        return;
+      c.observedLinks.push_back(link);
+      for (unsigned channel = 0; channel < c.channels; ++channel)
+        c.adoptExistingLink(channel);
+      return;
+    }
     if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
       const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
       if (name && c.captureNodeName == name)
@@ -218,11 +315,59 @@ struct Consumer {
       c.linkChannel(index);
   }
 
-  static void globalRemove(void *, uint32_t) {}
+  static void globalRemove(void *data, uint32_t id) {
+    auto &c = *static_cast<Consumer *>(data);
+    c.observedLinks.erase(
+        std::remove_if(c.observedLinks.begin(), c.observedLinks.end(),
+                       [&](const auto &link) { return link.id == id; }),
+        c.observedLinks.end());
+    if (c.sourceNode == id)
+      c.sourceNode = Invalid;
+    if (c.ownNode == id)
+      c.ownNode = Invalid;
+    for (unsigned channel = 0; channel < c.channels; ++channel) {
+      if (c.outputIds[channel] == id)
+        c.outputIds[channel] = Invalid;
+      if (c.inputIds[channel] == id)
+        c.inputIds[channel] = Invalid;
+      if (c.adoptedLinkIds[channel] == id) {
+        c.destroyLink(channel);
+        c.linkChannel(channel);
+      }
+    }
+  }
 
-  static void coreError(void *data, uint32_t, int, int result,
+  static void coreError(void *data, uint32_t objectId, int, int result,
                         const char *message) {
     auto &c = *static_cast<Consumer *>(data);
+    if (result == -EEXIST) {
+      for (unsigned channel = 0; channel < c.channels; ++channel) {
+        if (!c.links[channel] || c.adoptedLinkIds[channel] != Invalid ||
+            pw_proxy_get_id(c.links[channel]) != objectId)
+          continue;
+        // The server removes a rejected factory proxy. Wait for that event
+        // before releasing it, so its object ID cannot be reused too early.
+        auto &watch = c.linkWatches[channel];
+        if (watch.rejected)
+          break;
+        watch.rejected = c.links[channel];
+        c.links[channel] = nullptr;
+        if (c.linkListenerAttached[channel])
+          spa_hook_remove(&c.linkHooks[channel]);
+        c.linkListenerAttached[channel] = false;
+        static const pw_proxy_events events = [] {
+          pw_proxy_events value{};
+          value.version = PW_VERSION_PROXY_EVENTS;
+          value.removed = rejectedLinkRemoved;
+          return value;
+        }();
+        pw_proxy_add_listener(watch.rejected, &watch.rejectedHook, &events,
+                              &watch);
+        c.awaitingExisting[channel] = true;
+        c.adoptExistingLink(channel);
+        return;
+      }
+    }
     c.failed.store(true, std::memory_order_relaxed);
     std::fprintf(stderr, "test consumer: PipeWire error %d: %s\n", result,
                  message ? message : "unknown error");
@@ -447,6 +592,7 @@ struct Consumer {
       recordedLeft.resize(sampleCapacity);
       recordedRight.resize(sampleCapacity);
     }
+    adoptedLinkIds.fill(Invalid);
     pw_init(nullptr, nullptr);
     loop = pw_main_loop_new(nullptr);
     if (!loop)
@@ -591,11 +737,14 @@ struct Consumer {
       pw_loop_destroy_source(pw_main_loop_get_loop(loop), armTimer);
     if (timeout)
       pw_loop_destroy_source(pw_main_loop_get_loop(loop), timeout);
-    for (unsigned channel = 0; channel < channels; ++channel)
-      if (links[channel]) {
-        spa_hook_remove(&linkHooks[channel]);
-        pw_proxy_destroy(links[channel]);
+    for (unsigned channel = 0; channel < channels; ++channel) {
+      destroyLink(channel);
+      if (linkWatches[channel].rejected) {
+        spa_hook_remove(&linkWatches[channel].rejectedHook);
+        pw_proxy_destroy(linkWatches[channel].rejected);
+        linkWatches[channel].rejected = nullptr;
       }
+    }
     pw_filter_destroy(filter);
     pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
     pw_core_disconnect(core);
