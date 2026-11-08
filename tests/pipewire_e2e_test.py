@@ -1052,6 +1052,12 @@ def main():
                      ("skyapo.test.null-target" if wireplumber_playback else
                       "skyapo.playback.stream"),
                      "--ignore-silent-blocks"]
+                if wireplumber_playback:
+                    # This recorder is a test-only monitor consumer, not an
+                    # audio device. A pw_filter Audio/Sink cannot implement
+                    # WirePlumber 0.4's device PortConfig transaction and can
+                    # stall policy for later real playback streams.
+                    consumer_args.append("--internal-filter")
                 if mode.endswith("-mute"):
                     consumer_args.remove("--ignore-silent-blocks")
                 if playback_isolation:

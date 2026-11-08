@@ -127,7 +127,8 @@ struct Runtime {
   spa_source *rateEvent{}, *transitionEvent{}, *statusEvent{},
       *pluginLatencyEvent{}, *processFaultEvent{}, *sigint{}, *sigterm{},
       *selectionTimer{}, *playbackRecoveryTimer{}, *defaultRouteTimer{},
-      *configEvent{}, *reloadTimer{}, *linkRetryTimer{};
+      *configEvent{}, *reloadTimer{}, *linkRetryTimer{},
+      *virtualMicActivationTimer{};
   std::unique_ptr<skyapo::platform::ConfigWatcher> configWatcher;
   int server = -1;
   bool ownsSocket = false;
@@ -146,6 +147,9 @@ struct Runtime {
   std::array<uint32_t, MaxChannels> linkGlobalIds{};
   std::array<bool, MaxChannels> linked{};
   bool outputPortConfigPending{};
+  bool wirePlumberPresent{};
+  bool virtualMicConfiguredByPolicy{};
+  bool virtualMicActive{};
   std::vector<float> work;
   std::unique_ptr<Engine> activeEngine;
   std::unique_ptr<Engine> pendingEngine;
@@ -270,10 +274,11 @@ struct Runtime {
       pw_core_disconnect(core);
     if (main) {
       auto *l = pw_main_loop_get_loop(main);
-      for (auto *s : {rateEvent, transitionEvent, statusEvent,
-                      pluginLatencyEvent, processFaultEvent, sigint, sigterm,
-                      selectionTimer, playbackRecoveryTimer, defaultRouteTimer,
-                      configEvent, reloadTimer, linkRetryTimer})
+      for (auto *s :
+           {rateEvent, transitionEvent, statusEvent, pluginLatencyEvent,
+            processFaultEvent, sigint, sigterm, selectionTimer,
+            playbackRecoveryTimer, defaultRouteTimer, configEvent, reloadTimer,
+            linkRetryTimer, virtualMicActivationTimer})
         if (s)
           pw_loop_destroy_source(l, s);
     }
@@ -1438,6 +1443,9 @@ struct Runtime {
               << '\n';
     if (state == PW_FILTER_STATE_PAUSED && r.outputPortConfigPending)
       r.rebuildOutputPortsForPortConfig();
+    if (state == PW_FILTER_STATE_PAUSED && r.virtualMicConfiguredByPolicy &&
+        !r.outputPortConfigPending)
+      activateVirtualMic(r, "WirePlumber PortConfig");
     if (state == PW_FILTER_STATE_ERROR)
       r.fail(error ? error : "filter error");
     if (state == PW_FILTER_STATE_UNCONNECTED &&
@@ -1655,6 +1663,7 @@ struct Runtime {
       // ports-changed notification. This filter keeps a fixed channel layout,
       // so explicitly recreate its source ports while the node is suspended.
       r.outputPortConfigPending = true;
+      r.virtualMicConfiguredByPolicy = true;
       if (r.state == PW_FILTER_STATE_PAUSED)
         r.rebuildOutputPortsForPortConfig();
     }
@@ -1673,7 +1682,32 @@ struct Runtime {
           SPA_POD_Array(sizeof(float), SPA_TYPE_Float, r.channels,
                         volumes.data())));
       pw_filter_update_params(r.filter, nullptr, &props, 1);
+      if (!r.outputPortConfigPending && r.state == PW_FILTER_STATE_PAUSED)
+        activateVirtualMic(r, "WirePlumber PortConfig");
     }
+  }
+  static void activateVirtualMic(Runtime &r, const char *reason) noexcept {
+    if (r.virtualMicActive || !r.filter || r.cleaning || r.stopping ||
+        r.audioMode.load(std::memory_order_seq_cst) == AudioMode::Faulted)
+      return;
+    const int result = pw_filter_set_active(r.filter, true);
+    if (result < 0) {
+      r.fail("cannot activate virtual microphone after " + std::string(reason) +
+             ": " + std::to_string(result));
+      return;
+    }
+    r.virtualMicActive = true;
+    std::cerr << "skyapod: virtual microphone activated after " << reason
+              << '\n';
+  }
+  static void virtualMicActivationTimeout(void *data, uint64_t) {
+    auto &r = *static_cast<Runtime *>(data);
+    // A running session manager owns device-format negotiation. Keep the
+    // source inactive until its PortConfig transaction completes. Without a
+    // session manager, fixed DSP ports can be started directly after a short
+    // startup grace period.
+    if (!r.wirePlumberPresent && !r.virtualMicConfiguredByPolicy)
+      activateVirtualMic(r, "standalone startup fallback");
   }
   static void coreError(void *data, uint32_t id, int, int res,
                         const char *message) {
@@ -1768,6 +1802,13 @@ struct Runtime {
                      const char *type, uint32_t version,
                      const spa_dict *props) {
     auto &r = *static_cast<Runtime *>(data);
+    if (type && props && std::strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+      const auto application = get(props, "application.name");
+      const auto binary = get(props, "application.process.binary");
+      if (application == "WirePlumber" || application == "wireplumber" ||
+          binary == "wireplumber")
+        r.wirePlumberPresent = true;
+    }
     if (!r.playbackGraph && type && props &&
         std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
         get(props, PW_KEY_MEDIA_CLASS) == "Audio/Sink")
@@ -2182,13 +2223,15 @@ struct Runtime {
     defaultRouteTimer = pw_loop_add_timer(loop, defaultRouteReady, this);
     reloadTimer = pw_loop_add_timer(loop, reloadReady, this);
     linkRetryTimer = pw_loop_add_timer(loop, retryLinks, this);
+    virtualMicActivationTimer =
+        pw_loop_add_timer(loop, virtualMicActivationTimeout, this);
     configWatcher = std::make_unique<skyapo::platform::ConfigWatcher>(config);
     configEvent = pw_loop_add_io(loop, configWatcher->fileDescriptor(),
                                  SPA_IO_IN, false, configReady, this);
     if (!rateEvent || !transitionEvent || !pluginLatencyEvent ||
         !processFaultEvent || !sigint || !sigterm || !selectionTimer ||
         !playbackRecoveryTimer || !defaultRouteTimer || !reloadTimer ||
-        !linkRetryTimer || !configEvent)
+        !linkRetryTimer || !virtualMicActivationTimer || !configEvent)
       throw std::runtime_error("cannot create PipeWire loop events");
     timespec interval{1, 0};
     pw_loop_update_timer(loop, selectionTimer, &interval, &interval, false);
@@ -2303,8 +2346,15 @@ struct Runtime {
                         SPA_POD_Bool(false), SPA_PROP_channelVolumes,
                         SPA_POD_Array(sizeof(float), SPA_TYPE_Float, channels,
                                       unityVolumes.data())))};
-    if (pw_filter_connect(filter, PW_FILTER_FLAG_RT_PROCESS, params, 2) < 0)
+    if (pw_filter_connect(
+            filter,
+            static_cast<pw_filter_flags>(PW_FILTER_FLAG_RT_PROCESS |
+                                         PW_FILTER_FLAG_INACTIVE),
+            params, 2) < 0)
       throw std::runtime_error("filter connection failed");
+    timespec activationGrace{0, 500000000};
+    pw_loop_update_timer(loop, virtualMicActivationTimer, &activationGrace,
+                         nullptr, false);
     path = settings::socketPath();
     server = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (server < 0)

@@ -149,6 +149,8 @@ struct PlaybackGraph::Impl {
   spa_hook frontendProxyHook{};
   bool frontendListenerAttached{};
   bool frontendProxyListenerAttached{};
+  bool frontendLinksEnabled{};
+  bool wirePlumberPresent{};
   std::array<uint32_t, MaxChannels> frontendMonitorIds{};
   std::array<uint32_t, MaxChannels> dspInputIds{};
   struct FrontendLink {
@@ -180,6 +182,7 @@ struct PlaybackGraph::Impl {
   spa_hook registryHook{};
   spa_source *formatEvent{};
   spa_source *linkRetryTimer{};
+  spa_source *frontendLinkStartTimer{};
   bool filterListenerAttached{};
   bool streamFilterListenerAttached{};
   bool registryListenerAttached{};
@@ -321,6 +324,14 @@ struct PlaybackGraph::Impl {
       pw_loop_destroy_source(loop, formatEvent);
       formatEvent = nullptr;
       throw std::runtime_error("cannot create playback link retry timer");
+    }
+    frontendLinkStartTimer = pw_loop_add_timer(loop, startFrontendLinks, this);
+    if (!frontendLinkStartTimer) {
+      pw_loop_destroy_source(loop, linkRetryTimer);
+      pw_loop_destroy_source(loop, formatEvent);
+      linkRetryTimer = nullptr;
+      formatEvent = nullptr;
+      throw std::runtime_error("cannot create playback adapter start timer");
     }
     try {
       createFilters();
@@ -505,6 +516,8 @@ struct PlaybackGraph::Impl {
       pw_loop_destroy_source(loop, formatEvent);
     if (linkRetryTimer)
       pw_loop_destroy_source(loop, linkRetryTimer);
+    if (frontendLinkStartTimer)
+      pw_loop_destroy_source(loop, frontendLinkStartTimer);
   }
 
   void scheduleLinkRetry() {
@@ -734,6 +747,7 @@ struct PlaybackGraph::Impl {
   }
 
   void destroyFrontend() noexcept {
+    frontendLinksEnabled = false;
     if (frontendListenerAttached) {
       spa_hook_remove(&frontendHook);
       frontendListenerAttached = false;
@@ -755,6 +769,7 @@ struct PlaybackGraph::Impl {
 
   void createFrontend(const std::string &positions) {
     frontendPositions = positions;
+    frontendLinksEnabled = false;
     frontendControlsRestored = false;
     frontendRestoreScalar = frontendScalarMetadata;
     frontendRestoreMuted = sinkMuted.load(std::memory_order_acquire);
@@ -826,8 +841,17 @@ struct PlaybackGraph::Impl {
               for (unsigned channel = 0; channel < self.channels; ++channel)
                 if (port.channel == self.ports[channel].channel)
                   self.frontendMonitorIds[channel] = port.id;
-          for (unsigned channel = 0; channel < self.channels; ++channel)
-            self.createFrontendLink(channel);
+          if (self.wirePlumberPresent) {
+            // WirePlumber 0.4 configures Audio/Sink adapters immediately after
+            // discovery. Starting this adapter through monitor links before
+            // that transaction completes makes Format/PortConfig fail with
+            // EIO. Let policy configure it before starting our graph.
+            timespec delay{0, 500000000};
+            pw_loop_update_timer(self.loop, self.frontendLinkStartTimer, &delay,
+                                 nullptr, false);
+          } else {
+            self.enableFrontendLinks();
+          }
         },
         self.controlCallbackFailed, self.faulted);
   }
@@ -870,6 +894,17 @@ struct PlaybackGraph::Impl {
         self.controlCallbackFailed, self.faulted);
   }
 
+  static void startFrontendLinks(void *data, uint64_t) noexcept {
+    auto &self = *static_cast<Impl *>(data);
+    detail::invokeControlCallback(
+        [&] {
+          self.frontendLinksEnabled = true;
+          for (unsigned channel = 0; channel < self.channels; ++channel)
+            self.createFrontendLink(channel);
+        },
+        self.controlCallbackFailed, self.faulted);
+  }
+
   void destroyFrontendLink(unsigned channel) noexcept {
     auto &link = frontendLinks[channel];
     if (link.linkListenerAttached)
@@ -887,7 +922,8 @@ struct PlaybackGraph::Impl {
 
   void createFrontendLink(unsigned channel) {
     auto &link = frontendLinks[channel];
-    if (destroying || link.proxy || frontendId == SPA_ID_INVALID ||
+    if (destroying || !frontendLinksEnabled || link.proxy ||
+        frontendId == SPA_ID_INVALID ||
         frontendMonitorIds[channel] == SPA_ID_INVALID ||
         dspInputIds[channel] == SPA_ID_INVALID)
       return;
@@ -1553,6 +1589,14 @@ struct PlaybackGraph::Impl {
 
   static void handleGlobal(Impl &self, uint32_t id, const char *type,
                            const spa_dict *props) {
+    if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+      const auto application = property(props, "application.name");
+      const auto binary = property(props, "application.process.binary");
+      if (application == "WirePlumber" || application == "wireplumber" ||
+          binary == "wireplumber")
+        self.wirePlumberPresent = true;
+      return;
+    }
     if (props && type && std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0 &&
         id == self.frontendId)
       return;
@@ -1658,6 +1702,12 @@ struct PlaybackGraph::Impl {
       }
       return;
     }
+  }
+
+  void enableFrontendLinks() {
+    frontendLinksEnabled = true;
+    for (unsigned channel = 0; channel < channels; ++channel)
+      createFrontendLink(channel);
   }
 
   void considerSink(uint32_t id, const spa_dict *props) {
