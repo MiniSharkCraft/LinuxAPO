@@ -576,6 +576,19 @@ bool rebaseRelativeIncludes(ConfigFile &config, const QString &sourcePath,
   return true;
 }
 
+bool refersToSameConfigFile(const QString &firstPath,
+                            const QString &secondPath) {
+  if (firstPath.isEmpty() || secondPath.isEmpty())
+    return false;
+  const auto normalizedPath = [](const QString &path) {
+    const QFileInfo info(path);
+    const QString canonical = info.canonicalFilePath();
+    return QDir::cleanPath(canonical.isEmpty() ? info.absoluteFilePath()
+                                               : canonical);
+  };
+  return normalizedPath(firstPath) == normalizedPath(secondPath);
+}
+
 } // namespace
 
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
@@ -1152,6 +1165,8 @@ void MainWindow::analyzeResponse() {
   const bool useCurrentFile = responseSourceCombo->currentData().toBool();
   const quint64 requestedRevision = configRevision;
   const QString sourcePath = useCurrentFile ? configPath : defaultConfigPath();
+  const bool sourceTracksEditor =
+      useCurrentFile || refersToSameConfigFile(sourcePath, configPath);
   const QString sourceName =
       useCurrentFile ? tr("Current file") : tr("Default config.txt");
   QByteArray contents;
@@ -1204,13 +1219,13 @@ void MainWindow::analyzeResponse() {
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
   const auto startAnalysis = [self, snapshot, snapshotPath, sourceName,
-                              useCurrentFile, requestedRevision, fftFrames](
+                              sourceTracksEditor, requestedRevision, fftFrames](
                                  unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
     auto *worker = QThread::create([self, snapshot, snapshotPath, sourceName,
-                                    useCurrentFile, requestedRevision,
+                                    sourceTracksEditor, requestedRevision,
                                     fftFrames, sampleRate, channels] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
@@ -1218,7 +1233,7 @@ void MainWindow::analyzeResponse() {
         return;
       QMetaObject::invokeMethod(
           self,
-          [self, snapshot, sourceName, useCurrentFile, requestedRevision,
+          [self, snapshot, sourceName, sourceTracksEditor, requestedRevision,
            fftFrames, sampleRate, channels,
            result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
@@ -1226,7 +1241,8 @@ void MainWindow::analyzeResponse() {
               return;
             self->responseButton->setEnabled(true);
             self->responseButton->setText(self->tr("Analyze response"));
-            if (useCurrentFile && self->configRevision != requestedRevision) {
+            if (sourceTracksEditor &&
+                self->configRevision != requestedRevision) {
               self->analysisStatusLabel->setProperty("analysisState", "failed");
               self->analysisStatusLabel->setText(
                   self->tr("Analysis failed: the current configuration "
@@ -1249,8 +1265,7 @@ void MainWindow::analyzeResponse() {
               for (const auto &point : curve.points)
                 if (std::isfinite(point.y()))
                   peakGainDb = std::max(peakGainDb, point.y());
-            self->responseAnalysisUsesCurrentFile = useCurrentFile;
-            self->responseAnalysisRevision = requestedRevision;
+            self->responseAnalysisTracksEditor = sourceTracksEditor;
             self->responseAnalysisHasResult = true;
             self->analysisStatusLabel->setText(
                 self->tr("Calculated response (theoretical)."));
@@ -1270,6 +1285,7 @@ void MainWindow::analyzeResponse() {
                 std::isfinite(peakGainDb) ? self->tr("Peak sampled gain: %1 dB")
                                                 .arg(peakGainDb, 0, 'f', 2)
                                           : self->tr("Peak gain: N/A"));
+            self->updateAnalysisInputChannels(channels);
             self->clearResponsePlot({});
             auto *plot = new ResponsePlot(std::move(result.curves),
                                           self->responsePlotContainer);
@@ -1328,6 +1344,23 @@ void MainWindow::analyzeResponse() {
 #endif
 }
 
+void MainWindow::updateAnalysisInputChannels(unsigned channels) {
+  if (!analysisChannelCombo)
+    return;
+  const QString previousSelection = analysisChannelCombo->currentText();
+  static constexpr const char *channelNames[] = {"L",  "R",  "C",  "LFE",
+                                                 "RL", "RR", "SL", "SR"};
+  QSignalBlocker blocker(analysisChannelCombo);
+  analysisChannelCombo->clear();
+  analysisChannelCombo->addItem(tr("All channels"));
+  for (unsigned channel = 0; channel < channels && channel < 8; ++channel)
+    analysisChannelCombo->addItem(QString::fromLatin1(channelNames[channel]));
+  const int selectedIndex = analysisChannelCombo->findText(previousSelection);
+  analysisChannelCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
+  QSettings().setValue(QStringLiteral("analysis/channel"),
+                       analysisChannelCombo->currentText());
+}
+
 void MainWindow::clearResponsePlot(const QString &message) {
   if (!responsePlotLayout)
     return;
@@ -1346,7 +1379,7 @@ void MainWindow::clearResponsePlot(const QString &message) {
 
 void MainWindow::markResponseAnalysisStale() {
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
-  if (responseAnalysisHasResult && responseAnalysisUsesCurrentFile) {
+  if (responseAnalysisHasResult && responseAnalysisTracksEditor) {
     analysisStatusLabel->setText(
         tr("Stale response: the current configuration changed after this "
            "analysis. Analyze again to update it."));

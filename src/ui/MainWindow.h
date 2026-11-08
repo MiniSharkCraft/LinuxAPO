@@ -54,6 +54,7 @@ private:
   void setRowDiagnostic(int index, const QString &diagnostic);
   void openDiagnosticSource();
   void analyzeResponse();
+  void updateAnalysisInputChannels(unsigned channels);
   void clearResponsePlot(const QString &message);
   void markResponseAnalysisStale();
   void showAbout();
@@ -103,8 +104,7 @@ private:
   bool daemonControlPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};
-  quint64 responseAnalysisRevision{};
-  bool responseAnalysisUsesCurrentFile{};
+  bool responseAnalysisTracksEditor{};
   bool responseAnalysisHasResult{};
   QString saveAsError;
 };

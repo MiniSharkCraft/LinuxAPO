@@ -832,10 +832,16 @@ int main(int argc, char **argv) {
            std::isfinite(responseGainAt1kHz) && responseBinCount == 4096;
   };
   responseSource->setCurrentIndex(0);
+  analysisChannel->setCurrentText("R");
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 6.0) > 0.25 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
+      !responseFormatLabel.contains("1 channel") ||
+      analysisChannel->findText("R") >= 0 ||
+      analysisChannel->currentText() != "All channels" ||
+      liveWindow.findChild<QWidget *>("responsePlot")
+              ->property("selectedInputChannel")
+              .toString() != "All channels") {
     std::cerr << "analysis did not use the saved default config.txt; gain="
               << responseGainAt1kHz << " dB\n";
     return 1;
@@ -873,8 +879,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
-  analysisChannel->setCurrentText("R");
   const bool liveFormatResponseSucceeded = runResponseAndCaptureGain();
+  analysisChannel->setCurrentText("R");
   if (analysisSampleRate->isEnabled() || analysisChannels->isEnabled() ||
       !liveFormatResponseSucceeded ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
@@ -893,6 +899,57 @@ int main(int argc, char **argv) {
     return 1;
   }
   qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+
+  {
+    MainWindow activeDefaultWindow(defaultConfigPath,
+                                   QString::fromLocal8Bit(argv[1]));
+    auto *defaultSource =
+        activeDefaultWindow.findChild<QComboBox *>("analysisSource");
+    auto *defaultAnalyze =
+        activeDefaultWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *defaultStatus =
+        activeDefaultWindow.findChild<QLabel *>("analysisResultStatus");
+    auto *defaultGain =
+        activeDefaultWindow.findChild<QDoubleSpinBox *>("doubleSpinBox");
+    auto *defaultSave = [&activeDefaultWindow] {
+      for (auto *button : activeDefaultWindow.findChildren<QPushButton *>())
+        if (button->text() == "Save")
+          return button;
+      return static_cast<QPushButton *>(nullptr);
+    }();
+    auto *defaultRuntimeFormat =
+        activeDefaultWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    if (!defaultSource || !defaultAnalyze || !defaultStatus || !defaultGain ||
+        !defaultSave || !defaultRuntimeFormat) {
+      std::cerr
+          << "could not prepare the active default-config analysis test\n";
+      return 1;
+    }
+    defaultSource->setCurrentIndex(0);
+    defaultRuntimeFormat->setChecked(false);
+    defaultAnalyze->click();
+    QElapsedTimer defaultAnalysisWait;
+    defaultAnalysisWait.start();
+    while (!defaultStatus->text().startsWith("Calculated response") &&
+           !defaultStatus->text().startsWith("Analysis failed") &&
+           defaultAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!defaultStatus->text().startsWith("Calculated response")) {
+      std::cerr << "default config analysis did not finish before edit\n";
+      return 1;
+    }
+    defaultGain->setValue(defaultGain->value() + 1.0);
+    defaultSave->click();
+    if (!defaultStatus->text().startsWith("Stale response") ||
+        defaultStatus->property("analysisState").toString() != "stale") {
+      std::cerr
+          << "saving the active default config left its old response current\n";
+      return 1;
+    }
+  }
+
   liveGain->setValue(-2.0);
   if (!analysisStatus->text().startsWith("Stale response") ||
       analysisStatus->property("analysisState").toString() != "stale") {
