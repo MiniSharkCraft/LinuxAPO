@@ -348,6 +348,7 @@ struct PlaybackGraph::Impl {
         pw_core_events events{};
         events.version = PW_VERSION_CORE_EVENTS;
         events.done = initialRegistrySyncDone;
+        events.error = coreError;
         return events;
       }();
       if (pw_core_add_listener(core, &coreHook, &coreEvents, this) < 0)
@@ -802,6 +803,13 @@ struct PlaybackGraph::Impl {
           }
         },
         self.controlCallbackFailed, self.faulted);
+  }
+
+  static void coreError(void *, uint32_t id, int sequence, int result,
+                        const char *message) noexcept {
+    std::cerr << "skyapod: playback PipeWire core error (object=" << id
+              << ", sequence=" << sequence << ", result=" << result
+              << "): " << (message ? message : "unspecified error") << '\n';
   }
 
   void destroyFrontend() noexcept {
@@ -2003,6 +2011,11 @@ struct PlaybackGraph::Impl {
     auto &self = *static_cast<Impl *>(data);
     detail::invokeControlCallback(
         [&] {
+          if (id == SPA_PARAM_Format || id == SPA_PARAM_PortConfig) {
+            std::cerr << "skyapod: playback DSP parameter event (id=" << id
+                      << ", port=" << (port ? "set" : "node")
+                      << ", param=" << (param ? "set" : "null") << ")\n";
+          }
           if (port || !param)
             return;
           if (id == SPA_PARAM_Props) {
@@ -2072,6 +2085,11 @@ struct PlaybackGraph::Impl {
     auto &self = *static_cast<Impl *>(data);
     detail::invokeControlCallback(
         [&] {
+          if (id == SPA_PARAM_Format || id == SPA_PARAM_PortConfig) {
+            std::cerr << "skyapod: playback stream parameter event (id=" << id
+                      << ", port=" << (port ? "set" : "node")
+                      << ", param=" << (param ? "set" : "null") << ")\n";
+          }
           if (port || !param)
             return;
           if (id == SPA_PARAM_Props) {
