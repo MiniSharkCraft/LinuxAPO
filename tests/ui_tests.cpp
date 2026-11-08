@@ -39,6 +39,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QProcess>
 #include <QPlainTextEdit>
 #include <QPalette>
@@ -899,6 +900,82 @@ int main(int argc, char **argv) {
     return 1;
   }
   qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+
+  {
+    const QString highGainConfigPath =
+        temporary.filePath("high-gain-response.txt");
+    QFile highGainConfig(highGainConfigPath);
+    if (!highGainConfig.open(QIODevice::WriteOnly) ||
+        highGainConfig.write("Preamp: 70.5 dB\n") != 16) {
+      std::cerr << "could not create high-gain response fixture\n";
+      return 1;
+    }
+    highGainConfig.close();
+    MainWindow highGainWindow(highGainConfigPath,
+                              QString::fromLocal8Bit(argv[1]));
+    auto *highGainAnalyze =
+        highGainWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *highGainSource =
+        highGainWindow.findChild<QComboBox *>("analysisSource");
+    auto *highGainLiveFormat =
+        highGainWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *highGainChannels =
+        highGainWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *highGainStatus =
+        highGainWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!highGainAnalyze || !highGainSource || !highGainLiveFormat ||
+        !highGainChannels || !highGainStatus) {
+      std::cerr << "high-gain response controls are missing\n";
+      return 1;
+    }
+    highGainSource->setCurrentIndex(1);
+    highGainLiveFormat->setChecked(false);
+    highGainChannels->setValue(1);
+    highGainWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    highGainAnalyze->click();
+    QElapsedTimer highGainWait;
+    highGainWait.start();
+    while (!highGainStatus->text().startsWith("Calculated response") &&
+           !highGainStatus->text().startsWith("Analysis failed") &&
+           highGainWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    auto *highGainPlot = highGainWindow.findChild<QWidget *>("responsePlot");
+    if (!highGainPlot ||
+        std::abs(highGainPlot->property("responseAt1000HzLtoLDb").toDouble() -
+                 70.5) > 0.1) {
+      std::cerr << "high-gain response analysis did not preserve the 70.5 dB "
+                   "magnitude\n";
+      return 1;
+    }
+    QImage rendered(highGainPlot->size(), QImage::Format_ARGB32_Premultiplied);
+    rendered.fill(Qt::transparent);
+    highGainPlot->render(&rendered);
+    const double plotWidth = highGainPlot->width() - 88.0;
+    const int oneKhzX = static_cast<int>(std::lround(
+        68.0 + std::log(1000.0 / 20.0) / std::log(24000.0 / 20.0) * plotWidth));
+    int blueResponseY = -1;
+    int blueAreaPixels = 0;
+    for (int y = 0; y < rendered.height(); ++y) {
+      const QColor pixel = rendered.pixelColor(oneKhzX, y);
+      if (pixel.blue() > pixel.green() + 50 && pixel.green() > pixel.red() + 40)
+        blueResponseY = y;
+      for (int x = 68; x < rendered.width() - 20; ++x) {
+        const QColor areaPixel = rendered.pixelColor(x, y);
+        if (areaPixel.blue() > areaPixel.red() + 20 &&
+            areaPixel.blue() > areaPixel.green() + 12)
+          ++blueAreaPixels;
+      }
+    }
+    if (blueResponseY <= 24 || blueAreaPixels <= highGainPlot->width() * 8) {
+      std::cerr << "high-gain response is clipped or has no filled response "
+                   "area: curveY="
+                << blueResponseY << " filledPixels=" << blueAreaPixels << '\n';
+      return 1;
+    }
+  }
 
   {
     MainWindow activeDefaultWindow(defaultConfigPath,

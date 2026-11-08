@@ -631,21 +631,40 @@ protected:
     painter.fillRect(rect(), palette().base());
     const QRectF plot(68, 18, width() - 88, height() - 64);
     constexpr double minHz = 20.0, maxHz = 24000.0;
-    constexpr double minDb = -24.0, maxDb = 12.0;
+    double minDb = -24.0;
+    double maxDb = 12.0;
+    for (const auto &curve : curves) {
+      if (selectedInputChannel != QStringLiteral("All channels") &&
+          !curve.channel.startsWith(selectedInputChannel +
+                                    QStringLiteral(" → ")))
+        continue;
+      for (const auto &point : curve.points) {
+        if (point.x() >= minHz && point.x() <= maxHz &&
+            std::isfinite(point.y())) {
+          minDb = std::min(minDb, point.y() - 6.0);
+          maxDb = std::max(maxDb, point.y() + 6.0);
+        }
+      }
+    }
+    minDb = std::floor(minDb / 6.0) * 6.0;
+    maxDb = std::ceil(maxDb / 6.0) * 6.0;
     const auto xFor = [&plot](double hz) {
       return plot.left() +
              std::log(hz / minHz) / std::log(maxHz / minHz) * plot.width();
     };
-    const auto yFor = [&plot](double db) {
+    const auto yFor = [&plot, minDb, maxDb](double db) {
       return plot.bottom() - (db - minDb) / (maxDb - minDb) * plot.height();
     };
     painter.setPen(QPen(palette().mid().color(), 1));
-    for (int db = -24; db <= 12; db += 6) {
+    const double dbRange = maxDb - minDb;
+    const double tickStep = std::max(6.0, std::ceil(dbRange / 72.0) * 6.0);
+    for (double db = std::ceil(minDb / tickStep) * tickStep; db <= maxDb;
+         db += tickStep) {
       const double y = yFor(db);
       painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
       painter.drawText(QRectF(4, y - 9, 56, 18),
                        Qt::AlignRight | Qt::AlignVCenter,
-                       QStringLiteral("%1 dB").arg(db));
+                       QStringLiteral("%1 dB").arg(static_cast<int>(db)));
     }
     for (const double hz : {20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0,
                             5000.0, 10000.0, 20000.0}) {
@@ -668,19 +687,33 @@ protected:
                                     QStringLiteral(" → ")))
         continue;
       QPainterPath path;
+      QPainterPath area;
       bool started = false;
+      double firstX = 0.0;
+      double lastX = 0.0;
       for (const auto &point : curve.points) {
-        if (point.x() < minHz || point.x() > maxHz)
+        if (point.x() < minHz || point.x() > maxHz || !std::isfinite(point.y()))
           continue;
-        const QPointF mapped(xFor(point.x()),
-                             yFor(std::clamp(point.y(), minDb, maxDb)));
+        const QPointF mapped(xFor(point.x()), yFor(point.y()));
         if (!started) {
           path.moveTo(mapped);
+          area.moveTo(mapped);
+          firstX = mapped.x();
           started = true;
         } else {
           path.lineTo(mapped);
+          area.lineTo(mapped);
         }
+        lastX = mapped.x();
       }
+      if (!started)
+        continue;
+      area.lineTo(lastX, yFor(0.0));
+      area.lineTo(firstX, yFor(0.0));
+      area.closeSubpath();
+      QColor fillColor = colors[curveIndex % colors.size()];
+      fillColor.setAlpha(55);
+      painter.fillPath(area, fillColor);
       painter.setPen(QPen(colors[curveIndex % colors.size()], 2));
       painter.drawPath(path);
       painter.drawText(QPointF(plot.left() + curveIndex * 110, plot.top() + 14),
