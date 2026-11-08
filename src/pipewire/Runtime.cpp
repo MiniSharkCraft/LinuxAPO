@@ -160,7 +160,11 @@ struct Runtime {
   std::unique_ptr<skyapo::pipewire::PlaybackGraph> playbackGraph;
   bool defaultMetadataSnapshotReady{};
   bool defaultMetadataPresent{};
+  bool configuredDefaultMetadataPresent{};
   bool originalDefaultMetadataCaptured{};
+  bool originalConfiguredDefaultCaptured{};
+  bool defaultRouteActiveConfirmed{};
+  bool defaultRouteConfiguredConfirmed{};
   bool defaultRouteAttempted{};
   bool defaultRoutePending{};
   bool defaultRouteOwned{};
@@ -176,11 +180,17 @@ struct Runtime {
   std::string defaultMetadataType;
   std::string defaultMetadataValue;
   std::string defaultMetadataName;
+  std::string configuredDefaultMetadataType;
+  std::string configuredDefaultMetadataValue;
+  std::string configuredDefaultMetadataName;
   std::chrono::steady_clock::time_point defaultRouteLastWrite{};
   std::chrono::steady_clock::time_point defaultRouteRecoveryReadySince{};
   std::string originalDefaultMetadataType;
   std::string originalDefaultMetadataValue;
   bool originalDefaultMetadataPresent{};
+  std::string originalConfiguredDefaultMetadataType;
+  std::string originalConfiguredDefaultMetadataValue;
+  bool originalConfiguredDefaultMetadataPresent{};
   std::string defaultRouteError;
   settings::DeviceSelection outputSelection;
   std::string playbackError;
@@ -307,25 +317,85 @@ struct Runtime {
   static int metadataProperty(void *data, uint32_t subject, const char *key,
                               const char *type, const char *value) {
     auto &r = *static_cast<Runtime *>(data);
-    if (subject != PW_ID_CORE || !key ||
-        std::strcmp(key, "default.audio.sink") != 0)
+    if (subject != PW_ID_CORE || !key)
       return 0;
-    const auto previousName = r.defaultMetadataName;
-    r.defaultMetadataPresent = value != nullptr;
-    r.defaultMetadataType = type ? type : "";
-    r.defaultMetadataValue = value ? value : "";
+    const bool configuredDefault =
+        std::strcmp(key, "default.configured.audio.sink") == 0;
+    if (!configuredDefault && std::strcmp(key, "default.audio.sink") != 0)
+      return 0;
+    if (configuredDefault)
+      r.wirePlumberPresent = true;
+    auto &metadataPresent = configuredDefault
+                                ? r.configuredDefaultMetadataPresent
+                                : r.defaultMetadataPresent;
+    auto &metadataType = configuredDefault ? r.configuredDefaultMetadataType
+                                           : r.defaultMetadataType;
+    auto &metadataValue = configuredDefault ? r.configuredDefaultMetadataValue
+                                            : r.defaultMetadataValue;
+    auto &metadataName = configuredDefault ? r.configuredDefaultMetadataName
+                                           : r.defaultMetadataName;
+    const auto keyName = configuredDefault ? "default.configured.audio.sink"
+                                           : "default.audio.sink";
+    const auto previousName = metadataName;
+    metadataPresent = value != nullptr;
+    metadataType = type ? type : "";
+    metadataValue = value ? value : "";
     std::string name;
-    r.defaultMetadataName = value &&
-                                    skyapo::pipewire::DefaultSinkVolumeMonitor::
-                                        parseDefaultNodeMetadata(value, name)
-                                ? std::move(name)
-                                : std::string{};
-    if (r.defaultMetadataName != previousName)
-      std::cerr << "skyapod: PipeWire default sink metadata changed from '"
-                << previousName << "' to '" << r.defaultMetadataName
+    metadataName = value && skyapo::pipewire::DefaultSinkVolumeMonitor::
+                                parseDefaultNodeMetadata(value, name)
+                       ? std::move(name)
+                       : std::string{};
+    if (metadataName != previousName)
+      std::cerr << "skyapod: PipeWire " << keyName << " changed from '"
+                << previousName << "' to '" << metadataName
                 << "' (route-owned=" << r.defaultRouteOwned
                 << ", route-write-pending=" << r.defaultRouteSetRequested
                 << ")\n";
+
+    if (r.defaultRouteSetRequested && metadataName == "skyapo.playback") {
+      if (configuredDefault)
+        r.defaultRouteConfiguredConfirmed = true;
+      else
+        r.defaultRouteActiveConfirmed = true;
+      if (r.defaultRouteActiveConfirmed &&
+          (!r.wirePlumberPresent || r.defaultRouteConfiguredConfirmed)) {
+        r.defaultRoutePending = false;
+        r.defaultRouteSetRequested = false;
+        r.defaultRouteOwned = true;
+        r.defaultRouteError.clear();
+        r.defaultRouteSequence = -1;
+      }
+    }
+
+    if (configuredDefault) {
+      if (r.defaultRouteOwned && !r.defaultRouteRestoring &&
+          metadataName != "skyapo.playback") {
+        const bool routeWriteSettling =
+            r.defaultRouteLastWrite.time_since_epoch().count() != 0 &&
+            std::chrono::steady_clock::now() - r.defaultRouteLastWrite <
+                std::chrono::seconds(1);
+        const bool playbackUnavailable =
+            r.playbackGraph && !r.playbackGraph->ready();
+        if (playbackUnavailable || r.defaultRouteRecoveryPending ||
+            routeWriteSettling) {
+          if (playbackUnavailable) {
+            r.defaultRouteRecoveryPending = true;
+            r.defaultRouteRecoveryReadySince = {};
+          }
+          std::cerr << "skyapod: retaining SkyAPO as WirePlumber's configured "
+                       "playback route while the graph settles\n";
+          r.reassertOwnedDefaultRoute();
+          if (r.defaultRouteRecoveryPending)
+            r.scheduleDefaultRouteRecoveryCheck();
+          return 0;
+        }
+        r.defaultRouteOwned = false;
+        r.defaultRouteSetRequested = false;
+        r.defaultRouteOverridden = true;
+      }
+      return 0;
+    }
+
     if (r.defaultRouteOwned && !r.defaultRouteRestoring &&
         r.defaultMetadataName != "skyapo.playback") {
       const bool routeWriteSettling =
@@ -351,20 +421,6 @@ struct Runtime {
       r.defaultRouteSetRequested = false;
       r.defaultRouteOverridden = true;
     }
-    if (r.defaultRouteSetRequested &&
-        r.defaultMetadataName == "skyapo.playback") {
-      r.defaultRoutePending = false;
-      r.defaultRouteSetRequested = false;
-      r.defaultRouteOwned = true;
-      r.defaultRouteError.clear();
-      r.defaultRouteSequence = -1;
-    }
-    if (r.defaultRoutePending && r.defaultMetadataName == "skyapo.playback") {
-      r.defaultRoutePending = false;
-      r.defaultRouteOwned = true;
-      r.defaultRouteError.clear();
-      r.defaultRouteSequence = -1;
-    }
     if (!r.playbackGraph)
       r.schedulePlaybackRecovery();
     return 0;
@@ -388,12 +444,22 @@ struct Runtime {
       r.scheduleDefaultRouteUpdate();
     }
     if (r.defaultRouteSequence == sequence) {
-      r.defaultRoutePending = false;
       if (r.defaultMetadataName == "skyapo.playback")
+        r.defaultRouteActiveConfirmed = true;
+      if (!r.wirePlumberPresent ||
+          r.configuredDefaultMetadataName == "skyapo.playback")
+        r.defaultRouteConfiguredConfirmed = true;
+      if (r.defaultRouteActiveConfirmed && r.defaultRouteConfiguredConfirmed) {
+        r.defaultRoutePending = false;
+        r.defaultRouteSetRequested = false;
         r.defaultRouteOwned = true;
-      else
+        r.defaultRouteError.clear();
+      } else {
+        r.defaultRoutePending = false;
         r.defaultRouteError =
-            "PipeWire did not confirm skyapo.playback as the default sink";
+            "PipeWire/WirePlumber did not confirm SkyAPO as the default "
+            "playback route";
+      }
       r.defaultRouteSequence = -1;
     }
     if (r.defaultRestoreSequence == sequence)
@@ -422,8 +488,19 @@ struct Runtime {
       originalDefaultMetadataValue = defaultMetadataValue;
       originalDefaultMetadataCaptured = true;
     }
+    if (wirePlumberPresent && !originalConfiguredDefaultCaptured) {
+      originalConfiguredDefaultMetadataPresent =
+          configuredDefaultMetadataPresent;
+      originalConfiguredDefaultMetadataType = configuredDefaultMetadataType;
+      originalConfiguredDefaultMetadataValue = configuredDefaultMetadataValue;
+      originalConfiguredDefaultCaptured = true;
+    }
 
-    if (defaultMetadataName == "skyapo.playback") {
+    const bool activeIsSkyApo = defaultMetadataName == "skyapo.playback";
+    const bool configuredIsSkyApo =
+        !wirePlumberPresent ||
+        configuredDefaultMetadataName == "skyapo.playback";
+    if (activeIsSkyApo && configuredIsSkyApo) {
       defaultRouteAttempted = true;
       defaultRouteError =
           "SkyAPO Playback is already the system default; this daemon did not "
@@ -447,6 +524,10 @@ struct Runtime {
       return;
     defaultRoutePending = true;
     defaultRouteSetRequested = true;
+    defaultRouteActiveConfirmed = defaultMetadataName == "skyapo.playback";
+    defaultRouteConfiguredConfirmed =
+        !wirePlumberPresent ||
+        configuredDefaultMetadataName == "skyapo.playback";
     const int result = pw_metadata_set_property(
         defaultMetadata, PW_ID_CORE, "default.audio.sink", "Spa:String:JSON",
         "{\"name\":\"skyapo.playback\"}");
@@ -458,6 +539,23 @@ struct Runtime {
           spa_strerror(result);
       std::cerr << "skyapod: " << defaultRouteError << '\n';
       return;
+    }
+    if (wirePlumberPresent) {
+      const int configuredResult = pw_metadata_set_property(
+          defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
+          "Spa:String:JSON", "{\"name\":\"skyapo.playback\"}");
+      if (configuredResult < 0) {
+        defaultRoutePending = false;
+        defaultRouteSetRequested = false;
+        defaultRouteError =
+            std::string("cannot update WirePlumber's configured playback "
+                        "default: ") +
+            spa_strerror(configuredResult);
+        std::cerr << "skyapod: " << defaultRouteError << '\n';
+        return;
+      }
+      std::cerr << "skyapod: requesting WirePlumber configured default sink "
+                   "skyapo.playback\n";
     }
     defaultRouteLastWrite = std::chrono::steady_clock::now();
 
@@ -540,12 +638,21 @@ struct Runtime {
       return;
 
     defaultRouteRestoring = true;
-    const int result = pw_metadata_set_property(
+    int result = pw_metadata_set_property(
         defaultMetadata, PW_ID_CORE, "default.audio.sink",
         originalDefaultMetadataPresent ? originalDefaultMetadataType.c_str()
                                        : nullptr,
         originalDefaultMetadataPresent ? originalDefaultMetadataValue.c_str()
                                        : nullptr);
+    if (result >= 0 && originalConfiguredDefaultCaptured)
+      result = pw_metadata_set_property(
+          defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
+          originalConfiguredDefaultMetadataPresent
+              ? originalConfiguredDefaultMetadataType.c_str()
+              : nullptr,
+          originalConfiguredDefaultMetadataPresent
+              ? originalConfiguredDefaultMetadataValue.c_str()
+              : nullptr);
     if (result < 0) {
       defaultRouteRestoring = false;
       std::cerr << "skyapod: cannot restore PipeWire default sink metadata: "
@@ -564,12 +671,23 @@ struct Runtime {
     defaultRestoreSequence = -1;
     defaultRouteRestoring = false;
     defaultRouteOwned = false;
-    if (defaultMetadataPresent != originalDefaultMetadataPresent ||
+    const bool activeMetadataNotRestored =
+        defaultMetadataPresent != originalDefaultMetadataPresent ||
         (defaultMetadataPresent &&
          (defaultMetadataType != originalDefaultMetadataType ||
-          defaultMetadataValue != originalDefaultMetadataValue)))
+          defaultMetadataValue != originalDefaultMetadataValue));
+    const bool configuredMetadataNotRestored =
+        originalConfiguredDefaultCaptured &&
+        (configuredDefaultMetadataPresent !=
+             originalConfiguredDefaultMetadataPresent ||
+         (configuredDefaultMetadataPresent &&
+          (configuredDefaultMetadataType !=
+               originalConfiguredDefaultMetadataType ||
+           configuredDefaultMetadataValue !=
+               originalConfiguredDefaultMetadataValue)));
+    if (activeMetadataNotRestored || configuredMetadataNotRestored)
       std::cerr << "skyapod: PipeWire did not confirm restoration of the "
-                   "previous default sink metadata\n";
+                   "previous playback default metadata\n";
   }
   bool sameFormat(const Engine &a, const Engine &b) const noexcept {
     return a.sampleRate() == b.sampleRate() && a.channels() == b.channels() &&
@@ -1808,9 +1926,11 @@ struct Runtime {
     if (type && props && std::strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
       const auto application = get(props, "application.name");
       const auto binary = get(props, "application.process.binary");
-      if (application == "WirePlumber" || application == "wireplumber" ||
-          binary == "wireplumber") {
+      if (application.find("WirePlumber") != std::string::npos ||
+          application.find("wireplumber") != std::string::npos ||
+          binary.find("wireplumber") != std::string::npos) {
         r.wirePlumberPresent = true;
+        std::cerr << "skyapod: detected WirePlumber session manager client\n";
         if (r.playbackGraph)
           r.playbackGraph->sessionManagerDetected();
       }
@@ -1885,6 +2005,9 @@ struct Runtime {
       r.defaultMetadataId = SPA_ID_INVALID;
       r.defaultMetadataSnapshotReady = false;
       r.originalDefaultMetadataCaptured = false;
+      r.originalConfiguredDefaultCaptured = false;
+      r.defaultRouteActiveConfirmed = false;
+      r.defaultRouteConfiguredConfirmed = false;
       r.defaultRouteOwned = false;
       r.defaultRoutePending = false;
       r.defaultRouteAttempted = false;
@@ -1894,10 +2017,17 @@ struct Runtime {
       r.originalDefaultMetadataPresent = false;
       r.originalDefaultMetadataType.clear();
       r.originalDefaultMetadataValue.clear();
+      r.originalConfiguredDefaultMetadataPresent = false;
+      r.originalConfiguredDefaultMetadataType.clear();
+      r.originalConfiguredDefaultMetadataValue.clear();
       r.defaultMetadataPresent = false;
       r.defaultMetadataType.clear();
       r.defaultMetadataValue.clear();
       r.defaultMetadataName.clear();
+      r.configuredDefaultMetadataPresent = false;
+      r.configuredDefaultMetadataType.clear();
+      r.configuredDefaultMetadataValue.clear();
+      r.configuredDefaultMetadataName.clear();
       r.defaultRouteError = "PipeWire default metadata disappeared";
     }
     if (id == r.device.id)

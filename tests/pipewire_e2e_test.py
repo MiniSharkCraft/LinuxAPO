@@ -30,6 +30,29 @@ def run(args, env, timeout=8, check=True):
     return result
 
 
+def metadata_value(raw, key):
+    """Return one PipeWire metadata value from pw-metadata output."""
+    for line in raw.splitlines():
+        if f"key:'{key}' " in line:
+            match = re.search(
+                rf"key:'{re.escape(key)}'\s+value:'(.*?)'(?:\s+type:'|$)",
+                line)
+            return match.group(1) if match else None
+    return None
+
+
+def metadata_node_name(raw, key):
+    """Return a PipeWire node name encoded in a JSON metadata value."""
+    value = metadata_value(raw, key)
+    if value is None:
+        return None
+    try:
+        node = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return node.get("name") if isinstance(node, dict) else None
+
+
 @lru_cache(maxsize=None)
 def wireplumber_supports_profiles(executable):
     """Return whether this WirePlumber uses the 0.5 profile/logging API."""
@@ -1094,6 +1117,8 @@ def main():
                     raise RuntimeError(
                         "WirePlumber did not confirm the initial playback target "
                         f"through wpctl:\n{default_metadata}")
+                initial_configured_sink = metadata_node_name(
+                    default_metadata, "default.configured.audio.sink")
 
             source_process = start_test_source(
                 source, mono, env, source_log,
@@ -1527,6 +1552,16 @@ def main():
                     raise RuntimeError(
                         "PipeWire did not route the system default through SkyAPO "
                         f"within 5 seconds:\n{status}")
+                if stable_playback_target:
+                    default_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if metadata_node_name(
+                            default_metadata,
+                            "default.configured.audio.sink") != "skyapo.playback":
+                        raise RuntimeError(
+                            "WirePlumber's configured playback default did not "
+                            "follow SkyAPO; hotplug can bypass DSP:\n"
+                            f"{default_metadata}")
                 if startup_playback_recovery:
                     wait_for_playback_application_route(
                         second_source_process, pw_dump, env, channel_count)
@@ -2149,6 +2184,17 @@ def main():
                             raise RuntimeError(
                                 "playback graph did not rebind to the recreated selected sink:\n"
                                 f"{rebound_status}")
+                        if stable_playback_target:
+                            default_metadata = run(
+                                [metadata, "-n", "default"], env,
+                                timeout=5).stdout
+                            if metadata_node_name(
+                                    default_metadata,
+                                    "default.configured.audio.sink") != "skyapo.playback":
+                                raise RuntimeError(
+                                    "WirePlumber lost SkyAPO as the configured "
+                                    "default during target recovery; playback "
+                                    "could bypass DSP:\n" + default_metadata)
                         wait_for_playback_application_route(
                             second_source_process, pw_dump, env, channel_count)
                         recovery_consumer_args = consumer_args.copy()
@@ -4539,6 +4585,13 @@ def main():
                     raise RuntimeError(
                         "orderly daemon shutdown did not restore the original "
                         "PipeWire default sink metadata:\n" + default_metadata)
+                if (stable_playback_target and
+                        metadata_node_name(default_metadata,
+                                           "default.configured.audio.sink") !=
+                        initial_configured_sink):
+                    raise RuntimeError(
+                        "orderly daemon shutdown did not restore WirePlumber's "
+                        "configured playback default:\n" + default_metadata)
             state_layout = {
                 "plugin-live-param": ("clap-state", "*.clapstate", "CLAP"),
                 "clap-state-restart": ("clap-state", "*.clapstate", "CLAP"),
