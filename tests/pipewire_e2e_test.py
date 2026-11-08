@@ -1625,19 +1625,20 @@ def main():
                 print("Observed the DSP initialization status transition.")
             else:
                 print("DSP negotiated before the first status poll.")
-            # The virtual microphone has no consumer yet at this point. The
-            # exception plugin is exercised only after the independent
-            # recorder below links to the source, so startup must remain
-            # allocation-free for every mode.
-            callback_allocations = 0
+            # The VST3 exception may be reached before or after this status
+            # poll, depending on when PipeWire first schedules the source.
+            # Assert its exact allocation count only after the independent
+            # recorder has consumed the stream below.
+            callback_allocations = None if vst3_exception_failure else 0
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
                 f"Channel positions: {channel_positions}",
                 f"Active capture links: {channel_count}/{channel_count}",
                 "Format: F32 planar DSP", f"Sample rate: {sample_rate} Hz",
                 "Quantum: 1024",
-                f"Callback allocations: {callback_allocations}",
-                f"Callback deallocations: {callback_allocations}",
+                *([] if callback_allocations is None else [
+                    f"Callback allocations: {callback_allocations}",
+                    f"Callback deallocations: {callback_allocations}"]),
                 (("Loudness volume endpoint: " +
                   ("skyapo.test.null-target (effective 0 dB)"
                    if wireplumber_playback else
