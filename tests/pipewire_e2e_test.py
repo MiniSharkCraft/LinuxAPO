@@ -1435,6 +1435,15 @@ def main():
                         raise RuntimeError(
                             f"{error}\n--- graph at first-fault monitor "
                             f"readiness failure ---\n{graph_summary}") from error
+            if lv2_pdc_config_commit_race or delay_pdc or (lv2_pdc_recovery and
+                             not playback_pdc_recovery):
+                expected_filters = 4
+            elif vst2_live or playback_pdc_recovery:
+                expected_filters = 1
+            elif lv2_pdc_final:
+                expected_filters = 3
+            else:
+                expected_filters = 2 if plugin_chain else 1
             deadline = time.monotonic() + 15
             status = ""
             observed_dsp_initialization = False
@@ -1467,7 +1476,8 @@ def main():
                          not callback_transition_exception
                          else (plugin_chain or delay_pdc or convolution or
                                ("DSP amplitude ratio: 1" if playback_stage else
-                                "DSP amplitude ratio: 0.501187") in status))):
+                                "DSP amplitude ratio: 0.501187") in status)) and
+                        f"Filters: {expected_filters}" in status):
                     if mode in ("playback-preamp", "playback-wireplumber",
                                 "playback-wireplumber-volume",
                                 "playback-wireplumber-stage",
@@ -1597,15 +1607,6 @@ def main():
                 print("Observed the DSP initialization status transition.")
             else:
                 print("DSP negotiated before the first status poll.")
-            if lv2_pdc_config_commit_race or delay_pdc or (lv2_pdc_recovery and
-                             not playback_pdc_recovery):
-                expected_filters = 4
-            elif vst2_live or playback_pdc_recovery:
-                expected_filters = 1
-            elif lv2_pdc_final:
-                expected_filters = 3
-            else:
-                expected_filters = 2 if plugin_chain else 1
             callback_allocations = 1 if vst3_exception_failure else 0
             expected_status = [
                 f"Channels: {channel_count}", f"Filters: {expected_filters}",
