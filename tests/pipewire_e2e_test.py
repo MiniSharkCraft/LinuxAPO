@@ -235,6 +235,25 @@ def stop(process, label):
             f"{label} did not stop cleanly within 20 seconds after SIGTERM")
 
 
+def wait_for_daemon_log(daemon_process, daemon_log, start_offset, marker,
+                        label, timeout=8):
+    """Wait for a daemon log marker without racing its shared file offset."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if daemon_process.poll() is not None:
+            raise RuntimeError(
+                f"skyapod exited while waiting for {label} "
+                f"(exit status {daemon_process.returncode})")
+        size = os.fstat(daemon_log.fileno()).st_size
+        if size > start_offset:
+            length = min(size - start_offset, 65536)
+            output = os.pread(daemon_log.fileno(), length, start_offset)
+            if marker.encode() in output:
+                return
+        time.sleep(0.05)
+    raise RuntimeError(f"skyapod did not report {label} within {timeout} seconds")
+
+
 def wait_for_consumer_ready(process, label, timeout=8,
                             marker="SKYAPO_CONSUMER_READY"):
     if process.stdout is None:
@@ -4267,6 +4286,7 @@ def main():
                          "pre-restart playback target manager")
                     null_target_manager = None
                 print("Stopping selected deterministic source…", flush=True)
+                daemon_log_offset = os.fstat(daemon_log.fileno()).st_size
                 stop(source_process, "deterministic capture source")
                 source_process = None
                 deadline = time.monotonic() + 8
@@ -4286,6 +4306,16 @@ def main():
                     raise RuntimeError(
                         "daemon status socket remained available after its "
                         "selected source disappeared")
+                if server_restart:
+                    # Socket disappearance means Runtime teardown has begun,
+                    # not that its destructor has finished draining pending
+                    # PipeWire metadata syncs. Wait for main.cpp's retry log,
+                    # which is emitted only after runPipeWire has unwound and
+                    # Runtime cleanup is complete, before stopping the server.
+                    wait_for_daemon_log(
+                        daemon_process, daemon_log, daemon_log_offset,
+                        "; retrying in 2 seconds",
+                        "selected-source Runtime teardown")
 
                 if server_restart:
                     print("Stopping private PipeWire server…", flush=True)
