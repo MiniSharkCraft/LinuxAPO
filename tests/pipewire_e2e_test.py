@@ -879,7 +879,15 @@ def main():
         if output_switch:
             cli_config = config_home / "skyapo" / "config.txt"
             cli_config.parent.mkdir()
-            cli_config.write_text("Preamp: -6 dB\n")
+            cli_config.write_text(
+                "Stage: capture\n"
+                "Preamp: -6 dB\n"
+                "Stage: post-mix\n"
+                "Device: device.serial=SKYAPO-OUTPUT-A\n"
+                "Preamp: -6 dB\n"
+                "Device: device.serial=SKYAPO-OUTPUT-B\n"
+                "Preamp: -3 dB\n"
+                "Preamp: -3 dB\n")
             dsp_config = cli_config
         if transition_format:
             transition_config.write_text("Preamp: -6 dB\n")
@@ -1102,6 +1110,11 @@ def main():
                     f'audio.position = "[ {channel_positions} ]" node.virtual = true '
                     'monitor.channel-volumes = true }'
                 )
+                if output_switch:
+                    target_properties = target_properties.replace(
+                        'node.virtual = true',
+                        'device.serial = "SKYAPO-OUTPUT-A" '
+                        'node.virtual = true')
                 if stable_playback_target:
                     target_properties = target_properties.replace(
                         'node.virtual = true',
@@ -1157,6 +1170,10 @@ def main():
                         alternate_properties = alternate_properties.replace(
                             'device.serial = "SKYAPO-PLAYBACK-SERIAL-42"',
                             'device.serial = "SKYAPO-PLAYBACK-ALT-SERIAL-43"')
+                    elif output_switch:
+                        alternate_properties = alternate_properties.replace(
+                            'device.serial = "SKYAPO-OUTPUT-A"',
+                            'device.serial = "SKYAPO-OUTPUT-B"')
                     create_null_sink(null_target_manager, alternate_properties)
                     deadline = time.monotonic() + 8
                     while time.monotonic() < deadline:
@@ -2792,6 +2809,8 @@ def main():
                                 "skyapo.test.null-target-alt",
                                 "skyapo.test.null-target",
                                 "skyapo.test.null-target-alt")):
+                            expected_filter_count = (
+                                2 if target == "skyapo.test.null-target-alt" else 1)
                             if switch_index == 0:
                                 fault_trigger.write_text("fail next stream creation\n")
                             selected = run(
@@ -2871,7 +2890,9 @@ def main():
                                         "2/2, target links 2/2 channels" in switched_status and
                                         "Active capture links: 2/2" in switched_status and
                                         "Callback allocations: 0" in switched_status and
-                                        "Callback deallocations: 0" in switched_status):
+                                        "Callback deallocations: 0" in switched_status and
+                                        f"Playback filters: {expected_filter_count}"
+                                        in switched_status):
                                     break
                                 time.sleep(0.1)
                             else:

@@ -2571,7 +2571,37 @@ void PlaybackGraph::reloadConfig(
 
 void PlaybackGraph::selectSink(AudioDevice device,
                                std::vector<AudioPort> ports) {
+  const auto previousDevice = impl_->sink;
+  const auto previousPorts = impl_->ports;
+  const auto previousConfigSources = impl_->acceptedConfigSources;
+  const bool engineContextChanged =
+      deviceMatchText(previousDevice) != deviceMatchText(device) ||
+      previousDevice.description != device.description;
   impl_->selectSink(std::move(device), std::move(ports));
+  if (!engineContextChanged)
+    return;
+
+  try {
+    if (previousConfigSources)
+      reloadConfig(impl_->configPath, previousConfigSources);
+    else
+      reloadConfig(impl_->configPath);
+  } catch (...) {
+    const auto reloadFailure = std::current_exception();
+    try {
+      impl_->selectSink(previousDevice, previousPorts);
+    } catch (const std::exception &rollbackFailure) {
+      throw std::runtime_error(
+          std::string(
+              "playback target config reload and sink rollback failed: ") +
+          rollbackFailure.what());
+    } catch (...) {
+      throw std::runtime_error(
+          "playback target config reload and sink rollback failed with an "
+          "unknown error");
+    }
+    std::rethrow_exception(reloadFailure);
+  }
 }
 
 void PlaybackGraph::sessionManagerDetected() noexcept {
