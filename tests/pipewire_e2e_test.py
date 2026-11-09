@@ -260,31 +260,6 @@ def wait_for_daemon_log(daemon_process, daemon_log, start_offset, marker,
     raise RuntimeError(f"skyapod did not report {label} within {timeout} seconds")
 
 
-def wait_for_daemon_stopped(daemon_process, label, timeout=2):
-    """Wait until a signalled daemon main process is stopped by the kernel."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if daemon_process.poll() is not None:
-            raise RuntimeError(
-                f"skyapod exited while waiting for {label} "
-                f"(exit status {daemon_process.returncode})")
-        pid = (daemon_process.main_pid()
-               if isinstance(daemon_process, SystemdManagedDaemon)
-               else daemon_process.pid)
-        try:
-            with open(f"/proc/{pid}/status", encoding="ascii") as status_file:
-                state_line = next(line for line in status_file
-                                  if line.startswith("State:"))
-        except (FileNotFoundError, StopIteration):
-            raise RuntimeError(
-                f"skyapod process disappeared while waiting for {label}")
-        if state_line.split()[1] in ("T", "t"):
-            return
-        time.sleep(0.01)
-    raise RuntimeError(
-        f"skyapod did not stop for {label} within {timeout} seconds")
-
-
 def wait_for_consumer_ready(process, label, timeout=8,
                             marker="SKYAPO_CONSUMER_READY"):
     if process.stdout is None:
@@ -1010,6 +985,10 @@ def main():
             # under this disposable runtime directory.
             "GIO_USE_VFS": "local",
         })
+        retry_gate_file = None
+        if server_restart:
+            retry_gate_file = root / "allow-daemon-retry"
+            env["SKYAPO_TEST_RETRY_GATE_FILE"] = str(retry_gate_file)
         if playback_recovery_write_failure:
             env["SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE_FILE"] = str(
                 root / "fail-configured-default-write-once")
@@ -1090,7 +1069,6 @@ def main():
         unrelated_playback_process = None
         wireplumber_process = None
         wireplumber_paused = False
-        daemon_paused_for_server_restart = False
         null_target_manager = None
         playback_consumer = None
         post_crash_playback_consumer = None
@@ -4346,15 +4324,8 @@ def main():
                     # Runtime cleanup is complete, before stopping the server.
                     wait_for_daemon_log(
                         daemon_process, daemon_log, daemon_log_offset,
-                        "; retrying in 2 seconds",
+                        "; retry paused by test gate",
                         "selected-source Runtime teardown")
-                    # Freeze only the daemon main process so its fixed retry
-                    # delay cannot race a slow CI worker while the private
-                    # server and fixture graph are being recreated.
-                    daemon_process.send_signal(signal.SIGSTOP)
-                    wait_for_daemon_stopped(
-                        daemon_process, "PipeWire server restart")
-                    daemon_paused_for_server_restart = True
 
                 if server_restart:
                     print("Stopping private PipeWire server…", flush=True)
@@ -4422,9 +4393,8 @@ def main():
                 source_process = start_test_source(
                     source, mono, env, source_log, name=replacement_name,
                     serial=replacement_serial)
-                if daemon_paused_for_server_restart:
-                    daemon_process.send_signal(signal.SIGCONT)
-                    daemon_paused_for_server_restart = False
+                if retry_gate_file is not None:
+                    retry_gate_file.touch()
                 deadline = time.monotonic() + 15
                 relinked_status = ""
                 while time.monotonic() < deadline:
@@ -5299,13 +5269,6 @@ def main():
                           f"{process.poll()}", file=sys.stderr)
             raise
         finally:
-            if daemon_paused_for_server_restart and daemon_process is not None:
-                try:
-                    daemon_process.send_signal(signal.SIGCONT)
-                except Exception as error:
-                    print(f"could not resume skyapod during cleanup: {error}",
-                          file=sys.stderr)
-                daemon_paused_for_server_restart = False
             if wireplumber_paused and wireplumber_process is not None:
                 os.killpg(wireplumber_process.pid, signal.SIGCONT)
                 wireplumber_paused = False

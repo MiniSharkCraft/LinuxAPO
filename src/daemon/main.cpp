@@ -1,10 +1,14 @@
 #include "../pipewire/Runtime.h"
 #include "../platform/Settings.h"
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <thread>
 namespace {
 volatile sig_atomic_t stopping = 0;
-void stop(int) { stopping = 1; }
+void stop(int) {
+  stopping = 1;
+}
 } // namespace
 int main(int argc, char **argv) {
   try {
@@ -29,9 +33,23 @@ int main(int argc, char **argv) {
         const auto selection = settings::deviceSelection();
         runPipeWire(selection.name, selection.stableProperty, config, stopping);
       } catch (const std::exception &e) {
-        std::cerr << "skyapod: " << e.what() << "; retrying in 2 seconds\n";
-        for (int i = 0; i < 20 && !stopping; ++i)
-          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const char *retryGate = std::getenv("SKYAPO_TEST_RETRY_GATE_FILE");
+        if (retryGate && retryGate[0] != '\0') {
+          std::cerr << "skyapod: " << e.what()
+                    << "; retry paused by test gate\n";
+          const std::filesystem::path gatePath(retryGate);
+          std::error_code error;
+          while (!stopping && !std::filesystem::exists(gatePath, error)) {
+            if (error)
+              throw std::runtime_error("cannot inspect test retry gate: " +
+                                       error.message());
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          }
+        } else {
+          std::cerr << "skyapod: " << e.what() << "; retrying in 2 seconds\n";
+          for (int i = 0; i < 20 && !stopping; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
       }
     }
     return 0;
