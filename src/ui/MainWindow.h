@@ -92,6 +92,9 @@ private:
   QLabel *analysisStatusLabel{};
   QLabel *analysisSummaryLabel{};
   QLabel *analysisPeakGainLabel{};
+  QLabel *analysisLatencyLabel{};
+  QLabel *analysisInitializationLabel{};
+  QLabel *analysisCpuLabel{};
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};

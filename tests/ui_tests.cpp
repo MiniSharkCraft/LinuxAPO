@@ -857,9 +857,9 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (!analysisPeakGain->text().contains("Peak sampled gain: -3.00 dB") ||
-      !analysisLatency->text().contains("N/A") ||
-      !analysisInitialization->text().contains("N/A") ||
-      !analysisCpu->text().contains("N/A")) {
+      !analysisLatency->text().contains("0 samples") ||
+      !analysisInitialization->text().contains("ms per engine") ||
+      !analysisCpu->text().contains("(one core)")) {
     std::cerr << "analysis panel fabricated or omitted unavailable metrics\n";
     return 1;
   }
@@ -973,6 +973,89 @@ int main(int argc, char **argv) {
       std::cerr << "high-gain response is clipped or has no filled response "
                    "area: curveY="
                 << blueResponseY << " filledPixels=" << blueAreaPixels << '\n';
+      return 1;
+    }
+  }
+
+  {
+    const QString delayedConfigPath =
+        temporary.filePath("delayed-response.txt");
+    QFile delayedConfig(delayedConfigPath);
+    if (!delayedConfig.open(QIODevice::WriteOnly) ||
+        delayedConfig.write("Delay: 480 Samples\n") != 19) {
+      std::cerr << "could not create delayed response fixture\n";
+      return 1;
+    }
+    delayedConfig.close();
+    MainWindow delayedWindow(delayedConfigPath,
+                             QString::fromLocal8Bit(argv[1]));
+    auto *delayedAnalyze =
+        delayedWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *delayedSource =
+        delayedWindow.findChild<QComboBox *>("analysisSource");
+    auto *delayedRuntimeFormat =
+        delayedWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *delayedSampleRate =
+        delayedWindow.findChild<QSpinBox *>("analysisSampleRate");
+    auto *delayedChannels =
+        delayedWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *delayedStatus =
+        delayedWindow.findChild<QLabel *>("analysisResultStatus");
+    auto *delayedLatency = delayedWindow.findChild<QLabel *>("analysisLatency");
+    auto *delayedInitialization =
+        delayedWindow.findChild<QLabel *>("analysisInitializationTime");
+    auto *delayedCpu = delayedWindow.findChild<QLabel *>("analysisCpuUsage");
+    if (!delayedAnalyze || !delayedSource || !delayedRuntimeFormat ||
+        !delayedSampleRate || !delayedChannels || !delayedStatus ||
+        !delayedLatency || !delayedInitialization || !delayedCpu) {
+      std::cerr << "delay analysis controls are missing\n";
+      return 1;
+    }
+    delayedSource->setCurrentIndex(1);
+    delayedRuntimeFormat->setChecked(false);
+    delayedSampleRate->setValue(48000);
+    delayedChannels->setValue(1);
+    delayedWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    delayedAnalyze->click();
+    QElapsedTimer delayedWait;
+    delayedWait.start();
+    while (!delayedStatus->text().startsWith("Calculated response") &&
+           !delayedStatus->text().startsWith("Analysis failed") &&
+           delayedWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    const QString initializationPrefix =
+        QStringLiteral("Engine initialization time: ");
+    const QString cpuPrefix = QStringLiteral("CPU usage: ");
+    const int initializationUnit =
+        delayedInitialization->text().indexOf(" ms per engine");
+    const int cpuUnit = delayedCpu->text().indexOf(" % (one core)");
+    bool initializationParsed = false;
+    bool cpuParsed = false;
+    const double initializationMs =
+        delayedInitialization->text()
+            .mid(initializationPrefix.size(),
+                 initializationUnit - initializationPrefix.size())
+            .toDouble(&initializationParsed);
+    const double cpuPercent =
+        delayedCpu->text()
+            .mid(cpuPrefix.size(), cpuUnit - cpuPrefix.size())
+            .toDouble(&cpuParsed);
+    if (!delayedStatus->text().startsWith("Calculated response") ||
+        !delayedLatency->text().contains("10.00 ms") ||
+        !delayedLatency->text().contains("480 samples") ||
+        initializationUnit < static_cast<int>(initializationPrefix.size()) ||
+        cpuUnit < static_cast<int>(cpuPrefix.size()) || !initializationParsed ||
+        !cpuParsed || !std::isfinite(initializationMs) ||
+        !std::isfinite(cpuPercent) || initializationMs <= 0.0 ||
+        cpuPercent <= 0.0) {
+      std::cerr << "analysis did not report measured impulse onset and engine "
+                   "initialization: latency="
+                << delayedLatency->text().toStdString() << ", initialization="
+                << delayedInitialization->text().toStdString()
+                << ", CPU=" << delayedCpu->text().toStdString() << '\n';
       return 1;
     }
   }

@@ -887,18 +887,31 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
       tr("Calculated from the theoretical Engine response; this is not a live "
          "clipping or hardware measurement."));
   analysisControlsLayout->addWidget(analysisPeakGainLabel);
-  auto *analysisLatencyLabel =
-      new QLabel(tr("Latency: N/A (not measured)"), analysisControls);
+  analysisLatencyLabel =
+      new QLabel(tr("Impulse onset: N/A (not measured)"), analysisControls);
   analysisLatencyLabel->setObjectName(QStringLiteral("analysisLatency"));
+  analysisLatencyLabel->setToolTip(
+      tr("Latest impulse onset across active channel paths at an absolute "
+         "amplitude threshold of 1e-5, matching the upstream analysis method. "
+         "This is modeled signal delay; it is not hardware latency or plugin "
+         "PDC."));
   analysisControlsLayout->addWidget(analysisLatencyLabel);
-  auto *analysisInitializationLabel = new QLabel(
-      tr("Initialization time: N/A (not measured)"), analysisControls);
+  analysisInitializationLabel = new QLabel(
+      tr("Engine initialization time: N/A (not measured)"), analysisControls);
   analysisInitializationLabel->setObjectName(
       QStringLiteral("analysisInitializationTime"));
+  analysisInitializationLabel->setToolTip(
+      tr("Measured wall-clock time to construct a fresh EAPO-backed Engine "
+         "and load the selected config; the displayed value is averaged over "
+         "one engine per input-channel impulse."));
   analysisControlsLayout->addWidget(analysisInitializationLabel);
-  auto *analysisCpuLabel =
+  analysisCpuLabel =
       new QLabel(tr("CPU usage: N/A (not measured)"), analysisControls);
   analysisCpuLabel->setObjectName(QStringLiteral("analysisCpuUsage"));
+  analysisCpuLabel->setToolTip(tr(
+      "Average time inside Engine::process divided by the equivalent audio "
+      "duration, expressed as one-core usage. Excludes config setup, FFT, "
+      "UI work and plugin processing; plugins are not loaded for analysis."));
   analysisControlsLayout->addWidget(analysisCpuLabel);
   analysisControlsLayout->addWidget(responseButton);
   analysisControlsLayout->addStretch(1);
@@ -1195,6 +1208,12 @@ void MainWindow::analyzeResponse() {
 #else
   if (configPath.isEmpty())
     return;
+  responseAnalysisHasResult = false;
+  analysisPeakGainLabel->setText(tr("Peak gain: N/A"));
+  analysisLatencyLabel->setText(tr("Impulse onset: N/A (not measured)"));
+  analysisInitializationLabel->setText(
+      tr("Engine initialization time: N/A (not measured)"));
+  analysisCpuLabel->setText(tr("CPU usage: N/A (not measured)"));
   const bool useCurrentFile = responseSourceCombo->currentData().toBool();
   const quint64 requestedRevision = configRevision;
   const QString sourcePath = useCurrentFile ? configPath : defaultConfigPath();
@@ -1240,9 +1259,7 @@ void MainWindow::analyzeResponse() {
   const unsigned selectedChannels =
       static_cast<unsigned>(analysisChannels->value());
   snapshot->close();
-  responseAnalysisHasResult = false;
   analysisStatusLabel->setProperty("analysisState", "running");
-  analysisPeakGainLabel->setText(tr("Peak gain: N/A"));
   analysisStatusLabel->setText(tr("Analyzing %1…").arg(sourceName));
   analysisSummaryLabel->setText(
       tr("Theoretical response; this does not measure live audio."));
@@ -1318,6 +1335,31 @@ void MainWindow::analyzeResponse() {
                 std::isfinite(peakGainDb) ? self->tr("Peak sampled gain: %1 dB")
                                                 .arg(peakGainDb, 0, 'f', 2)
                                           : self->tr("Peak gain: N/A"));
+            if (result.impulseOnsetSamples) {
+              const double onsetMs =
+                  static_cast<double>(*result.impulseOnsetSamples) * 1000.0 /
+                  sampleRate;
+              self->analysisLatencyLabel->setText(
+                  self->tr("Impulse onset: %1 ms (%2 samples)")
+                      .arg(onsetMs, 0, 'f', 2)
+                      .arg(*result.impulseOnsetSamples));
+            } else {
+              self->analysisLatencyLabel->setText(self->tr(
+                  "Impulse onset: N/A (no response in analysis window)"));
+            }
+            if (result.engineInitializationMs) {
+              self->analysisInitializationLabel->setText(
+                  self->tr("Engine initialization time: %1 ms per engine")
+                      .arg(*result.engineInitializationMs, 0, 'f', 2));
+            }
+            if (result.engineProcessingPercent) {
+              const int cpuPrecision =
+                  *result.engineProcessingPercent >= 0.1 ? 1 : 4;
+              self->analysisCpuLabel->setText(
+                  self->tr("CPU usage: %1 % (one core)")
+                      .arg(*result.engineProcessingPercent, 0, 'f',
+                           cpuPrecision));
+            }
             self->updateAnalysisInputChannels(channels);
             self->clearResponsePlot({});
             auto *plot = new ResponsePlot(std::move(result.curves),

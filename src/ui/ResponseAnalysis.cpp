@@ -3,6 +3,7 @@
 #include "Engine.h"
 #include <fftw3.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <exception>
@@ -14,6 +15,7 @@ constexpr unsigned MinAnalysisFrames = 128;
 constexpr unsigned MaxAnalysisFrames = 1U << 20;
 constexpr unsigned MaxAnalysisChannels = 8;
 constexpr size_t MaxAnalysisWorkspaceBytes = 64U * 1024U * 1024U;
+constexpr float ImpulseOnsetThreshold = 1.0e-5F;
 
 bool exceedsWorkspaceBudget(unsigned frames, unsigned channels) {
   const auto multiply = [](size_t a, size_t b, size_t &out) {
@@ -73,19 +75,34 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
   }
 
   try {
+    double totalInitializationMs = 0.0;
+    double totalEngineProcessingMs = 0.0;
+    unsigned initializedEngines = 0;
     for (unsigned inputChannel = 0; inputChannel < channels; ++inputChannel) {
       // Never load third-party module code in the editor process. Plugin
       // directives are reported as unsupported for this diagnostic analysis.
+      const auto initializationStarted = std::chrono::steady_clock::now();
       Engine engine(sampleRate, channels, 1024, {}, false, false);
       engine.loadConfig(configPath.toStdString());
+      totalInitializationMs +=
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - initializationStarted)
+              .count();
+      ++initializedEngines;
       std::vector<float> block(1024U * channels, 0.0F);
       std::vector<float> impulseResponse(fftFrames * channels, 0.0F);
+      double engineProcessingMs = 0.0;
       for (unsigned blockStart = 0; blockStart < fftFrames;) {
         const unsigned frameCount = std::min(1024U, fftFrames - blockStart);
         std::fill(block.begin(), block.end(), 0.0F);
         if (blockStart == 0)
           block[inputChannel] = 1.0F;
+        const auto processStarted = std::chrono::steady_clock::now();
         engine.process(block.data(), frameCount);
+        engineProcessingMs +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - processStarted)
+                .count();
         for (unsigned frame = 0; frame < frameCount; ++frame)
           for (unsigned outputChannel = 0; outputChannel < channels;
                ++outputChannel)
@@ -96,6 +113,26 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
 
       for (unsigned outputChannel = 0; outputChannel < channels;
            ++outputChannel) {
+        float pathPeak = 0.0F;
+        for (unsigned frame = 0; frame < fftFrames; ++frame) {
+          const float sample =
+              impulseResponse[frame * channels + outputChannel];
+          if (std::isfinite(sample))
+            pathPeak = std::max(pathPeak, std::abs(sample));
+        }
+        if (pathPeak > 0.0F) {
+          for (unsigned frame = 0; frame < fftFrames; ++frame) {
+            const float sample =
+                impulseResponse[frame * channels + outputChannel];
+            if (std::isfinite(sample) &&
+                std::abs(sample) >= ImpulseOnsetThreshold) {
+              if (!result.impulseOnsetSamples ||
+                  frame > *result.impulseOnsetSamples)
+                result.impulseOnsetSamples = frame;
+              break;
+            }
+          }
+        }
         auto *input =
             static_cast<float *>(fftwf_malloc(sizeof(float) * fftFrames));
         auto *output = static_cast<fftwf_complex *>(
@@ -134,6 +171,17 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
         fftwf_free(output);
         result.curves.append(std::move(curve));
       }
+      totalEngineProcessingMs += engineProcessingMs;
+    }
+    if (initializedEngines > 0) {
+      result.engineInitializationMs =
+          totalInitializationMs / initializedEngines;
+      const double realtimeDurationMs =
+          static_cast<double>(fftFrames) * 1000.0 / sampleRate;
+      if (realtimeDurationMs > 0.0)
+        result.engineProcessingPercent =
+            (totalEngineProcessingMs / initializedEngines) * 100.0 /
+            realtimeDurationMs;
     }
   } catch (const std::exception &error) {
     result.error = QString::fromLocal8Bit(error.what());
