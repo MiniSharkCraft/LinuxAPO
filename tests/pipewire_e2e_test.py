@@ -629,6 +629,8 @@ def main():
         "playback-wireplumber-systemd-crash-user-override",
         "playback-wireplumber-recovery-write-failure",
         "playback-wireplumber-route-confirmation-race",
+        "playback-wireplumber-route-sync-failure",
+        "playback-wireplumber-route-confirmation-timeout",
         "playback-wireplumber-configured-write-failure",
         "device-switch", "delay-pdc", "source-consumer-latency",
         "playback-preamp", "playback-wireplumber",
@@ -666,6 +668,8 @@ def main():
             "playback-wireplumber-systemd-crash-user-override|"
             "playback-wireplumber-recovery-write-failure|"
             "playback-wireplumber-route-confirmation-race|"
+            "playback-wireplumber-route-sync-failure|"
+            "playback-wireplumber-route-confirmation-timeout|"
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency|playback-preamp|playback-wireplumber|"
             "playback-wireplumber-link-error|"
@@ -742,6 +746,12 @@ def main():
         mode == "playback-wireplumber-recovery-write-failure")
     playback_route_confirmation_race = (
         mode == "playback-wireplumber-route-confirmation-race")
+    playback_route_sync_failure = (
+        mode == "playback-wireplumber-route-sync-failure")
+    playback_route_confirmation_timeout = (
+        mode == "playback-wireplumber-route-confirmation-timeout")
+    playback_route_cleanup_failure = (
+        playback_route_sync_failure or playback_route_confirmation_timeout)
     playback_systemd_crash_restart = mode in (
         "playback-wireplumber-systemd-crash-restart",
         "playback-wireplumber-systemd-crash-user-override")
@@ -957,6 +967,8 @@ def main():
                 root / "hold-default-route-recovery")
         if playback_route_confirmation_race:
             env["SKYAPO_TEST_REVERT_ACTIVE_BEFORE_ROUTE_SYNC"] = "1"
+        if playback_route_confirmation_timeout:
+            env["SKYAPO_TEST_SUPPRESS_DEFAULT_ROUTE_CONFIRMATION"] = "1"
         if output_switch or playback_isolation:
             fault_library = env.get("SKYAPO_TEST_FILTER_FAULT_LIBRARY")
             if not fault_library or not pathlib.Path(fault_library).is_file():
@@ -1599,6 +1611,68 @@ def main():
                     f"daemon did not reach streaming state:\n{status}"
                     f"{policy_graph}")
             if wireplumber_playback:
+                if playback_route_cleanup_failure:
+                    expected_failure = (
+                        "cannot confirm the PipeWire default sink update"
+                        if playback_route_sync_failure else
+                        "PipeWire/WirePlumber did not confirm SkyAPO as the "
+                        "default playback route")
+                    deadline = time.monotonic() + 6
+                    route_status = ""
+                    while time.monotonic() < deadline:
+                        route_status = run(
+                            [str(cli), "status"], env, timeout=5).stdout
+                        if expected_failure in route_status:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "injected route confirmation failure was not "
+                            f"reported ({expected_failure}):\n"
+                            + route_status)
+                    changed_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if (metadata_node_name(
+                            changed_metadata, "default.audio.sink") !=
+                            "skyapo.playback" or
+                            metadata_node_name(
+                                changed_metadata,
+                                "default.configured.audio.sink") !=
+                            "skyapo.playback"):
+                        raise RuntimeError(
+                            "test did not reproduce accepted active and "
+                            "configured SkyAPO route writes before confirmation "
+                            "failure:\n"
+                            + changed_metadata)
+                    state_file = (state_home / "skyapo" /
+                                  "playback-default-route-v1")
+                    if not state_file.is_file():
+                        raise RuntimeError(
+                            "unconfirmed route change lost its recovery snapshot")
+                    stopped = run([str(cli), "stop"], env, timeout=8)
+                    if "Stopping skyapod" not in stopped.stdout:
+                        raise RuntimeError(
+                            "daemon did not acknowledge stop after route "
+                            f"confirmation failure: {stopped.stdout}")
+                    daemon_process.wait(timeout=5)
+                    restored_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if (metadata_node_name(
+                            restored_metadata, "default.audio.sink") !=
+                            initial_default_sink or
+                            metadata_node_name(
+                                restored_metadata,
+                                "default.configured.audio.sink") !=
+                            initial_configured_sink):
+                        raise RuntimeError(
+                            "clean shutdown did not conditionally restore the "
+                            "route after a core-sync/confirmation failure:\n" +
+                            restored_metadata)
+                    print("Accepted but unconfirmed active/configured route "
+                          "writes were conditionally restored on clean "
+                          "shutdown after the injected confirmation failure.")
+                    return 0
+
                 if playback_route_confirmation_race:
                     deadline = time.monotonic() + 6
                     route_status = ""
@@ -1834,13 +1908,28 @@ def main():
                                 "daemon did not acknowledge stop after failed "
                                 f"route recovery: {stopped.stdout}")
                         daemon_process.wait(timeout=5)
-                        if not state_file.is_file():
+                        restored_metadata = run(
+                            [metadata, "-n", "default"], env,
+                            timeout=5).stdout
+                        if (metadata_node_name(
+                                restored_metadata, "default.audio.sink") !=
+                                initial_default_sink or
+                                metadata_node_name(
+                                    restored_metadata,
+                                    "default.configured.audio.sink") !=
+                                initial_configured_sink):
                             raise RuntimeError(
-                                "clean stop discarded an unconfirmed route "
-                                "snapshot")
+                                "clean stop did not restore the still-owned "
+                                "configured route after recovery write failure:\n"
+                                + restored_metadata)
+                        if state_file.exists():
+                            raise RuntimeError(
+                                "clean stop restored the route but left a stale "
+                                f"recovery snapshot: {state_file}")
                         print("partial route recovery write failure left the "
-                              "route inactive, restored active metadata, and "
-                              "retained the snapshot for retry")
+                              "route inactive; clean shutdown restored the "
+                              "remaining configured default and removed the "
+                              "recovery snapshot")
                         return 0
                     print("failed configured-default write preserved both "
                           "original playback routes after WirePlumber recovery")
