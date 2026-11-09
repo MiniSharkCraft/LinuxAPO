@@ -47,6 +47,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QThread>
@@ -1187,6 +1188,12 @@ int main(int argc, char **argv) {
   uiSettings.clear();
   uiSettings.setValue(QStringLiteral("ui/geometry"), savedWindowGeometry);
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *configTabs = window.findChild<QTabBar *>("configTabs");
+  if (!configTabs || configTabs->count() != 1 ||
+      configTabs->tabText(0) != QFileInfo(configPath).fileName()) {
+    std::cerr << "editor did not show the active config in its tab strip\n";
+    return 1;
+  }
   if (window.size() != QSize(777, 555)) {
     std::cerr << "editor did not restore its saved window geometry\n";
     return 1;

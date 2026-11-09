@@ -18,6 +18,7 @@ class QMenu;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+class QTabBar;
 class QTimer;
 class QThread;
 
@@ -82,6 +83,7 @@ private:
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
+  QTabBar *configTabs{};
   FilterTable *rowTable{};
   QTimer *validationTimer{};
   std::vector<std::shared_ptr<FilterTable::Item>> rowItems;

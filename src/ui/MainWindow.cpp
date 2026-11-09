@@ -58,6 +58,7 @@
 #include <QStandardPaths>
 #include <QSpinBox>
 #include <QSettings>
+#include <QTabBar>
 #include <QTimer>
 #include <QThread>
 #include <algorithm>
@@ -739,6 +740,13 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   toolbar->addWidget(responseButton);
   outer->addLayout(toolbar);
 
+  configTabs = new QTabBar(root);
+  configTabs->setObjectName(QStringLiteral("configTabs"));
+  configTabs->setDocumentMode(true);
+  configTabs->setExpanding(false);
+  configTabs->setTabsClosable(false);
+  outer->addWidget(configTabs);
+
   auto *analysisFormatRow = new QHBoxLayout;
   analysisUseRuntimeFormat =
       new QCheckBox(tr("Use live PipeWire format"), root);
@@ -1331,6 +1339,11 @@ void MainWindow::openConfig(const QString &path) {
     return;
   }
   configPath = QFileInfo(path).absoluteFilePath();
+  if (configTabs->count() == 0) {
+    const int tab = configTabs->addTab(QFileInfo(configPath).fileName());
+    configTabs->setTabData(tab, configPath);
+    configTabs->setTabToolTip(tab, configPath);
+  }
   rememberConfig(configPath);
   document.load(file.readAll());
   modified = false;
