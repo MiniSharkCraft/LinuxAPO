@@ -1193,6 +1193,13 @@ def main():
                     raise RuntimeError(
                         "recorded stereo channels were not aligned after the "
                         f"mono latency plugin/PDC path:\n{captured.stdout}")
+            # The graph may have been rebuilt or recovered after the earlier
+            # status snapshot. Print the live state associated with this
+            # independent recording instead of a pre-reconfigure node ID.
+            final_status = run([str(cli), "status"], env,
+                               timeout=5, check=False)
+            if final_status.returncode == 0:
+                status = final_status.stdout
             print(f"Private PipeWire {mode} recovery and capture passed "
                   f"(destroyed link {link_id}).")
             print(status.rstrip())
