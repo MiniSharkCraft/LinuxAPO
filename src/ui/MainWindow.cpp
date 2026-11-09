@@ -1457,36 +1457,73 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
   GraphicEQFilterGUIFactory graphicEQ;
 #endif
-  const auto append = [menu](const QList<FilterTemplate> &templates) {
+  const auto append = [](QMenu *target,
+                         const QList<FilterTemplate> &templates) {
     for (const auto &filter : templates) {
-      auto *action = menu->addAction(filter.getName());
+      auto *action = target->addAction(filter.getName());
       action->setData(QVariant::fromValue(filter));
     }
   };
-  append(preamp.createFilterTemplates());
-  menu->addAction(tr("Include configuration…"))
-      ->setData(QVariant::fromValue(FilterTemplate(tr("Include configuration…"),
-                                                   "Include: child.txt",
-                                                   {tr("Configuration")})));
-  menu->addAction(tr("Device match"))
+
+  auto *comment = menu->addAction(tr("Comment"));
+  comment->setData(
+      QVariant::fromValue(FilterTemplate(tr("Comment"), "# ", {})));
+
+  auto *controlMenu = menu->addMenu(tr("Control"));
+  controlMenu->setObjectName(QStringLiteral("controlAddMenu"));
+  controlMenu->addAction(tr("Include (Include configuration file)…"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Include (Include configuration file)…"),
+                         "Include: child.txt", {tr("Control")})));
+  controlMenu->addAction(tr("Device (Select device)"))
       ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Device match"), "Device: all", {tr("Configuration")})));
-  menu->addAction(tr("Channel selection"))
+          tr("Device (Select device)"), "Device: all", {tr("Control")})));
+  controlMenu->addAction(tr("Channel (Select channels)"))
       ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Channel selection"), "Channel: L R", {tr("Basic filters")})));
-  menu->addAction(tr("Copy between channels"))
-      ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Copy between channels"), "Copy: L=L", {tr("Basic filters")})));
-  menu->addSection(tr("Parametric filters"));
-  append(biquad.createFilterTemplates());
-  menu->addAction(tr("Custom IIR filter"))
+          tr("Channel (Select channels)"), "Channel: L R", {tr("Control")})));
+  append(controlMenu, stage.createFilterTemplates());
+
+  auto *basicMenu = menu->addMenu(tr("Basic filters"));
+  basicMenu->setObjectName(QStringLiteral("basicAddMenu"));
+  append(basicMenu, preamp.createFilterTemplates());
+  append(basicMenu, delay.createFilterTemplates());
+  basicMenu->addAction(tr("Copy (Copy between channels)"))
+      ->setData(QVariant::fromValue(
+          FilterTemplate(tr("Copy (Copy between channels)"), "Copy: L=L",
+                         {tr("Basic filters")})));
+
+  auto *parametricMenu = menu->addMenu(tr("Parametric filters"));
+  parametricMenu->setObjectName(QStringLiteral("parametricAddMenu"));
+  append(parametricMenu, biquad.createFilterTemplates());
+  parametricMenu->addAction(tr("Custom IIR filter"))
       ->setData(QVariant::fromValue(
           FilterTemplate(tr("Custom IIR filter"),
                          "Filter: ON IIR Order 2 Coefficients 1 0 0 1 0 0",
                          {tr("Parametric filters")})));
-  menu->addSeparator();
-  append(delay.createFilterTemplates());
-  append(stage.createFilterTemplates());
+
+  auto *graphicMenu = menu->addMenu(tr("Graphic equalizers"));
+  graphicMenu->setObjectName(QStringLiteral("graphicEqAddMenu"));
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  append(graphicMenu, graphicEQ.createFilterTemplates());
+#else
+  auto *unavailable =
+      graphicMenu->addAction(tr("Unavailable: rebuild with FFTW3 support"));
+  unavailable->setEnabled(false);
+#endif
+
+  auto *advancedMenu = menu->addMenu(tr("Advanced filters"));
+  advancedMenu->setObjectName(QStringLiteral("advancedAddMenu"));
+  advancedMenu->addAction(tr("Convolution (impulse response)…"))
+      ->setData(QVariant::fromValue(FilterTemplate(
+          tr("Convolution (impulse response)…"),
+          "Convolution: impulse-response.wav", {tr("Advanced filters")})));
+  advancedMenu->addAction(tr("Loudness correction"))
+      ->setData(QVariant::fromValue(FilterTemplate(
+          tr("Loudness correction"),
+          "LoudnessCorrection: State 1 ReferenceLevel 0 ReferenceOffset 0 "
+          "Attenuation 1.0",
+          {tr("Advanced filters")})));
+
   auto *pluginsMenu = menu->addMenu(tr("Plugins"));
   pluginsMenu->setObjectName(QStringLiteral("pluginAddMenu"));
   const auto addPluginChoice = [pluginsMenu](const QString &text,
@@ -1504,18 +1541,10 @@ void MainWindow::populateAddPopupMenu(QMenu *menu) {
                   QStringLiteral("addLv2Plugin"));
   addPluginChoice(tr("CLAP plugin…"), ClapPluginPickerLine,
                   QStringLiteral("addClapPlugin"));
-  addPluginChoice(tr("VST plugin (Linux)…"), LinuxVstPluginPickerLine,
+  addPluginChoice(tr("VST plugin (Linux)"), LinuxVstPluginPickerLine,
                   QStringLiteral("addLinuxVstPlugin"));
-  addPluginChoice(tr("VST plugin (Windows)…"), WindowsVstInfoLine,
+  addPluginChoice(tr("VST plugin (Windows)"), WindowsVstInfoLine,
                   QStringLiteral("addWindowsVstPlugin"));
-  menu->addAction(tr("Convolution (impulse response)"))
-      ->setData(QVariant::fromValue(FilterTemplate(
-          tr("Convolution (impulse response)"),
-          "Convolution: impulse-response.wav", {tr("Advanced filters")})));
-#ifdef SKYAPO_HAVE_GRAPHIC_EQ
-  menu->addSeparator();
-  append(graphicEQ.createFilterTemplates());
-#endif
 }
 
 void MainWindow::syncRowsToDocument() {

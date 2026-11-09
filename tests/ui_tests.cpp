@@ -62,6 +62,34 @@
 #include <iostream>
 
 namespace {
+QMenu *findMenuByTitle(QMenu *parent, const QString &title) {
+  if (!parent)
+    return nullptr;
+  for (auto *action : parent->actions()) {
+    if (auto *submenu = action->menu()) {
+      if (submenu->title() == title)
+        return submenu;
+      if (auto *nested = findMenuByTitle(submenu, title))
+        return nested;
+    }
+  }
+  return nullptr;
+}
+
+QAction *findTemplateAction(QMenu *menu, const QString &line) {
+  if (!menu)
+    return nullptr;
+  for (auto *action : menu->actions()) {
+    if (action->data().canConvert<FilterTemplate>() &&
+        action->data().value<FilterTemplate>().getLine() == line)
+      return action;
+    if (auto *submenu = action->menu())
+      if (auto *nested = findTemplateAction(submenu, line))
+        return nested;
+  }
+  return nullptr;
+}
+
 bool writeTestImpulseResponse(const QString &path) {
   QByteArray wav;
   const auto append16 = [&wav](quint16 value) {
@@ -1338,37 +1366,71 @@ int main(int argc, char **argv) {
     std::cerr << "Linux FilterTable row adapter was not created\n";
     return 1;
   }
-  const auto addActions = rowMenu->actions();
-  bool hasConvolutionTemplate = false;
-  bool hasPluginPicker = false;
-  bool hasIncludeTemplate = false;
-  for (const auto *action : addActions) {
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Convolution: impulse-response.wav") {
-      hasConvolutionTemplate = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Include: child.txt") {
-      hasIncludeTemplate = true;
-    }
-  }
-  if (auto *pluginMenu = rowMenu->findChild<QMenu *>("pluginAddMenu"))
-    for (const auto *action : pluginMenu->actions())
-      if (action->data().canConvert<FilterTemplate>() &&
-          action->data().value<FilterTemplate>().getLine() ==
-              "__SKYAPO_PICK_INSTALLED_PLUGIN__")
-        hasPluginPicker = true;
-  if (addActions.isEmpty() ||
-      !addActions.first()->data().canConvert<FilterTemplate>() ||
-      addActions.first()->data().value<FilterTemplate>().getLine() !=
-          "Preamp: 0 dB" ||
-      !hasConvolutionTemplate || !hasPluginPicker || !hasIncludeTemplate) {
-    std::cerr
-        << "row add-menu did not preserve upstream and Convolution templates\n";
+  auto *controlMenu = findMenuByTitle(rowMenu, "Control");
+  auto *basicMenu = findMenuByTitle(rowMenu, "Basic filters");
+  auto *parametricMenu = findMenuByTitle(rowMenu, "Parametric filters");
+  auto *graphicMenu = findMenuByTitle(rowMenu, "Graphic equalizers");
+  auto *advancedMenu = findMenuByTitle(rowMenu, "Advanced filters");
+  auto *pluginMenu = rowMenu->findChild<QMenu *>("pluginAddMenu");
+  const auto rootActions = rowMenu->actions();
+  const QStringList expectedTopLevel{"Comment",
+                                     "Control",
+                                     "Basic filters",
+                                     "Parametric filters",
+                                     "Graphic equalizers",
+                                     "Advanced filters",
+                                     "Plugins"};
+  QStringList actualTopLevel;
+  for (const auto *action : rootActions)
+    actualTopLevel.append(action->menu() ? action->menu()->title()
+                                         : action->text());
+  const QStringList expectedParametric{
+      "Peaking filter",   "Low-pass filter",  "High-pass filter",
+      "Band-pass filter", "Low-shelf filter", "High-shelf filter",
+      "Notch filter",     "All-pass filter",  "Custom IIR filter"};
+  QStringList actualParametric;
+  if (parametricMenu)
+    for (const auto *action : parametricMenu->actions())
+      actualParametric.append(action->text());
+  if (actualTopLevel != expectedTopLevel || !controlMenu || !basicMenu ||
+      !parametricMenu || !advancedMenu || !pluginMenu ||
+      actualParametric != expectedParametric ||
+      !findTemplateAction(rowMenu, "# ") ||
+      !findTemplateAction(controlMenu, "Include: child.txt") ||
+      !findTemplateAction(controlMenu, "Device: all") ||
+      !findTemplateAction(controlMenu, "Channel: L R") ||
+      !findTemplateAction(controlMenu, "Stage: post-mix") ||
+      !findTemplateAction(basicMenu, "Preamp: 0 dB") ||
+      !findTemplateAction(basicMenu, "Delay: 0 ms") ||
+      !findTemplateAction(basicMenu, "Copy: L=L") ||
+      !findTemplateAction(advancedMenu, "Convolution: impulse-response.wav") ||
+      !findTemplateAction(
+          advancedMenu,
+          "LoudnessCorrection: State 1 ReferenceLevel 0 ReferenceOffset 0 "
+          "Attenuation 1.0") ||
+      !findTemplateAction(pluginMenu, "__SKYAPO_PICK_INSTALLED_PLUGIN__")) {
+    std::cerr << "Add Filter menu is missing the upstream category layout or "
+                 "required template actions\n";
     return 1;
   }
+  QStringList graphicActions;
+  if (graphicMenu)
+    for (const auto *action : graphicMenu->actions())
+      graphicActions.append(action->text());
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  if (graphicActions != QStringList{"15-band graphic equalizer",
+                                    "31-band graphic equalizer",
+                                    "Graphic equalizer with variable bands"}) {
+    std::cerr << "Graphic equalizer menu is missing an upstream template\n";
+    return 1;
+  }
+#else
+  if (graphicActions.size() != 1 ||
+      graphicMenu->actions().first()->isEnabled()) {
+    std::cerr << "Unavailable graphic equalizer state is not explicit\n";
+    return 1;
+  }
+#endif
   if (construction.elapsed() >= 1000) {
     std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
     return 1;
@@ -1793,8 +1855,8 @@ int main(int argc, char **argv) {
   if (!pluginsMenu || pluginsMenu->title() != "Plugins" || !lv2PluginAction ||
       lv2PluginAction->text() != "LV2 plugin…" || !clapPluginAction ||
       clapPluginAction->text() != "CLAP plugin…" || !linuxVstAction ||
-      linuxVstAction->text() != "VST plugin (Linux)…" || !windowsVstAction ||
-      windowsVstAction->text() != "VST plugin (Windows)…") {
+      linuxVstAction->text() != "VST plugin (Linux)" || !windowsVstAction ||
+      windowsVstAction->text() != "VST plugin (Windows)") {
     std::cerr << "plugin menu does not distinguish Linux and Windows VST\n";
     return 1;
   }
