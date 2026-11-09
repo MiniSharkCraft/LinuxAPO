@@ -269,7 +269,7 @@ bool readDefaultRouteSnapshot(const std::filesystem::path &path,
                               PersistedDefaultRoute &snapshot, bool &exists,
                               std::string &error) {
   exists = false;
-  struct stat pathInfo{};
+  struct stat pathInfo {};
   if (::lstat(path.c_str(), &pathInfo) < 0) {
     if (errno == ENOENT)
       return true;
@@ -289,7 +289,7 @@ bool readDefaultRouteSnapshot(const std::filesystem::path &path,
     error = "cannot open the playback route state file safely";
     return false;
   }
-  struct stat fileInfo{};
+  struct stat fileInfo {};
   if (::fstat(fd, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode) ||
       fileInfo.st_uid != ::getuid() || (fileInfo.st_mode & 0077) != 0 ||
       fileInfo.st_size != pathInfo.st_size) {
