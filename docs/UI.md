@@ -2,6 +2,8 @@
 
 The first SkyAPO GUI target, `skyapo-ui`, builds with Qt 6 Widgets. The pinned upstream `Editor/Editor.pro` is a Qt Widgets application (`core`, `gui`, `widgets`) built from a real configuration editor, filter-row/factory system, specialized filter widgets, custom Qt graphics widgets, and response-analysis views/worker. The current target directly compiles selected upstream GUI source files from the submodule; it does not copy/rewrite those controls.
 
+For a screenshot-by-screenshot comparison with Equalizer APO 1.4.2, including the Device Selector and Windows installation workflow, see [Windows UI parity](WINDOWS_APO_UI_PARITY.md). That audit distinguishes public `main` from open PR candidates and does not redistribute the reference images.
+
 ## Reuse candidates
 
 - `Editor/FilterTable*`, `FilterTemplate*`, `IFilterGUI*` and `IFilterGUIFactory*` implement the ordered configuration/filter-row model and plugin-like per-directive editor registration.
