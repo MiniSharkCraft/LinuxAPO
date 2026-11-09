@@ -81,7 +81,7 @@ def start_wireplumber(executable, env, log):
             "WirePlumber E2E requires dbus-run-session; install dbus-daemon")
     return subprocess.Popen(
         [dbus_run_session, "--", *command], env=env, text=True,
-        stdout=log, stderr=subprocess.STDOUT)
+        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
 def wait_for_wireplumber_client(pw_dump, env, process, timeout=8):
@@ -627,6 +627,7 @@ def main():
         "systemd-crash-restart",
         "playback-wireplumber-systemd-crash-restart",
         "playback-wireplumber-systemd-crash-user-override",
+        "playback-wireplumber-recovery-write-failure",
         "playback-wireplumber-configured-write-failure",
         "device-switch", "delay-pdc", "source-consumer-latency",
         "playback-preamp", "playback-wireplumber",
@@ -662,6 +663,7 @@ def main():
             "renegotiate|transition-format|systemd-crash-restart|"
             "playback-wireplumber-systemd-crash-restart|"
             "playback-wireplumber-systemd-crash-user-override|"
+            "playback-wireplumber-recovery-write-failure|"
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency|playback-preamp|playback-wireplumber|"
             "playback-wireplumber-link-error|"
@@ -734,6 +736,8 @@ def main():
     server_restart = mode == "server-restart" or playback_server_restart
     playback_systemd_user_override = (
         mode == "playback-wireplumber-systemd-crash-user-override")
+    playback_recovery_write_failure = (
+        mode == "playback-wireplumber-recovery-write-failure")
     playback_systemd_crash_restart = mode in (
         "playback-wireplumber-systemd-crash-restart",
         "playback-wireplumber-systemd-crash-user-override")
@@ -942,6 +946,11 @@ def main():
             # under this disposable runtime directory.
             "GIO_USE_VFS": "local",
         })
+        if playback_recovery_write_failure:
+            env["SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE_FILE"] = str(
+                root / "fail-configured-default-write-once")
+            env["SKYAPO_TEST_HOLD_DEFAULT_ROUTE_RECOVERY_FILE"] = str(
+                root / "hold-default-route-recovery")
         if output_switch or playback_isolation:
             fault_library = env.get("SKYAPO_TEST_FILTER_FAULT_LIBRARY")
             if not fault_library or not pathlib.Path(fault_library).is_file():
@@ -1012,6 +1021,7 @@ def main():
         server = source_process = second_source_process = daemon_process = None
         unrelated_playback_process = None
         wireplumber_process = None
+        wireplumber_paused = False
         null_target_manager = None
         playback_consumer = None
         post_crash_playback_consumer = None
@@ -1213,6 +1223,7 @@ def main():
                         "playback-wireplumber-server-restart",
                         "playback-wireplumber-systemd-crash-restart",
                         "playback-wireplumber-systemd-crash-user-override",
+                        "playback-wireplumber-recovery-write-failure",
                         "playback-wireplumber-output-switch",
                         "playback-wireplumber-surround51",
                         "playback-wireplumber-surround71",
@@ -1581,7 +1592,130 @@ def main():
                     f"daemon did not reach streaming state:\n{status}"
                     f"{policy_graph}")
             if wireplumber_playback:
-                if playback_route_write_failure:
+                if playback_recovery_write_failure:
+                    if isinstance(daemon_process, SystemdManagedDaemon):
+                        raise RuntimeError(
+                            "recovery-write-failure requires a directly "
+                            "managed daemon process")
+                    deadline = time.monotonic() + 8
+                    route_status = ""
+                    while time.monotonic() < deadline:
+                        route_status = run(
+                            [str(cli), "status"], env, timeout=5).stdout
+                        if ("Playback routing policy: active" in route_status and
+                                "PipeWire default sink: skyapo.playback" in
+                                route_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "initial daemon did not claim the playback route "
+                            "before crash simulation:\n" + route_status)
+                    state_file = (state_home / "skyapo" /
+                                  "playback-default-route-v1")
+                    if not state_file.is_file():
+                        raise RuntimeError(
+                            "initial playback route ownership did not persist "
+                            "a crash-recovery snapshot")
+                    daemon_process.send_signal(signal.SIGKILL)
+                    daemon_process.wait(timeout=5)
+                    daemon_process = None
+
+                    # Model a crash after the configured route was persisted
+                    # but before the active default was confirmed. Leave
+                    # WirePlumber running so skyapod can build its PipeWire
+                    # graph during recovery.
+                    run([metadata, "-n", "default", "0",
+                         "default.audio.sink",
+                         json.dumps({"name": initial_default_sink}),
+                         "Spa:String:JSON"], env, timeout=5)
+                    partial_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if (metadata_node_name(
+                            partial_metadata, "default.audio.sink") !=
+                            initial_default_sink or
+                            metadata_node_name(
+                                partial_metadata,
+                                "default.configured.audio.sink") !=
+                            "skyapo.playback"):
+                        raise RuntimeError(
+                            "could not establish partial route recovery state "
+                            f"after the crash; expected active="
+                            f"{initial_default_sink!r}, configured="
+                            "'skyapo.playback', got:\n"
+                            f"{partial_metadata}")
+                    pathlib.Path(
+                        env["SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE_FILE"]
+                    ).touch()
+                    hold_recovery = pathlib.Path(
+                        env["SKYAPO_TEST_HOLD_DEFAULT_ROUTE_RECOVERY_FILE"])
+                    hold_recovery.touch()
+                    daemon_process = subprocess.Popen(
+                        [str(daemon), "--config", str(dsp_config)], env=env,
+                        stdout=daemon_log, stderr=subprocess.STDOUT)
+                    deadline = time.monotonic() + 12
+                    recovery_graph_status = ""
+                    while time.monotonic() < deadline:
+                        if daemon_process.poll() is not None:
+                            raise RuntimeError(
+                                "skyapod exited before partial recovery setup")
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        recovery_graph_status = result.stdout
+                        if (result.returncode == 0 and
+                                "Daemon: streaming" in recovery_graph_status and
+                                "Playback graph: streaming / streaming" in
+                                recovery_graph_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "replacement daemon did not bring up playback "
+                            "while route recovery was held:\n" +
+                            recovery_graph_status)
+                    run([metadata, "-n", "default", "0",
+                         "default.audio.sink",
+                         json.dumps({"name": initial_default_sink}),
+                         "Spa:String:JSON"], env, timeout=5)
+                    partial_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if (metadata_node_name(
+                            partial_metadata, "default.audio.sink") !=
+                            initial_default_sink or
+                            metadata_node_name(
+                                partial_metadata,
+                                "default.configured.audio.sink") !=
+                            "skyapo.playback"):
+                        raise RuntimeError(
+                            "replacement daemon could not hold the partial "
+                            "recovery metadata state:\n" + partial_metadata)
+                    os.killpg(wireplumber_process.pid, signal.SIGSTOP)
+                    wireplumber_paused = True
+                    hold_recovery.unlink()
+                    deadline = time.monotonic() + 15
+                    recovery_status = ""
+                    while time.monotonic() < deadline:
+                        if daemon_process.poll() is not None:
+                            raise RuntimeError(
+                                "skyapod exited during partial route recovery")
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        recovery_status = result.stdout
+                        if (result.returncode == 0 and
+                                "Daemon: streaming" in recovery_status and
+                                "cannot update WirePlumber's configured "
+                                "playback default: Input/output error" in
+                                recovery_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "recovery write failure was not observed after "
+                            "the simulated daemon crash:\n" + recovery_status)
+                    os.killpg(wireplumber_process.pid, signal.SIGCONT)
+                    wireplumber_paused = False
+
+                if playback_route_write_failure or playback_recovery_write_failure:
                     deadline = time.monotonic() + 5
                     failure_status = ""
                     while time.monotonic() < deadline:
@@ -1613,13 +1747,50 @@ def main():
                             "PipeWire sink partially changed; expected rollback "
                             f"to {initial_default_sink!r}, got:\n"
                             f"{restored_metadata}")
+                    expected_configured_sink = (
+                        "skyapo.playback" if playback_recovery_write_failure
+                        else initial_configured_sink)
                     if (metadata_node_name(
                             restored_metadata,
                             "default.configured.audio.sink") !=
-                            initial_configured_sink):
+                            expected_configured_sink):
                         raise RuntimeError(
-                            "failed configured-default write changed the saved "
+                            "failed configured-default write changed the "
+                            "expected "
                             "WirePlumber route:\n" + restored_metadata)
+                    if playback_recovery_write_failure:
+                        if ("Playback routing policy: inactive (cannot update "
+                                "WirePlumber's configured playback default: "
+                                "Input/output error" not in failure_status or
+                                "Playback routing policy: active" in
+                                failure_status):
+                            raise RuntimeError(
+                                "recovery write failure was reported as active:\n"
+                                + failure_status)
+                        state_file = (state_home / "skyapo" /
+                                      "playback-default-route-v1")
+                        if not state_file.is_file():
+                            raise RuntimeError(
+                                "failed route recovery removed its snapshot")
+                        if pathlib.Path(
+                                env["SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE_FILE"]
+                                ).exists():
+                            raise RuntimeError(
+                                "one-shot recovery write failure was not consumed")
+                        stopped = run([str(cli), "stop"], env, timeout=8)
+                        if "Stopping skyapod" not in stopped.stdout:
+                            raise RuntimeError(
+                                "daemon did not acknowledge stop after failed "
+                                f"route recovery: {stopped.stdout}")
+                        daemon_process.wait(timeout=5)
+                        if not state_file.is_file():
+                            raise RuntimeError(
+                                "clean stop discarded an unconfirmed route "
+                                "snapshot")
+                        print("partial route recovery write failure left the "
+                              "route inactive, restored active metadata, and "
+                              "retained the snapshot for retry")
+                        return 0
                     print("failed configured-default write preserved both "
                           "original playback routes after WirePlumber recovery")
                     return 0
@@ -4915,6 +5086,9 @@ def main():
                           f"{process.poll()}", file=sys.stderr)
             raise
         finally:
+            if wireplumber_paused and wireplumber_process is not None:
+                os.killpg(wireplumber_process.pid, signal.SIGCONT)
+                wireplumber_paused = False
             try:
                 shutdown(((daemon_process, "skyapod"),
                           (source_process, "test source"),

@@ -375,6 +375,7 @@ struct Runtime {
   bool originalConfiguredDefaultCaptured{};
   bool defaultRouteActiveConfirmed{};
   bool defaultRouteConfiguredConfirmed{};
+  bool defaultRouteSyncConfirmed{};
   bool defaultRouteAttempted{};
   bool defaultRoutePending{};
   bool defaultRouteOwned{};
@@ -394,6 +395,7 @@ struct Runtime {
   std::string configuredDefaultMetadataValue;
   std::string configuredDefaultMetadataName;
   std::chrono::steady_clock::time_point defaultRouteLastWrite{};
+  std::chrono::steady_clock::time_point defaultRouteConfirmationDeadline{};
   std::chrono::steady_clock::time_point defaultRouteRecoveryReadySince{};
   std::string originalDefaultMetadataType;
   std::string originalDefaultMetadataValue;
@@ -556,6 +558,13 @@ struct Runtime {
   bool recoverPersistedDefaultRoute() {
     if (defaultRouteSnapshotChecked)
       return false;
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    const char *holdRecoveryFile =
+        std::getenv("SKYAPO_TEST_HOLD_DEFAULT_ROUTE_RECOVERY_FILE");
+    if (holdRecoveryFile && *holdRecoveryFile &&
+        ::access(holdRecoveryFile, F_OK) == 0)
+      return true;
+#endif
     defaultRouteSnapshotChecked = true;
     if (!defaultRouteSnapshotFile)
       return false;
@@ -577,8 +586,22 @@ struct Runtime {
     const auto matches = [](bool present, const std::string &type,
                             const std::string &value,
                             const PersistedMetadataValue &saved) {
-      return present == saved.present &&
-             (!present || (type == saved.type && value == saved.value));
+      if (present != saved.present)
+        return false;
+      if (!present)
+        return true;
+      if (type != saved.type)
+        return false;
+      if (type == "Spa:String:JSON") {
+        std::string currentName;
+        std::string savedName;
+        if (skyapo::pipewire::DefaultSinkVolumeMonitor::
+                parseDefaultNodeMetadata(value.c_str(), currentName) &&
+            skyapo::pipewire::DefaultSinkVolumeMonitor::
+                parseDefaultNodeMetadata(saved.value.c_str(), savedName))
+          return currentName == savedName;
+      }
+      return value == saved.value;
     };
     const bool activeSkyApo = defaultMetadataName == "skyapo.playback";
     const bool configuredSkyApo =
@@ -607,7 +630,9 @@ struct Runtime {
       defaultRouteAttempted = true;
       defaultRouteOverridden = true;
       defaultRouteError = "playback default changed while SkyAPO was stopped; "
-                          "leaving it untouched";
+                          "leaving it untouched (active='" +
+                          defaultMetadataName + "', configured='" +
+                          configuredDefaultMetadataName + "')";
       std::cerr << "skyapod: " << defaultRouteError << '\n';
       return true;
     }
@@ -621,14 +646,29 @@ struct Runtime {
     originalConfiguredDefaultMetadataValue = snapshot.configured.value;
     originalConfiguredDefaultCaptured = true;
     defaultRouteAttempted = true;
-    defaultRouteOwned = true;
     defaultRouteActiveConfirmed = activeSkyApo;
     defaultRouteConfiguredConfirmed = !wirePlumberPresent || configuredSkyApo;
-    defaultRouteError.clear();
-    std::cerr << "skyapod: recovered playback route ownership from the "
+    if (defaultRouteActiveConfirmed && defaultRouteConfiguredConfirmed) {
+      defaultRouteOwned = true;
+      defaultRouteError.clear();
+      std::cerr << "skyapod: recovered playback route ownership from the "
+                   "saved pre-crash default\n";
+      return true;
+    }
+
+    defaultRouteOwned = false;
+    if (!PW_PERM_IS_W(defaultMetadataPermissions)) {
+      defaultRoutePending = false;
+      defaultRouteSetRequested = false;
+      defaultRouteError =
+          "PipeWire default metadata is not writable; playback route "
+          "recovery remains inactive";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return true;
+    }
+    std::cerr << "skyapod: completing playback route recovery from the "
                  "saved pre-crash default\n";
-    if (!activeSkyApo || (wirePlumberPresent && !configuredSkyApo))
-      reassertOwnedDefaultRoute();
+    reassertOwnedDefaultRoute();
     return true;
   }
   static int metadataProperty(void *data, uint32_t subject, const char *key,
@@ -674,14 +714,7 @@ struct Runtime {
         r.defaultRouteConfiguredConfirmed = true;
       else
         r.defaultRouteActiveConfirmed = true;
-      if (r.defaultRouteActiveConfirmed &&
-          (!r.wirePlumberPresent || r.defaultRouteConfiguredConfirmed)) {
-        r.defaultRoutePending = false;
-        r.defaultRouteSetRequested = false;
-        r.defaultRouteOwned = true;
-        r.defaultRouteError.clear();
-        r.defaultRouteSequence = -1;
-      }
+      r.confirmDefaultRouteOwnership();
     }
 
     if (configuredDefault) {
@@ -763,26 +796,30 @@ struct Runtime {
       r.scheduleDefaultRouteUpdate();
     }
     if (r.defaultRouteSequence == sequence) {
-      if (r.defaultMetadataName == "skyapo.playback")
-        r.defaultRouteActiveConfirmed = true;
-      if (!r.wirePlumberPresent ||
-          r.configuredDefaultMetadataName == "skyapo.playback")
-        r.defaultRouteConfiguredConfirmed = true;
-      if (r.defaultRouteActiveConfirmed && r.defaultRouteConfiguredConfirmed) {
-        r.defaultRoutePending = false;
-        r.defaultRouteSetRequested = false;
-        r.defaultRouteOwned = true;
-        r.defaultRouteError.clear();
-      } else {
-        r.defaultRoutePending = false;
-        r.defaultRouteError =
-            "PipeWire/WirePlumber did not confirm SkyAPO as the default "
-            "playback route";
-      }
+      // The core sync can arrive before the metadata subscription delivers
+      // the writes. Keep the route pending until both sources confirm it.
+      r.defaultRouteSyncConfirmed = true;
       r.defaultRouteSequence = -1;
+      r.confirmDefaultRouteOwnership();
+      if (r.defaultRouteSetRequested && r.defaultRouteTimer) {
+        timespec delay{2, 0};
+        pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.defaultRouteTimer,
+                             &delay, nullptr, false);
+      }
     }
     if (r.defaultRestoreSequence == sequence)
       r.defaultRestoreSequence = -1;
+  }
+  void confirmDefaultRouteOwnership() {
+    if (!defaultRouteSetRequested || !defaultRouteSyncConfirmed ||
+        !defaultRouteActiveConfirmed || !defaultRouteConfiguredConfirmed)
+      return;
+    defaultRoutePending = false;
+    defaultRouteSetRequested = false;
+    defaultRouteOwned = true;
+    defaultRouteError.clear();
+    std::cerr << "skyapod: PipeWire and WirePlumber confirmed SkyAPO as the "
+                 "default playback route\n";
   }
   void waitForCoreSync(int sequence) {
     if (sequence < 0 || !main)
@@ -861,6 +898,10 @@ struct Runtime {
   void reassertOwnedDefaultRoute() {
     if (!defaultMetadata)
       return;
+    defaultRouteOwned = false;
+    defaultRouteSyncConfirmed = false;
+    defaultRouteConfirmationDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
     const bool previousDefaultPresent = defaultMetadataPresent;
     const std::string previousDefaultType = defaultMetadataType;
     const std::string previousDefaultValue = defaultMetadataValue;
@@ -876,6 +917,7 @@ struct Runtime {
     if (result < 0) {
       defaultRoutePending = false;
       defaultRouteSetRequested = false;
+      defaultRouteOwned = false;
       defaultRouteError =
           std::string("cannot set PipeWire default sink metadata: ") +
           spa_strerror(result);
@@ -887,9 +929,18 @@ struct Runtime {
 #ifdef SKYAPO_PIPEWIRE_E2E_TESTING
       const char *failConfiguredWrite =
           std::getenv("SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE");
-      if (failConfiguredWrite && std::strcmp(failConfiguredWrite, "1") == 0)
+      const char *failConfiguredWriteFile =
+          std::getenv("SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE_FILE");
+      const bool failConfiguredWriteOnce =
+          failConfiguredWriteFile && *failConfiguredWriteFile &&
+          ::access(failConfiguredWriteFile, F_OK) == 0;
+      if (failConfiguredWriteOnce) {
+        ::unlink(failConfiguredWriteFile);
         configuredResult = -EIO;
-      else
+      } else if (failConfiguredWrite &&
+                 std::strcmp(failConfiguredWrite, "1") == 0) {
+        configuredResult = -EIO;
+      } else
 #endif
         configuredResult = pw_metadata_set_property(
             defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
@@ -897,6 +948,7 @@ struct Runtime {
       if (configuredResult < 0) {
         defaultRoutePending = false;
         defaultRouteSetRequested = false;
+        defaultRouteOwned = false;
         const std::string configuredError =
             std::string("cannot update WirePlumber's configured playback "
                         "default: ") +
@@ -931,6 +983,7 @@ struct Runtime {
     if (defaultRouteSequence < 0) {
       defaultRoutePending = false;
       defaultRouteSetRequested = false;
+      defaultRouteSyncConfirmed = false;
       defaultRouteError = "cannot confirm the PipeWire default sink update";
       std::cerr << "skyapod: " << defaultRouteError << '\n';
     }
@@ -950,6 +1003,23 @@ struct Runtime {
   }
   static void defaultRouteReady(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
+    if (r.defaultRouteSetRequested && r.defaultRouteSyncConfirmed) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= r.defaultRouteConfirmationDeadline) {
+        r.defaultRoutePending = false;
+        r.defaultRouteSetRequested = false;
+        r.defaultRouteOwned = false;
+        r.defaultRouteError =
+            "PipeWire/WirePlumber did not confirm SkyAPO as the default "
+            "playback route";
+        std::cerr << "skyapod: " << r.defaultRouteError << '\n';
+      } else {
+        timespec delay{0, 100000000};
+        pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.defaultRouteTimer,
+                             &delay, nullptr, false);
+        return;
+      }
+    }
     if (r.defaultRouteRecoveryPending) {
       const auto now = std::chrono::steady_clock::now();
       if (!r.playbackGraph || !r.playbackGraph->ready()) {
@@ -2379,6 +2449,7 @@ struct Runtime {
       r.originalConfiguredDefaultCaptured = false;
       r.defaultRouteActiveConfirmed = false;
       r.defaultRouteConfiguredConfirmed = false;
+      r.defaultRouteSyncConfirmed = false;
       r.defaultRouteOwned = false;
       r.defaultRoutePending = false;
       r.defaultRouteAttempted = false;
