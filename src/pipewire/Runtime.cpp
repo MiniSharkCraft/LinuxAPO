@@ -121,6 +121,26 @@ struct PersistedDefaultRoute {
   PersistedMetadataValue active;
   PersistedMetadataValue configured;
 };
+bool matchesDefaultMetadata(const bool present, const std::string &type,
+                            const std::string &value,
+                            const PersistedMetadataValue &saved) {
+  if (present != saved.present)
+    return false;
+  if (!present)
+    return true;
+  if (type != saved.type)
+    return false;
+  if (type == "Spa:String:JSON") {
+    std::string currentName;
+    std::string savedName;
+    if (skyapo::pipewire::DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
+            value.c_str(), currentName) &&
+        skyapo::pipewire::DefaultSinkVolumeMonitor::parseDefaultNodeMetadata(
+            saved.value.c_str(), savedName))
+      return currentName == savedName;
+  }
+  return value == saved.value;
+}
 std::optional<std::filesystem::path> defaultRouteSnapshotPath() {
   if (const char *stateHome = std::getenv("XDG_STATE_HOME");
       stateHome && *stateHome) {
@@ -583,36 +603,16 @@ struct Runtime {
     if (!exists)
       return false;
 
-    const auto matches = [](bool present, const std::string &type,
-                            const std::string &value,
-                            const PersistedMetadataValue &saved) {
-      if (present != saved.present)
-        return false;
-      if (!present)
-        return true;
-      if (type != saved.type)
-        return false;
-      if (type == "Spa:String:JSON") {
-        std::string currentName;
-        std::string savedName;
-        if (skyapo::pipewire::DefaultSinkVolumeMonitor::
-                parseDefaultNodeMetadata(value.c_str(), currentName) &&
-            skyapo::pipewire::DefaultSinkVolumeMonitor::
-                parseDefaultNodeMetadata(saved.value.c_str(), savedName))
-          return currentName == savedName;
-      }
-      return value == saved.value;
-    };
     const bool activeSkyApo = defaultMetadataName == "skyapo.playback";
     const bool configuredSkyApo =
         wirePlumberPresent &&
         configuredDefaultMetadataName == "skyapo.playback";
     const bool activeOriginal =
-        matches(defaultMetadataPresent, defaultMetadataType,
-                defaultMetadataValue, snapshot.active);
-    const bool configuredOriginal =
-        matches(configuredDefaultMetadataPresent, configuredDefaultMetadataType,
-                configuredDefaultMetadataValue, snapshot.configured);
+        matchesDefaultMetadata(defaultMetadataPresent, defaultMetadataType,
+                               defaultMetadataValue, snapshot.active);
+    const bool configuredOriginal = matchesDefaultMetadata(
+        configuredDefaultMetadataPresent, configuredDefaultMetadataType,
+        configuredDefaultMetadataValue, snapshot.configured);
     const bool configuredCompatible =
         !wirePlumberPresent || configuredSkyApo || configuredOriginal;
     if (!activeSkyApo && !configuredSkyApo && activeOriginal &&
@@ -648,6 +648,16 @@ struct Runtime {
     defaultRouteAttempted = true;
     defaultRouteActiveConfirmed = activeSkyApo;
     defaultRouteConfiguredConfirmed = !wirePlumberPresent || configuredSkyApo;
+    if (!PW_PERM_IS_W(defaultMetadataPermissions)) {
+      defaultRouteOwned = false;
+      defaultRoutePending = false;
+      defaultRouteSetRequested = false;
+      defaultRouteError =
+          "PipeWire default metadata is not writable; playback route "
+          "recovery remains inactive";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return true;
+    }
     if (defaultRouteActiveConfirmed && defaultRouteConfiguredConfirmed) {
       defaultRouteOwned = true;
       defaultRouteError.clear();
@@ -657,15 +667,6 @@ struct Runtime {
     }
 
     defaultRouteOwned = false;
-    if (!PW_PERM_IS_W(defaultMetadataPermissions)) {
-      defaultRoutePending = false;
-      defaultRouteSetRequested = false;
-      defaultRouteError =
-          "PipeWire default metadata is not writable; playback route "
-          "recovery remains inactive";
-      std::cerr << "skyapod: " << defaultRouteError << '\n';
-      return true;
-    }
     std::cerr << "skyapod: completing playback route recovery from the "
                  "saved pre-crash default\n";
     reassertOwnedDefaultRoute();
@@ -1109,20 +1110,21 @@ struct Runtime {
     defaultRestoreSequence = -1;
     defaultRouteRestoring = false;
     defaultRouteOwned = false;
+    const PersistedMetadataValue activeOriginal{originalDefaultMetadataPresent,
+                                                originalDefaultMetadataType,
+                                                originalDefaultMetadataValue};
     const bool activeMetadataNotRestored =
-        defaultMetadataPresent != originalDefaultMetadataPresent ||
-        (defaultMetadataPresent &&
-         (defaultMetadataType != originalDefaultMetadataType ||
-          defaultMetadataValue != originalDefaultMetadataValue));
+        !matchesDefaultMetadata(defaultMetadataPresent, defaultMetadataType,
+                                defaultMetadataValue, activeOriginal);
+    const PersistedMetadataValue configuredOriginal{
+        originalConfiguredDefaultMetadataPresent,
+        originalConfiguredDefaultMetadataType,
+        originalConfiguredDefaultMetadataValue};
     const bool configuredMetadataNotRestored =
         originalConfiguredDefaultCaptured &&
-        (configuredDefaultMetadataPresent !=
-             originalConfiguredDefaultMetadataPresent ||
-         (configuredDefaultMetadataPresent &&
-          (configuredDefaultMetadataType !=
-               originalConfiguredDefaultMetadataType ||
-           configuredDefaultMetadataValue !=
-               originalConfiguredDefaultMetadataValue)));
+        !matchesDefaultMetadata(
+            configuredDefaultMetadataPresent, configuredDefaultMetadataType,
+            configuredDefaultMetadataValue, configuredOriginal);
     if (activeMetadataNotRestored || configuredMetadataNotRestored)
       std::cerr << "skyapod: PipeWire did not confirm restoration of the "
                    "previous playback default metadata\n";
