@@ -1,8 +1,10 @@
 #include "ResponseAnalysis.h"
 
 #include "Engine.h"
+#include "../platform/linux/ConfigSource.h"
 #include <QCryptographicHash>
 #include <QFile>
+#include <QFileInfo>
 #include <fftw3.h>
 #include <algorithm>
 #include <chrono>
@@ -130,10 +132,11 @@ bool responseConfigDependenciesUnchanged(
   return sameConfigDependencies(dependencies, current);
 }
 
-ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
-                                             unsigned sampleRate,
-                                             unsigned channels,
-                                             unsigned fftFrames) {
+ResponseAnalysisResult
+analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
+                      unsigned channels, unsigned fftFrames,
+                      const QString &sourceConfigPath,
+                      const QByteArray &sourceConfigSha256) {
   ResponseAnalysisResult result;
   if (sampleRate == 0 || channels == 0 || channels > MaxAnalysisChannels ||
       fftFrames < MinAnalysisFrames || fftFrames > MaxAnalysisFrames ||
@@ -151,6 +154,51 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
   }
 
   try {
+    QString dependencyError;
+    QVector<ResponseConfigDependency> engineDependencies;
+    {
+      // Capture the loaded config/Include set before response engines parse it.
+      Engine probe(sampleRate, channels, 1024, {}, false, false);
+      probe.loadConfig(configPath.toStdString());
+      engineDependencies =
+          captureConfigDependencies(probe.configFiles(), dependencyError);
+    }
+    if (!dependencyError.isEmpty()) {
+      result.error = dependencyError;
+      return result;
+    }
+    if (engineDependencies.isEmpty()) {
+      result.error =
+          QStringLiteral("No configuration dependencies were loaded.");
+      return result;
+    }
+    result.configDependencies = engineDependencies;
+
+    if (!sourceConfigPath.isEmpty()) {
+      if (sourceConfigSha256.size() !=
+          QCryptographicHash::hashLength(QCryptographicHash::Sha256)) {
+        result.error =
+            QStringLiteral("The source configuration fingerprint is invalid.");
+        return result;
+      }
+      const std::string snapshotPath =
+          skyapo::platform::ConfigSource::canonicalize(
+              std::filesystem::path(configPath.toStdString()))
+              .string();
+      const auto snapshotRoot = std::find_if(
+          engineDependencies.cbegin(), engineDependencies.cend(),
+          [&snapshotPath](const ResponseConfigDependency &dependency) {
+            return dependency.path == snapshotPath;
+          });
+      if (snapshotRoot == engineDependencies.cend() ||
+          snapshotRoot->sha256 != sourceConfigSha256) {
+        result.error = changedConfigError();
+        return result;
+      }
+      result.configDependencies.append(
+          {sourceConfigPath.toLocal8Bit().toStdString(), sourceConfigSha256});
+    }
+
     double totalInitializationMs = 0.0;
     double totalEngineProcessingMs = 0.0;
     unsigned initializedEngines = 0;
@@ -165,17 +213,14 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
               std::chrono::steady_clock::now() - initializationStarted)
               .count();
       ++initializedEngines;
-      QString dependencyError;
-      const auto engineDependencies =
-          captureConfigDependencies(engine.configFiles(), dependencyError);
-      if (!dependencyError.isEmpty()) {
-        result.error = dependencyError;
+      QString currentDependencyError;
+      const auto currentDependencies = captureConfigDependencies(
+          engine.configFiles(), currentDependencyError);
+      if (!currentDependencyError.isEmpty()) {
+        result.error = currentDependencyError;
         return result;
       }
-      if (result.configDependencies.isEmpty())
-        result.configDependencies = engineDependencies;
-      else if (!sameConfigDependencies(result.configDependencies,
-                                       engineDependencies)) {
+      if (!sameConfigDependencies(engineDependencies, currentDependencies)) {
         result.error = changedConfigError();
         return result;
       }

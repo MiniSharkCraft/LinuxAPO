@@ -32,7 +32,8 @@ struct ResponseAnalysisResult {
 // This helper reads the tracked files and must also stay off the audio thread.
 bool responseConfigDependenciesUnchanged(
     const QVector<ResponseConfigDependency> &dependencies);
-ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
-                                             unsigned sampleRate = 48000,
-                                             unsigned channels = 2,
-                                             unsigned fftFrames = 16384);
+ResponseAnalysisResult
+analyzeConfigResponse(const QString &configPath, unsigned sampleRate = 48000,
+                      unsigned channels = 2, unsigned fftFrames = 16384,
+                      const QString &sourceConfigPath = {},
+                      const QByteArray &sourceConfigSha256 = {});

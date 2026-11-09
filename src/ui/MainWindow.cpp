@@ -32,6 +32,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
@@ -1237,6 +1238,10 @@ void MainWindow::analyzeResponse() {
     }
     contents = source.readAll();
   }
+  const QByteArray sourceDigest =
+      QCryptographicHash::hash(contents, QCryptographicHash::Sha256);
+  const QString sourcePathForValidation =
+      useCurrentFile ? QString{} : sourcePath;
   const QString directory = QFileInfo(sourcePath).absolutePath();
   auto snapshot = std::make_shared<QTemporaryFile>(
       directory + QStringLiteral("/.skyapo-response-XXXXXX"));
@@ -1269,16 +1274,19 @@ void MainWindow::analyzeResponse() {
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
   const auto startAnalysis = [self, snapshot, snapshotPath, sourceName,
+                              sourcePathForValidation, sourceDigest,
                               sourceTracksEditor, requestedRevision, fftFrames](
                                  unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
     auto *worker = QThread::create([self, snapshot, snapshotPath, sourceName,
+                                    sourcePathForValidation, sourceDigest,
                                     sourceTracksEditor, requestedRevision,
                                     fftFrames, sampleRate, channels] {
       auto result =
-          analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
+          analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames,
+                                sourcePathForValidation, sourceDigest);
       if (!self)
         return;
       QMetaObject::invokeMethod(

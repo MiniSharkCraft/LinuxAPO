@@ -26,6 +26,7 @@
 #include "Editor/guis/StageFilterGUIFactory.h"
 #include <QApplication>
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QColor>
 #include <QCheckBox>
 #include <QComboBox>
@@ -62,6 +63,7 @@
 #include <QTableWidget>
 #endif
 #include <iostream>
+#include <filesystem>
 
 namespace {
 bool writeTestImpulseResponse(const QString &path) {
@@ -606,36 +608,54 @@ int main(int argc, char **argv) {
   }
   const QString includeAnalysisRoot =
       QDir(includeAnalysisDirectory).filePath(QStringLiteral("root.txt"));
+  const QString includeAnalysisSnapshot =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("snapshot.txt"));
   const QString includeAnalysisChild =
       QDir(includeAnalysisDirectory).filePath(QStringLiteral("child.txt"));
+  const QByteArray includeRootContents = "Include: child.txt\n";
   QFile includeAnalysisRootFile(includeAnalysisRoot);
+  QFile includeAnalysisSnapshotFile(includeAnalysisSnapshot);
   QFile includeAnalysisChildFile(includeAnalysisChild);
   if (!includeAnalysisRootFile.open(QIODevice::WriteOnly) ||
-      includeAnalysisRootFile.write("Include: child.txt\n") != 19 ||
+      includeAnalysisRootFile.write(includeRootContents) !=
+          includeRootContents.size() ||
+      !includeAnalysisSnapshotFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisSnapshotFile.write(includeRootContents) !=
+          includeRootContents.size() ||
       !includeAnalysisChildFile.open(QIODevice::WriteOnly) ||
       includeAnalysisChildFile.write("Preamp: -6 dB\n") != 14) {
     std::cerr << "could not write response Include fixture\n";
     return 1;
   }
   includeAnalysisRootFile.close();
+  includeAnalysisSnapshotFile.close();
   includeAnalysisChildFile.close();
-  const auto includeResponse =
-      analyzeConfigResponse(includeAnalysisRoot, 44100, 1, 128);
+  const auto includeResponse = analyzeConfigResponse(
+      includeAnalysisSnapshot, 44100, 1, 128, includeAnalysisRoot,
+      QCryptographicHash::hash(includeRootContents,
+                               QCryptographicHash::Sha256));
   if (!includeResponse.error.isEmpty() ||
-      includeResponse.configDependencies.size() != 2) {
-    std::cerr << "response analysis did not record its root and Include "
+      includeResponse.configDependencies.size() != 3) {
+    std::cerr << "response analysis did not record its snapshot, source root "
+                 "and Include "
                  "dependencies: "
               << includeResponse.error.toStdString() << '\n';
     return 1;
   }
   bool includeChildTracked = false;
-  for (const auto &dependency : includeResponse.configDependencies)
+  bool originalRootTracked = false;
+  for (const auto &dependency : includeResponse.configDependencies) {
     includeChildTracked =
         includeChildTracked ||
         dependency.path.find("child.txt") != std::string::npos;
-  if (!includeChildTracked || !responseConfigDependenciesUnchanged(
-                                  includeResponse.configDependencies)) {
-    std::cerr << "response analysis did not retain stable Include dependency "
+    originalRootTracked =
+        originalRootTracked ||
+        dependency.path == includeAnalysisRoot.toLocal8Bit().toStdString();
+  }
+  if (!includeChildTracked || !originalRootTracked ||
+      !responseConfigDependenciesUnchanged(
+          includeResponse.configDependencies)) {
+    std::cerr << "response analysis did not retain stable source and Include "
                  "fingerprints\n";
     return 1;
   }
@@ -649,6 +669,56 @@ int main(int argc, char **argv) {
   if (responseConfigDependenciesUnchanged(includeResponse.configDependencies)) {
     std::cerr << "response analysis did not detect a changed Include "
                  "dependency\n";
+    return 1;
+  }
+  QFile restoredInclude(includeAnalysisChild);
+  if (!restoredInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      restoredInclude.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not restore response Include fixture\n";
+    return 1;
+  }
+  restoredInclude.close();
+  QFile changedRoot(includeAnalysisRoot);
+  if (!changedRoot.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedRoot.write("Preamp: 0 dB\n") != 13) {
+    std::cerr << "could not change response source-root fixture\n";
+    return 1;
+  }
+  changedRoot.close();
+  if (responseConfigDependenciesUnchanged(includeResponse.configDependencies)) {
+    std::cerr
+        << "response analysis did not detect a changed source-root file\n";
+    return 1;
+  }
+  if (!changedRoot.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedRoot.write(includeRootContents) != includeRootContents.size()) {
+    std::cerr << "could not restore response source-root fixture\n";
+    return 1;
+  }
+  changedRoot.close();
+  const QString includeAnalysisAlias =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("alias"));
+  if (!QFile::link(includeAnalysisDirectory, includeAnalysisAlias)) {
+    std::cerr << "could not create response-analysis symlink fixture\n";
+    return 1;
+  }
+  const QString aliasSnapshot =
+      QDir(includeAnalysisAlias).filePath(QStringLiteral("snapshot.txt"));
+  QFile aliasSnapshotFile(aliasSnapshot);
+  if (!aliasSnapshotFile.open(QIODevice::WriteOnly) ||
+      aliasSnapshotFile.write(includeRootContents) !=
+          includeRootContents.size()) {
+    std::cerr << "could not write response-analysis symlink snapshot\n";
+    return 1;
+  }
+  aliasSnapshotFile.close();
+  const auto symlinkResponse = analyzeConfigResponse(
+      aliasSnapshot, 44100, 1, 128, includeAnalysisRoot,
+      QCryptographicHash::hash(includeRootContents,
+                               QCryptographicHash::Sha256));
+  if (!symlinkResponse.error.isEmpty()) {
+    std::cerr << "response analysis rejected a valid symlink config path: "
+              << symlinkResponse.error.toStdString() << '\n';
     return 1;
   }
   const auto gainAt = [](const ResponseCurve &curve, double frequency) {
