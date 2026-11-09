@@ -4,6 +4,7 @@
 #include "Editor/FilterTable.h"
 #include <QMainWindow>
 #include <QString>
+#include <QStringList>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -13,6 +14,7 @@ class QComboBox;
 class QCheckBox;
 class QCloseEvent;
 class QDockWidget;
+class QFileSystemWatcher;
 class QLabel;
 class QLineEdit;
 class QMenu;
@@ -56,6 +58,7 @@ private:
   void analyzeResponse();
   void updateAnalysisInputChannels(unsigned channels);
   void clearResponsePlot(const QString &message);
+  bool watchResponseConfigFiles(const QStringList &paths);
   void markResponseAnalysisStale();
   void showAbout();
   void refreshRecentFilesMenu();
@@ -87,6 +90,7 @@ private:
   QSpinBox *analysisSampleRate{};
   QSpinBox *analysisChannels{};
   QDockWidget *responseDock{};
+  QFileSystemWatcher *responseConfigWatcher{};
   QWidget *responsePlotContainer{};
   QVBoxLayout *responsePlotLayout{};
   QLabel *analysisStatusLabel{};
@@ -96,6 +100,7 @@ private:
   QLabel *analysisInitializationLabel{};
   QLabel *analysisCpuLabel{};
   QThread *responseThread{};
+  QThread *responseDependencyThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
   FilterTable *rowTable{};
@@ -109,5 +114,7 @@ private:
   quint64 configRevision{};
   bool responseAnalysisTracksEditor{};
   bool responseAnalysisHasResult{};
+  bool responseDependencyCheckPending{};
+  bool responseDependencyChangedWhileChecking{};
   QString saveAsError;
 };

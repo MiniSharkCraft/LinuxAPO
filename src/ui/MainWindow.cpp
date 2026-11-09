@@ -32,6 +32,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QCryptographicHash>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -577,19 +578,6 @@ bool rebaseRelativeIncludes(ConfigFile &config, const QString &sourcePath,
   return true;
 }
 
-bool refersToSameConfigFile(const QString &firstPath,
-                            const QString &secondPath) {
-  if (firstPath.isEmpty() || secondPath.isEmpty())
-    return false;
-  const auto normalizedPath = [](const QString &path) {
-    const QFileInfo info(path);
-    const QString canonical = info.canonicalFilePath();
-    return QDir::cleanPath(canonical.isEmpty() ? info.absoluteFilePath()
-                                               : canonical);
-  };
-  return normalizedPath(firstPath) == normalizedPath(secondPath);
-}
-
 } // namespace
 
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
@@ -928,6 +916,23 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   responseDock->setObjectName(QStringLiteral("responseAnalysisDock"));
   responseDock->setAllowedAreas(Qt::BottomDockWidgetArea);
   responseDock->setWidget(analysisPanel);
+  responseConfigWatcher = new QFileSystemWatcher(this);
+  connect(responseConfigWatcher, &QFileSystemWatcher::fileChanged, this,
+          [this](const QString &path) {
+            if (responseDependencyCheckPending) {
+              responseDependencyChangedWhileChecking = true;
+              return;
+            }
+            if (!responseAnalysisHasResult)
+              return;
+            responseAnalysisHasResult = false;
+            responseConfigWatcher->removePaths(responseConfigWatcher->files());
+            analysisStatusLabel->setProperty("analysisState", "stale");
+            analysisStatusLabel->setText(
+                tr("Stale response: configuration or Include file '%1' "
+                   "changed after analysis. Analyze again to update it.")
+                    .arg(QFileInfo(path).fileName()));
+          });
 
   auto *deviceRow = new QHBoxLayout;
   deviceCombo = new QComboBox(root);
@@ -1195,6 +1200,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
 MainWindow::~MainWindow() {
   if (responseThread && responseThread->isRunning())
     responseThread->wait();
+  if (responseDependencyThread && responseDependencyThread->isRunning())
+    responseDependencyThread->wait();
   const auto processes = findChildren<QProcess *>();
   for (auto *process : processes) {
     QObject::disconnect(process, nullptr, this, nullptr);
@@ -1210,6 +1217,10 @@ void MainWindow::analyzeResponse() {
   if (configPath.isEmpty())
     return;
   responseAnalysisHasResult = false;
+  responseDependencyCheckPending = false;
+  responseDependencyChangedWhileChecking = false;
+  if (responseConfigWatcher)
+    responseConfigWatcher->removePaths(responseConfigWatcher->files());
   analysisPeakGainLabel->setText(tr("Peak gain: N/A"));
   analysisLatencyLabel->setText(tr("Impulse onset: N/A (not measured)"));
   analysisInitializationLabel->setText(
@@ -1218,8 +1229,7 @@ void MainWindow::analyzeResponse() {
   const bool useCurrentFile = responseSourceCombo->currentData().toBool();
   const quint64 requestedRevision = configRevision;
   const QString sourcePath = useCurrentFile ? configPath : defaultConfigPath();
-  const bool sourceTracksEditor =
-      useCurrentFile || refersToSameConfigFile(sourcePath, configPath);
+  const bool sourceTracksEditor = useCurrentFile;
   const QString sourceName =
       useCurrentFile ? tr("Current file") : tr("Default config.txt");
   QByteArray contents;
@@ -1274,6 +1284,7 @@ void MainWindow::analyzeResponse() {
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
   const auto startAnalysis = [self, snapshot, snapshotPath, sourceName,
+                              sourceWatchPath = sourcePath,
                               sourcePathForValidation, sourceDigest,
                               sourceTracksEditor, requestedRevision, fftFrames](
                                  unsigned sampleRate, unsigned channels) {
@@ -1281,9 +1292,10 @@ void MainWindow::analyzeResponse() {
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
     auto *worker = QThread::create([self, snapshot, snapshotPath, sourceName,
-                                    sourcePathForValidation, sourceDigest,
-                                    sourceTracksEditor, requestedRevision,
-                                    fftFrames, sampleRate, channels] {
+                                    sourceWatchPath, sourcePathForValidation,
+                                    sourceDigest, sourceTracksEditor,
+                                    requestedRevision, fftFrames, sampleRate,
+                                    channels] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames,
                                 sourcePathForValidation, sourceDigest);
@@ -1291,16 +1303,16 @@ void MainWindow::analyzeResponse() {
         return;
       QMetaObject::invokeMethod(
           self,
-          [self, snapshot, sourceName, sourceTracksEditor, requestedRevision,
-           fftFrames, sampleRate, channels,
-           result = std::move(result)]() mutable {
+          [self, snapshot, snapshotPath, sourceName, sourceWatchPath,
+           sourceTracksEditor, requestedRevision, fftFrames, sampleRate,
+           channels, result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
-            self->responseButton->setEnabled(true);
-            self->responseButton->setText(self->tr("Analyze response"));
             if (sourceTracksEditor &&
                 self->configRevision != requestedRevision) {
+              self->responseButton->setEnabled(true);
+              self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState", "failed");
               self->analysisStatusLabel->setText(
                   self->tr("Analysis failed: the current configuration "
@@ -1311,6 +1323,8 @@ void MainWindow::analyzeResponse() {
               return;
             }
             if (!result.error.isEmpty()) {
+              self->responseButton->setEnabled(true);
+              self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState", "failed");
               self->analysisStatusLabel->setText(
                   self->tr("Analysis failed: %1").arg(result.error));
@@ -1318,69 +1332,168 @@ void MainWindow::analyzeResponse() {
               self->clearResponsePlot(self->analysisStatusLabel->text());
               return;
             }
-            double peakGainDb = -std::numeric_limits<double>::infinity();
-            for (const auto &curve : result.curves)
-              for (const auto &point : curve.points)
-                if (std::isfinite(point.y()))
-                  peakGainDb = std::max(peakGainDb, point.y());
-            self->responseAnalysisTracksEditor = sourceTracksEditor;
-            self->responseAnalysisHasResult = true;
+            QStringList dependencyPaths;
+            const QString snapshotFile =
+                QFileInfo(snapshotPath).absoluteFilePath();
+            for (const auto &dependency : result.configDependencies) {
+              const QString dependencyPath = QString::fromLocal8Bit(
+                  dependency.path.data(),
+                  static_cast<qsizetype>(dependency.path.size()));
+              if (QFileInfo(dependencyPath).absoluteFilePath() != snapshotFile)
+                dependencyPaths.append(dependencyPath);
+            }
+            if (!sourceTracksEditor)
+              dependencyPaths.append(sourceWatchPath);
+
+            auto sharedResult =
+                std::make_shared<ResponseAnalysisResult>(std::move(result));
+            const auto showResult = [self, sharedResult, sourceName,
+                                     sourceTracksEditor, requestedRevision,
+                                     fftFrames, sampleRate, channels](
+                                        const QString &status,
+                                        const char *state, bool monitored) {
+              if (!self)
+                return;
+              double peakGainDb = -std::numeric_limits<double>::infinity();
+              for (const auto &curve : sharedResult->curves)
+                for (const auto &point : curve.points)
+                  if (std::isfinite(point.y()))
+                    peakGainDb = std::max(peakGainDb, point.y());
+              self->responseAnalysisTracksEditor = sourceTracksEditor;
+              self->responseAnalysisHasResult = monitored;
+              self->responseButton->setEnabled(true);
+              self->responseButton->setText(self->tr("Analyze response"));
+              self->analysisStatusLabel->setProperty("analysisState", state);
+              self->analysisStatusLabel->setText(status);
+              QString analysisSummary =
+                  self->tr(
+                          "EAPO Engine impulse response · %1 · %2 Hz · %3 %4 · "
+                          "%5 FFT samples · all input/output channel paths")
+                      .arg(sourceName)
+                      .arg(sampleRate)
+                      .arg(channels)
+                      .arg(channels == 1 ? self->tr("channel")
+                                         : self->tr("channels"))
+                      .arg(fftFrames);
+              if (sourceTracksEditor)
+                analysisSummary +=
+                    self->tr(" · editor revision %1").arg(requestedRevision);
+              self->analysisSummaryLabel->setText(analysisSummary);
+              self->analysisPeakGainLabel->setText(
+                  std::isfinite(peakGainDb)
+                      ? self->tr("Peak sampled gain: %1 dB")
+                            .arg(peakGainDb, 0, 'f', 2)
+                      : self->tr("Peak gain: N/A"));
+              if (sharedResult->impulseOnsetSamples) {
+                const double onsetMs =
+                    static_cast<double>(*sharedResult->impulseOnsetSamples) *
+                    1000.0 / sampleRate;
+                self->analysisLatencyLabel->setText(
+                    self->tr("Impulse onset: %1 ms (%2 samples)")
+                        .arg(onsetMs, 0, 'f', 2)
+                        .arg(*sharedResult->impulseOnsetSamples));
+              } else {
+                self->analysisLatencyLabel->setText(self->tr(
+                    "Impulse onset: N/A (no response in analysis window)"));
+              }
+              if (sharedResult->engineInitializationMs)
+                self->analysisInitializationLabel->setText(
+                    self->tr("Engine initialization time: %1 ms per engine")
+                        .arg(*sharedResult->engineInitializationMs, 0, 'f', 2));
+              if (sharedResult->engineProcessingPercent) {
+                const int cpuPrecision =
+                    *sharedResult->engineProcessingPercent >= 0.1 ? 1 : 4;
+                self->analysisCpuLabel->setText(
+                    self->tr("CPU usage: %1 % (one core)")
+                        .arg(*sharedResult->engineProcessingPercent, 0, 'f',
+                             cpuPrecision));
+              }
+              self->updateAnalysisInputChannels(channels);
+              self->clearResponsePlot({});
+              auto *plot = new ResponsePlot(std::move(sharedResult->curves),
+                                            self->responsePlotContainer);
+              plot->setSelectedInputChannel(
+                  self->analysisChannelCombo->currentText());
+              QObject::connect(self->analysisChannelCombo,
+                               &QComboBox::currentTextChanged, plot,
+                               [plot](const QString &channel) {
+                                 plot->setSelectedInputChannel(channel);
+                               });
+              self->responsePlotLayout->addWidget(plot, 1);
+              self->responseDock->show();
+            };
+
+            if (!self->watchResponseConfigFiles(dependencyPaths)) {
+              self->responseDependencyCheckPending = false;
+              showResult(
+                  self->tr("Calculated response, but one or more source or "
+                           "Include files could not be monitored. Re-run "
+                           "analysis after any configuration changes."),
+                  "unmonitored", false);
+              return;
+            }
+
+            self->responseDependencyCheckPending = true;
+            self->responseDependencyChangedWhileChecking = false;
+            self->analysisStatusLabel->setProperty("analysisState", "running");
             self->analysisStatusLabel->setText(
-                self->tr("Calculated response (theoretical)."));
-            self->analysisStatusLabel->setProperty("analysisState", "current");
-            self->analysisSummaryLabel->setText(
-                self->tr("EAPO Engine impulse response · %1 · %2 Hz · %3 %4 · "
-                         "%5 FFT samples · config revision %6 · all "
-                         "input/output channel paths")
-                    .arg(sourceName)
-                    .arg(sampleRate)
-                    .arg(channels)
-                    .arg(channels == 1 ? self->tr("channel")
-                                       : self->tr("channels"))
-                    .arg(fftFrames)
-                    .arg(requestedRevision));
-            self->analysisPeakGainLabel->setText(
-                std::isfinite(peakGainDb) ? self->tr("Peak sampled gain: %1 dB")
-                                                .arg(peakGainDb, 0, 'f', 2)
-                                          : self->tr("Peak gain: N/A"));
-            if (result.impulseOnsetSamples) {
-              const double onsetMs =
-                  static_cast<double>(*result.impulseOnsetSamples) * 1000.0 /
-                  sampleRate;
-              self->analysisLatencyLabel->setText(
-                  self->tr("Impulse onset: %1 ms (%2 samples)")
-                      .arg(onsetMs, 0, 'f', 2)
-                      .arg(*result.impulseOnsetSamples));
-            } else {
-              self->analysisLatencyLabel->setText(self->tr(
-                  "Impulse onset: N/A (no response in analysis window)"));
-            }
-            if (result.engineInitializationMs) {
-              self->analysisInitializationLabel->setText(
-                  self->tr("Engine initialization time: %1 ms per engine")
-                      .arg(*result.engineInitializationMs, 0, 'f', 2));
-            }
-            if (result.engineProcessingPercent) {
-              const int cpuPrecision =
-                  *result.engineProcessingPercent >= 0.1 ? 1 : 4;
-              self->analysisCpuLabel->setText(
-                  self->tr("CPU usage: %1 % (one core)")
-                      .arg(*result.engineProcessingPercent, 0, 'f',
-                           cpuPrecision));
-            }
-            self->updateAnalysisInputChannels(channels);
-            self->clearResponsePlot({});
-            auto *plot = new ResponsePlot(std::move(result.curves),
-                                          self->responsePlotContainer);
-            plot->setSelectedInputChannel(
-                self->analysisChannelCombo->currentText());
-            QObject::connect(self->analysisChannelCombo,
-                             &QComboBox::currentTextChanged, plot,
-                             [plot](const QString &channel) {
-                               plot->setSelectedInputChannel(channel);
-                             });
-            self->responsePlotLayout->addWidget(plot, 1);
-            self->responseDock->show();
+                self->tr("Verifying source and Include files…"));
+            QVector<ResponseConfigDependency> dependencies =
+                sharedResult->configDependencies;
+            auto *verification = QThread::create(
+                [self, snapshot, dependencies = std::move(dependencies),
+                 showResult, sourceTracksEditor, requestedRevision]() mutable {
+                  Q_UNUSED(snapshot);
+                  const bool unchanged =
+                      dependencies.isEmpty() ||
+                      responseConfigDependenciesUnchanged(dependencies);
+                  if (!self)
+                    return;
+                  QMetaObject::invokeMethod(
+                      self,
+                      [self, unchanged, showResult, sourceTracksEditor,
+                       requestedRevision] {
+                        if (!self)
+                          return;
+                        self->responseDependencyCheckPending = false;
+                        const bool editorUnchanged =
+                            !sourceTracksEditor ||
+                            self->configRevision == requestedRevision;
+                        if (!unchanged ||
+                            self->responseDependencyChangedWhileChecking ||
+                            !editorUnchanged) {
+                          self->responseAnalysisHasResult = false;
+                          self->responseConfigWatcher->removePaths(
+                              self->responseConfigWatcher->files());
+                          self->responseButton->setEnabled(true);
+                          self->responseButton->setText(
+                              self->tr("Analyze response"));
+                          self->analysisStatusLabel->setProperty(
+                              "analysisState", "stale");
+                          self->analysisStatusLabel->setText(self->tr(
+                              "Stale response: configuration or Include "
+                              "files changed during analysis. Analyze again "
+                              "to update it."));
+                          self->analysisSummaryLabel->clear();
+                          self->clearResponsePlot(
+                              self->analysisStatusLabel->text());
+                          return;
+                        }
+                        showResult(
+                            self->tr("Calculated response (theoretical)."),
+                            "current", true);
+                      },
+                      Qt::QueuedConnection);
+                });
+            self->responseDependencyThread = verification;
+            verification->setParent(self);
+            QObject::connect(
+                verification, &QThread::finished, self, [self, verification] {
+                  if (self && self->responseDependencyThread == verification)
+                    self->responseDependencyThread = nullptr;
+                  verification->deleteLater();
+                });
+            verification->start();
           },
           Qt::QueuedConnection);
     });
@@ -1458,6 +1571,30 @@ void MainWindow::clearResponsePlot(const QString &message) {
   placeholder->setAlignment(Qt::AlignCenter);
   placeholder->setWordWrap(true);
   responsePlotLayout->addWidget(placeholder, 1);
+}
+
+bool MainWindow::watchResponseConfigFiles(const QStringList &paths) {
+  if (!responseConfigWatcher)
+    return false;
+  responseConfigWatcher->removePaths(responseConfigWatcher->files());
+  if (paths.isEmpty())
+    return true;
+
+  QStringList canonicalPaths;
+  for (const auto &path : paths) {
+    const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+    if (canonicalPath.isEmpty())
+      return false;
+    if (!canonicalPaths.contains(canonicalPath))
+      canonicalPaths.append(canonicalPath);
+  }
+  for (const auto &path : canonicalPaths) {
+    if (!responseConfigWatcher->addPath(path)) {
+      responseConfigWatcher->removePaths(responseConfigWatcher->files());
+      return false;
+    }
+  }
+  return true;
 }
 
 void MainWindow::markResponseAnalysisStale() {

@@ -42,6 +42,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QProcess>
+#include <QSaveFile>
 #include <QPlainTextEdit>
 #include <QPalette>
 #include <QLabel>
@@ -963,20 +964,30 @@ int main(int argc, char **argv) {
       !responseFormatLabel.contains("1 channel") ||
       analysisChannel->findText("R") >= 0 ||
       analysisChannel->currentText() != "All channels" ||
+      responseFormatLabel.contains("editor revision") ||
       liveWindow.findChild<QWidget *>("responsePlot")
               ->property("selectedInputChannel")
               .toString() != "All channels") {
-    std::cerr << "analysis did not use the saved default config.txt; gain="
-              << responseGainAt1kHz << " dB\n";
+    std::cerr
+        << "analysis did not use the saved default config.txt; gain="
+        << responseGainAt1kHz
+        << " dB, status=" << analysisStatus->text().toStdString() << ", state="
+        << analysisStatus->property("analysisState").toString().toStdString()
+        << '\n';
     return 1;
   }
   responseSource->setCurrentIndex(1);
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
-    std::cerr << "analysis did not use the current editor document; gain="
-              << responseGainAt1kHz << " dB\n";
+      !responseFormatLabel.contains("1 channel") ||
+      !responseFormatLabel.contains("editor revision")) {
+    std::cerr
+        << "analysis did not use the current editor document; gain="
+        << responseGainAt1kHz
+        << " dB, status=" << analysisStatus->text().toStdString() << ", state="
+        << analysisStatus->property("analysisState").toString().toStdString()
+        << '\n';
     return 1;
   }
   if (!analysisPeakGain->text().contains("Peak sampled gain: -3.00 dB") ||
@@ -1225,6 +1236,13 @@ int main(int argc, char **argv) {
     }
     defaultGain->setValue(defaultGain->value() + 1.0);
     defaultSave->click();
+    QElapsedTimer defaultStaleWait;
+    defaultStaleWait.start();
+    while (!defaultStatus->text().startsWith("Stale response") &&
+           defaultStaleWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
     if (!defaultStatus->text().startsWith("Stale response") ||
         defaultStatus->property("analysisState").toString() != "stale") {
       std::cerr
@@ -1318,6 +1336,104 @@ int main(int argc, char **argv) {
     return 1;
   }
   includeLiveConfig.close();
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  {
+    MainWindow includeAnalysisWindow(includeLiveConfigPath,
+                                     QString::fromLocal8Bit(argv[2]));
+    auto *includeAnalysisButton =
+        includeAnalysisWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *includeAnalysisSource =
+        includeAnalysisWindow.findChild<QComboBox *>("analysisSource");
+    auto *includeAnalysisRuntimeFormat =
+        includeAnalysisWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *includeAnalysisChannels =
+        includeAnalysisWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *includeAnalysisStatus =
+        includeAnalysisWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!includeAnalysisButton || !includeAnalysisSource ||
+        !includeAnalysisRuntimeFormat || !includeAnalysisChannels ||
+        !includeAnalysisStatus) {
+      std::cerr << "could not prepare post-analysis Include monitoring test\n";
+      return 1;
+    }
+    includeAnalysisSource->setCurrentIndex(1);
+    includeAnalysisRuntimeFormat->setChecked(false);
+    includeAnalysisChannels->setValue(1);
+    includeAnalysisButton->click();
+    QElapsedTimer includeAnalysisWait;
+    includeAnalysisWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Calculated response") &&
+           !includeAnalysisStatus->text().startsWith("Analysis failed") &&
+           includeAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Calculated response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "current") {
+      std::cerr << "Include-backed response analysis did not complete: "
+                << includeAnalysisStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    QFile changedLiveInclude(includeLiveChild.fileName());
+    if (!changedLiveInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        changedLiveInclude.write("Preamp: -9 dB\n") != 14) {
+      std::cerr << "could not change Include after response analysis\n";
+      return 1;
+    }
+    changedLiveInclude.close();
+    QElapsedTimer staleIncludeWait;
+    staleIncludeWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Stale response") &&
+           staleIncludeWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Stale response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "stale") {
+      std::cerr << "editing an Include after analysis left its response marked "
+                   "current\n";
+      return 1;
+    }
+    includeAnalysisButton->click();
+    QElapsedTimer replacementAnalysisWait;
+    replacementAnalysisWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Calculated response") &&
+           !includeAnalysisStatus->text().startsWith("Analysis failed") &&
+           replacementAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Calculated response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "current") {
+      std::cerr << "Include response did not recover after re-analysis\n";
+      return 1;
+    }
+    QSaveFile atomicInclude(includeLiveChild.fileName());
+    if (!atomicInclude.open(QIODevice::WriteOnly) ||
+        atomicInclude.write("Preamp: -12 dB\n") != 15 ||
+        !atomicInclude.commit()) {
+      std::cerr << "could not atomically replace the analyzed Include\n";
+      return 1;
+    }
+    QElapsedTimer atomicStaleWait;
+    atomicStaleWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Stale response") &&
+           atomicStaleWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Stale response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "stale") {
+      std::cerr << "an atomic Include replacement left its response marked "
+                   "current\n";
+      return 1;
+    }
+  }
+#endif
   MainWindow includeLiveWindow(includeLiveConfigPath,
                                QString::fromLocal8Bit(argv[2]));
   auto *includeLiveValidation =
