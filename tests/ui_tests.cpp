@@ -1248,18 +1248,35 @@ int main(int argc, char **argv) {
   secondGain->setValue(-8.0);
   tabs->setCurrentIndex(0);
   tabs->setCurrentIndex(1);
-  QCoreApplication::processEvents();
-  const auto tabPreampEditors = tabsWindow.findChildren<PreampFilterGUI *>();
-  bool preservedSecondGain = false;
-  for (auto *editor : tabPreampEditors) {
-    auto *gain = editor->findChild<QDoubleSpinBox *>("doubleSpinBox");
-    preservedSecondGain |= gain && qAbs(gain->value() + 8.0) < 1e-9;
-  }
-  if (!preservedSecondGain || !tabs->tabText(1).startsWith("* ") ||
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  secondGain = secondPreamp
+                   ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain || qAbs(secondGain->value() + 8.0) >= 1e-9 ||
+      !tabs->tabText(1).startsWith("* ") ||
       !tabsWindow.windowTitle().startsWith("* ")) {
     std::cerr << "switching config tabs lost the edited document state\n";
     return 1;
   }
+  QPushButton *saveActiveTab = nullptr;
+  for (auto *button : tabsWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save")
+      saveActiveTab = button;
+  if (!saveActiveTab) {
+    std::cerr << "could not locate active-document Save action\n";
+    return 1;
+  }
+  saveActiveTab->click();
+  QFile savedSecondConfig(secondConfigPath);
+  if (!savedSecondConfig.open(QIODevice::ReadOnly) ||
+      savedSecondConfig.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "switching back did not restore the document serialized by "
+                 "Save\n";
+    return 1;
+  }
+  secondGain->setValue(-9.0);
+  secondGain->setValue(-8.0);
   tabs->setCurrentIndex(0);
   bool saveAsCollisionResult = true;
   if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
@@ -1273,7 +1290,7 @@ int main(int argc, char **argv) {
   }
   QFile collisionTarget(secondConfigPath);
   if (!collisionTarget.open(QIODevice::ReadOnly) ||
-      collisionTarget.readAll() != "Preamp: -3 dB\n") {
+      collisionTarget.readAll() != "Preamp: -8 dB\n") {
     std::cerr << "rejected Save As collision modified the open target file\n";
     return 1;
   }
