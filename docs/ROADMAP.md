@@ -156,6 +156,31 @@ ratio `1.000027`, and the mute case remained silent. Both runs reported
 0 callback allocations/deallocations; this is private WirePlumber evidence,
 not a physical-output or full hosted-suite result.
 
+PipeWire status-callback teardown crash (2026-11-10; PR #11 commit
+`977cd32`): an intermittent hosted server-restart test exited with SIGSEGV.
+The saved core traced `pw_filter_get_node_id` through `Runtime::statusReady`
+while `Runtime::~Runtime()` was synchronously iterating PipeWire to restore
+the previous default route. Teardown now removes the status event, closes and
+unlinks its socket before route restoration starts; `statusReady` also exits
+if cleanup has begun or the server descriptor is invalid. This prevents a
+status request from dereferencing a filter proxy invalidated by a PipeWire
+server restart. Independent review found no remaining defect in this ordering.
+
+The focused Release server-restart E2E passed **10/10** sequential repeats;
+the same test passed **5/5** under ASan/UBSan. Route-sync-failure passed
+separately. Hosted CI passed on exact commit `977cd32`: build/test, ASan/UBSan,
+format, release metadata, Arch package, clean install, and PipeWire **63/63**.
+One earlier duplicate run failed only `delay-pdc` during startup-inclusive
+channel comparison (RMS ratio `0.999884`, channel-difference ratio `0.0156715`);
+the full suite passed on the PR-triggered run, the isolated test passed **5/5**
+locally, and rerunning the failed hosted run passed **63/63** without changing
+its assertions. This transient measurement remains tracked separately from
+the teardown crash. The runtime-fix commit itself changed only
+`src/pipewire/Runtime.cpp`; the branch was clean before this evidence note.
+Physical playback is still unverified: the current host sink is muted, its
+configured USB sink is absent, and EasyEffects/desktop audio clients are
+active, so no route or volume was changed for this test.
+
 The historical entries below retain the test scope recorded at each checkpoint. New focused PipeWire E2E
 tests for LV2 and VST3 state persistence across a fresh daemon restart passed
 1/1 each in Release and ASan/UBSan. Earlier full suites passed **76/76**
