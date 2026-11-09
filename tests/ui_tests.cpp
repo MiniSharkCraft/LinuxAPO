@@ -598,6 +598,59 @@ int main(int argc, char **argv) {
               << monoResponse.error.toStdString() << '\n';
     return 1;
   }
+  const QString includeAnalysisDirectory =
+      temporary.filePath(QStringLiteral("response-includes"));
+  if (!QDir().mkpath(includeAnalysisDirectory)) {
+    std::cerr << "could not create response Include fixture directory\n";
+    return 1;
+  }
+  const QString includeAnalysisRoot =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("root.txt"));
+  const QString includeAnalysisChild =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("child.txt"));
+  QFile includeAnalysisRootFile(includeAnalysisRoot);
+  QFile includeAnalysisChildFile(includeAnalysisChild);
+  if (!includeAnalysisRootFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisRootFile.write("Include: child.txt\n") != 19 ||
+      !includeAnalysisChildFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisChildFile.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not write response Include fixture\n";
+    return 1;
+  }
+  includeAnalysisRootFile.close();
+  includeAnalysisChildFile.close();
+  const auto includeResponse =
+      analyzeConfigResponse(includeAnalysisRoot, 44100, 1, 128);
+  if (!includeResponse.error.isEmpty() ||
+      includeResponse.configDependencies.size() != 2) {
+    std::cerr << "response analysis did not record its root and Include "
+                 "dependencies: "
+              << includeResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  bool includeChildTracked = false;
+  for (const auto &dependency : includeResponse.configDependencies)
+    includeChildTracked =
+        includeChildTracked ||
+        dependency.path.find("child.txt") != std::string::npos;
+  if (!includeChildTracked || !responseConfigDependenciesUnchanged(
+                                  includeResponse.configDependencies)) {
+    std::cerr << "response analysis did not retain stable Include dependency "
+                 "fingerprints\n";
+    return 1;
+  }
+  QFile changedInclude(includeAnalysisChild);
+  if (!changedInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedInclude.write("Preamp: -12 dB\n") != 15) {
+    std::cerr << "could not change response Include fixture\n";
+    return 1;
+  }
+  changedInclude.close();
+  if (responseConfigDependenciesUnchanged(includeResponse.configDependencies)) {
+    std::cerr << "response analysis did not detect a changed Include "
+                 "dependency\n";
+    return 1;
+  }
   const auto gainAt = [](const ResponseCurve &curve, double frequency) {
     auto closest = curve.points.constBegin();
     for (auto point = curve.points.constBegin();

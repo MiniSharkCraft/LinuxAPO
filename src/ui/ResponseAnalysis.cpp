@@ -1,13 +1,17 @@
 #include "ResponseAnalysis.h"
 
 #include "Engine.h"
+#include <QCryptographicHash>
+#include <QFile>
 #include <fftw3.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <exception>
+#include <filesystem>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -16,6 +20,63 @@ constexpr unsigned MaxAnalysisFrames = 1U << 20;
 constexpr unsigned MaxAnalysisChannels = 8;
 constexpr size_t MaxAnalysisWorkspaceBytes = 64U * 1024U * 1024U;
 constexpr float ImpulseOnsetThreshold = 1.0e-5F;
+constexpr qint64 ConfigHashChunkBytes = 64 * 1024;
+
+std::optional<QByteArray> configFileSha256(const std::string &path) {
+  const QString filePath =
+      QString::fromLocal8Bit(path.data(), static_cast<qsizetype>(path.size()));
+  QFile file(filePath);
+  if (!file.open(QIODevice::ReadOnly))
+    return std::nullopt;
+
+  QCryptographicHash hash(QCryptographicHash::Sha256);
+  while (!file.atEnd()) {
+    const QByteArray chunk = file.read(ConfigHashChunkBytes);
+    if (chunk.isEmpty() && file.error() != QFileDevice::NoError)
+      return std::nullopt;
+    hash.addData(chunk);
+  }
+  if (file.error() != QFileDevice::NoError)
+    return std::nullopt;
+  return hash.result();
+}
+
+QVector<ResponseConfigDependency>
+captureConfigDependencies(const std::vector<std::filesystem::path> &paths,
+                          QString &error) {
+  QVector<ResponseConfigDependency> dependencies;
+  dependencies.reserve(static_cast<qsizetype>(paths.size()));
+  for (const auto &path : paths) {
+    const std::string nativePath = path.string();
+    const auto digest = configFileSha256(nativePath);
+    if (!digest) {
+      const QString displayPath = QString::fromLocal8Bit(
+          nativePath.data(), static_cast<qsizetype>(nativePath.size()));
+      error = QStringLiteral("Could not read configuration dependency '%1'.")
+                  .arg(displayPath);
+      return {};
+    }
+    dependencies.append({nativePath, *digest});
+  }
+  return dependencies;
+}
+
+bool sameConfigDependencies(const QVector<ResponseConfigDependency> &first,
+                            const QVector<ResponseConfigDependency> &second) {
+  if (first.size() != second.size())
+    return false;
+  for (qsizetype index = 0; index < first.size(); ++index)
+    if (first[index].path != second[index].path ||
+        first[index].sha256 != second[index].sha256)
+      return false;
+  return true;
+}
+
+QString changedConfigError() {
+  return QStringLiteral(
+      "A configuration or Include file changed during response analysis. "
+      "Run the analysis again for the latest configuration.");
+}
 
 bool exceedsWorkspaceBudget(unsigned frames, unsigned channels) {
   const auto multiply = [](size_t a, size_t b, size_t &out) {
@@ -54,6 +115,21 @@ QString channelName(unsigned channel) {
 }
 } // namespace
 
+bool responseConfigDependenciesUnchanged(
+    const QVector<ResponseConfigDependency> &dependencies) {
+  if (dependencies.isEmpty())
+    return false;
+  QVector<ResponseConfigDependency> current;
+  current.reserve(dependencies.size());
+  for (const auto &dependency : dependencies) {
+    const auto digest = configFileSha256(dependency.path);
+    if (!digest)
+      return false;
+    current.append({dependency.path, *digest});
+  }
+  return sameConfigDependencies(dependencies, current);
+}
+
 ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
                                              unsigned sampleRate,
                                              unsigned channels,
@@ -89,6 +165,20 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
               std::chrono::steady_clock::now() - initializationStarted)
               .count();
       ++initializedEngines;
+      QString dependencyError;
+      const auto engineDependencies =
+          captureConfigDependencies(engine.configFiles(), dependencyError);
+      if (!dependencyError.isEmpty()) {
+        result.error = dependencyError;
+        return result;
+      }
+      if (result.configDependencies.isEmpty())
+        result.configDependencies = engineDependencies;
+      else if (!sameConfigDependencies(result.configDependencies,
+                                       engineDependencies)) {
+        result.error = changedConfigError();
+        return result;
+      }
       std::vector<float> block(1024U * channels, 0.0F);
       std::vector<float> impulseResponse(fftFrames * channels, 0.0F);
       double engineProcessingMs = 0.0;
@@ -172,6 +262,10 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
         result.curves.append(std::move(curve));
       }
       totalEngineProcessingMs += engineProcessingMs;
+    }
+    if (!responseConfigDependenciesUnchanged(result.configDependencies)) {
+      result.error = changedConfigError();
+      return result;
     }
     if (initializedEngines > 0) {
       result.engineInitializationMs =
