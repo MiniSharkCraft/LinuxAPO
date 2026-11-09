@@ -239,19 +239,50 @@ def wait_for_daemon_log(daemon_process, daemon_log, start_offset, marker,
                         label, timeout=8):
     """Wait for a daemon log marker without racing its shared file offset."""
     deadline = time.monotonic() + timeout
+    marker_bytes = marker.encode()
+    scan_offset = start_offset
+    overlap = b""
     while time.monotonic() < deadline:
         if daemon_process.poll() is not None:
             raise RuntimeError(
                 f"skyapod exited while waiting for {label} "
                 f"(exit status {daemon_process.returncode})")
         size = os.fstat(daemon_log.fileno()).st_size
-        if size > start_offset:
-            length = min(size - start_offset, 65536)
-            output = os.pread(daemon_log.fileno(), length, start_offset)
-            if marker.encode() in output:
+        if size > scan_offset:
+            output = os.pread(
+                daemon_log.fileno(), min(size - scan_offset, 65536),
+                scan_offset)
+            if marker_bytes in overlap + output:
                 return
+            scan_offset += len(output)
+            overlap = output[-max(0, len(marker_bytes) - 1):]
         time.sleep(0.05)
     raise RuntimeError(f"skyapod did not report {label} within {timeout} seconds")
+
+
+def wait_for_daemon_stopped(daemon_process, label, timeout=2):
+    """Wait until a signalled daemon main process is stopped by the kernel."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if daemon_process.poll() is not None:
+            raise RuntimeError(
+                f"skyapod exited while waiting for {label} "
+                f"(exit status {daemon_process.returncode})")
+        pid = (daemon_process.main_pid()
+               if isinstance(daemon_process, SystemdManagedDaemon)
+               else daemon_process.pid)
+        try:
+            with open(f"/proc/{pid}/status", encoding="ascii") as status_file:
+                state_line = next(line for line in status_file
+                                  if line.startswith("State:"))
+        except (FileNotFoundError, StopIteration):
+            raise RuntimeError(
+                f"skyapod process disappeared while waiting for {label}")
+        if state_line.split()[1] in ("T", "t"):
+            return
+        time.sleep(0.01)
+    raise RuntimeError(
+        f"skyapod did not stop for {label} within {timeout} seconds")
 
 
 def wait_for_consumer_ready(process, label, timeout=8,
@@ -1059,6 +1090,7 @@ def main():
         unrelated_playback_process = None
         wireplumber_process = None
         wireplumber_paused = False
+        daemon_paused_for_server_restart = False
         null_target_manager = None
         playback_consumer = None
         post_crash_playback_consumer = None
@@ -4316,6 +4348,13 @@ def main():
                         daemon_process, daemon_log, daemon_log_offset,
                         "; retrying in 2 seconds",
                         "selected-source Runtime teardown")
+                    # Freeze only the daemon main process so its fixed retry
+                    # delay cannot race a slow CI worker while the private
+                    # server and fixture graph are being recreated.
+                    daemon_process.send_signal(signal.SIGSTOP)
+                    wait_for_daemon_stopped(
+                        daemon_process, "PipeWire server restart")
+                    daemon_paused_for_server_restart = True
 
                 if server_restart:
                     print("Stopping private PipeWire server…", flush=True)
@@ -4383,6 +4422,9 @@ def main():
                 source_process = start_test_source(
                     source, mono, env, source_log, name=replacement_name,
                     serial=replacement_serial)
+                if daemon_paused_for_server_restart:
+                    daemon_process.send_signal(signal.SIGCONT)
+                    daemon_paused_for_server_restart = False
                 deadline = time.monotonic() + 15
                 relinked_status = ""
                 while time.monotonic() < deadline:
@@ -5257,6 +5299,13 @@ def main():
                           f"{process.poll()}", file=sys.stderr)
             raise
         finally:
+            if daemon_paused_for_server_restart and daemon_process is not None:
+                try:
+                    daemon_process.send_signal(signal.SIGCONT)
+                except Exception as error:
+                    print(f"could not resume skyapod during cleanup: {error}",
+                          file=sys.stderr)
+                daemon_paused_for_server_restart = False
             if wireplumber_paused and wireplumber_process is not None:
                 os.killpg(wireplumber_process.pid, signal.SIGCONT)
                 wireplumber_paused = False
