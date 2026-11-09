@@ -628,6 +628,7 @@ def main():
         "playback-wireplumber-systemd-crash-restart",
         "playback-wireplumber-systemd-crash-user-override",
         "playback-wireplumber-recovery-write-failure",
+        "playback-wireplumber-route-confirmation-race",
         "playback-wireplumber-configured-write-failure",
         "device-switch", "delay-pdc", "source-consumer-latency",
         "playback-preamp", "playback-wireplumber",
@@ -664,6 +665,7 @@ def main():
             "playback-wireplumber-systemd-crash-restart|"
             "playback-wireplumber-systemd-crash-user-override|"
             "playback-wireplumber-recovery-write-failure|"
+            "playback-wireplumber-route-confirmation-race|"
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency|playback-preamp|playback-wireplumber|"
             "playback-wireplumber-link-error|"
@@ -738,6 +740,8 @@ def main():
         mode == "playback-wireplumber-systemd-crash-user-override")
     playback_recovery_write_failure = (
         mode == "playback-wireplumber-recovery-write-failure")
+    playback_route_confirmation_race = (
+        mode == "playback-wireplumber-route-confirmation-race")
     playback_systemd_crash_restart = mode in (
         "playback-wireplumber-systemd-crash-restart",
         "playback-wireplumber-systemd-crash-user-override")
@@ -951,6 +955,8 @@ def main():
                 root / "fail-configured-default-write-once")
             env["SKYAPO_TEST_HOLD_DEFAULT_ROUTE_RECOVERY_FILE"] = str(
                 root / "hold-default-route-recovery")
+        if playback_route_confirmation_race:
+            env["SKYAPO_TEST_REVERT_ACTIVE_BEFORE_ROUTE_SYNC"] = "1"
         if output_switch or playback_isolation:
             fault_library = env.get("SKYAPO_TEST_FILTER_FAULT_LIBRARY")
             if not fault_library or not pathlib.Path(fault_library).is_file():
@@ -1224,6 +1230,7 @@ def main():
                         "playback-wireplumber-systemd-crash-restart",
                         "playback-wireplumber-systemd-crash-user-override",
                         "playback-wireplumber-recovery-write-failure",
+                        "playback-wireplumber-route-confirmation-race",
                         "playback-wireplumber-output-switch",
                         "playback-wireplumber-surround51",
                         "playback-wireplumber-surround71",
@@ -1592,6 +1599,50 @@ def main():
                     f"daemon did not reach streaming state:\n{status}"
                     f"{policy_graph}")
             if wireplumber_playback:
+                if playback_route_confirmation_race:
+                    deadline = time.monotonic() + 6
+                    route_status = ""
+                    while time.monotonic() < deadline:
+                        route_status = run(
+                            [str(cli), "status"], env, timeout=5).stdout
+                        if ("Playback routing policy: inactive "
+                                "(PipeWire/WirePlumber did not confirm SkyAPO "
+                                "as the default playback route)" in
+                                route_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "route confirmation race was not kept fail-closed; "
+                            "the route must remain inactive after its active "
+                            "metadata is reverted before core sync:\n" +
+                            route_status)
+                    current_metadata = run(
+                        [metadata, "-n", "default"], env, timeout=5).stdout
+                    if (metadata_node_name(
+                            current_metadata, "default.audio.sink") !=
+                            initial_default_sink):
+                        raise RuntimeError(
+                            "PipeWire active default changed despite the "
+                            "pre-sync override:\n" + current_metadata)
+                    if (metadata_node_name(
+                            current_metadata,
+                            "default.configured.audio.sink") !=
+                            initial_default_sink):
+                        raise RuntimeError(
+                            "WirePlumber configured default changed despite "
+                            "the pre-sync override:\n" + current_metadata)
+                    print("A pre-sync default-route override invalidated the "
+                          "stale active/configured confirmations; SkyAPO "
+                          "stayed inactive.")
+                    stopped = run([str(cli), "stop"], env, timeout=8)
+                    if "Stopping skyapod" not in stopped.stdout:
+                        raise RuntimeError(
+                            "daemon did not acknowledge stop after the route "
+                            f"confirmation race: {stopped.stdout}")
+                    daemon_process.wait(timeout=5)
+                    return 0
+
                 if playback_recovery_write_failure:
                     if isinstance(daemon_process, SystemdManagedDaemon):
                         raise RuntimeError(

@@ -415,6 +415,7 @@ struct Runtime {
   std::string configuredDefaultMetadataValue;
   std::string configuredDefaultMetadataName;
   std::chrono::steady_clock::time_point defaultRouteLastWrite{};
+  std::chrono::steady_clock::time_point defaultRouteLastMetadataChange{};
   std::chrono::steady_clock::time_point defaultRouteConfirmationDeadline{};
   std::chrono::steady_clock::time_point defaultRouteRecoveryReadySince{};
   std::string originalDefaultMetadataType;
@@ -710,12 +711,19 @@ struct Runtime {
                 << ", route-write-pending=" << r.defaultRouteSetRequested
                 << ")\n";
 
-    if (r.defaultRouteSetRequested && metadataName == "skyapo.playback") {
+    if (r.defaultRouteSetRequested) {
+      r.defaultRouteLastMetadataChange = std::chrono::steady_clock::now();
       if (configuredDefault)
-        r.defaultRouteConfiguredConfirmed = true;
+        r.defaultRouteConfiguredConfirmed = metadataName == "skyapo.playback";
       else
-        r.defaultRouteActiveConfirmed = true;
+        r.defaultRouteActiveConfirmed = metadataName == "skyapo.playback";
       r.confirmDefaultRouteOwnership();
+      if (r.defaultRouteSetRequested && r.defaultRouteSyncConfirmed &&
+          r.defaultRouteTimer) {
+        timespec delay{0, 100000000};
+        pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.defaultRouteTimer,
+                             &delay, nullptr, false);
+      }
     }
 
     if (configuredDefault) {
@@ -803,7 +811,7 @@ struct Runtime {
       r.defaultRouteSequence = -1;
       r.confirmDefaultRouteOwnership();
       if (r.defaultRouteSetRequested && r.defaultRouteTimer) {
-        timespec delay{2, 0};
+        timespec delay{0, 100000000};
         pw_loop_update_timer(pw_main_loop_get_loop(r.main), r.defaultRouteTimer,
                              &delay, nullptr, false);
       }
@@ -814,6 +822,9 @@ struct Runtime {
   void confirmDefaultRouteOwnership() {
     if (!defaultRouteSetRequested || !defaultRouteSyncConfirmed ||
         !defaultRouteActiveConfirmed || !defaultRouteConfiguredConfirmed)
+      return;
+    if (std::chrono::steady_clock::now() - defaultRouteLastMetadataChange <
+        std::chrono::milliseconds(100))
       return;
     defaultRoutePending = false;
     defaultRouteSetRequested = false;
@@ -901,6 +912,7 @@ struct Runtime {
       return;
     defaultRouteOwned = false;
     defaultRouteSyncConfirmed = false;
+    defaultRouteLastMetadataChange = std::chrono::steady_clock::now();
     defaultRouteConfirmationDeadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
     const bool previousDefaultPresent = defaultMetadataPresent;
@@ -978,6 +990,42 @@ struct Runtime {
       std::cerr << "skyapod: requesting WirePlumber configured default sink "
                    "skyapo.playback\n";
     }
+#ifdef SKYAPO_PIPEWIRE_E2E_TESTING
+    const char *revertActiveBeforeConfirm =
+        std::getenv("SKYAPO_TEST_REVERT_ACTIVE_BEFORE_ROUTE_SYNC");
+    if (revertActiveBeforeConfirm &&
+        std::strcmp(revertActiveBeforeConfirm, "1") == 0) {
+      const int revertResult = pw_metadata_set_property(
+          defaultMetadata, PW_ID_CORE, "default.audio.sink",
+          previousDefaultPresent ? previousDefaultType.c_str() : nullptr,
+          previousDefaultPresent ? previousDefaultValue.c_str() : nullptr);
+      if (revertResult < 0) {
+        defaultRoutePending = false;
+        defaultRouteSetRequested = false;
+        defaultRouteError = std::string("test route override failed: ") +
+                            spa_strerror(revertResult);
+        return;
+      }
+      if (wirePlumberPresent) {
+        const int configuredRevertResult = pw_metadata_set_property(
+            defaultMetadata, PW_ID_CORE, "default.configured.audio.sink",
+            originalConfiguredDefaultMetadataPresent
+                ? originalConfiguredDefaultMetadataType.c_str()
+                : nullptr,
+            originalConfiguredDefaultMetadataPresent
+                ? originalConfiguredDefaultMetadataValue.c_str()
+                : nullptr);
+        if (configuredRevertResult < 0) {
+          defaultRoutePending = false;
+          defaultRouteSetRequested = false;
+          defaultRouteError =
+              std::string("test configured-route override failed: ") +
+              spa_strerror(configuredRevertResult);
+          return;
+        }
+      }
+    }
+#endif
     defaultRouteLastWrite = std::chrono::steady_clock::now();
 
     defaultRouteSequence = requestCoreSync();
@@ -1005,7 +1053,13 @@ struct Runtime {
   static void defaultRouteReady(void *data, uint64_t) {
     auto &r = *static_cast<Runtime *>(data);
     if (r.defaultRouteSetRequested && r.defaultRouteSyncConfirmed) {
+      r.confirmDefaultRouteOwnership();
       const auto now = std::chrono::steady_clock::now();
+      if (!r.defaultRouteSetRequested) {
+        r.updateDefaultRoute();
+        r.scheduleDefaultRouteUpdate();
+        return;
+      }
       if (now >= r.defaultRouteConfirmationDeadline) {
         r.defaultRoutePending = false;
         r.defaultRouteSetRequested = false;
