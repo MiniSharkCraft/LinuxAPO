@@ -24,7 +24,9 @@ constexpr size_t MaxAnalysisWorkspaceBytes = 64U * 1024U * 1024U;
 constexpr float ImpulseOnsetThreshold = 1.0e-5F;
 constexpr qint64 ConfigHashChunkBytes = 64 * 1024;
 
-std::optional<QByteArray> configFileSha256(const std::string &path) {
+std::optional<QByteArray>
+configFileSha256(const std::string &path,
+                 const std::function<bool()> &cancellationRequested = {}) {
   const QString filePath =
       QString::fromLocal8Bit(path.data(), static_cast<qsizetype>(path.size()));
   QFile file(filePath);
@@ -33,6 +35,8 @@ std::optional<QByteArray> configFileSha256(const std::string &path) {
 
   QCryptographicHash hash(QCryptographicHash::Sha256);
   while (!file.atEnd()) {
+    if (cancellationRequested && cancellationRequested())
+      return std::nullopt;
     const QByteArray chunk = file.read(ConfigHashChunkBytes);
     if (chunk.isEmpty() && file.error() != QFileDevice::NoError)
       return std::nullopt;
@@ -43,15 +47,19 @@ std::optional<QByteArray> configFileSha256(const std::string &path) {
   return hash.result();
 }
 
-QVector<ResponseConfigDependency>
-captureConfigDependencies(const std::vector<std::filesystem::path> &paths,
-                          QString &error) {
+QVector<ResponseConfigDependency> captureConfigDependencies(
+    const std::vector<std::filesystem::path> &paths, QString &error,
+    const std::function<bool()> &cancellationRequested = {}) {
   QVector<ResponseConfigDependency> dependencies;
   dependencies.reserve(static_cast<qsizetype>(paths.size()));
   for (const auto &path : paths) {
+    if (cancellationRequested && cancellationRequested())
+      return {};
     const std::string nativePath = path.string();
-    const auto digest = configFileSha256(nativePath);
+    const auto digest = configFileSha256(nativePath, cancellationRequested);
     if (!digest) {
+      if (cancellationRequested && cancellationRequested())
+        return {};
       const QString displayPath = QString::fromLocal8Bit(
           nativePath.data(), static_cast<qsizetype>(nativePath.size()));
       error = QStringLiteral("Could not read configuration dependency '%1'.")
@@ -118,13 +126,17 @@ QString channelName(unsigned channel) {
 } // namespace
 
 bool responseConfigDependenciesUnchanged(
-    const QVector<ResponseConfigDependency> &dependencies) {
+    const QVector<ResponseConfigDependency> &dependencies,
+    std::function<bool()> cancellationRequested) {
   if (dependencies.isEmpty())
     return false;
   QVector<ResponseConfigDependency> current;
   current.reserve(dependencies.size());
   for (const auto &dependency : dependencies) {
-    const auto digest = configFileSha256(dependency.path);
+    if (cancellationRequested && cancellationRequested())
+      return false;
+    const auto digest =
+        configFileSha256(dependency.path, cancellationRequested);
     if (!digest)
       return false;
     current.append({dependency.path, *digest});
@@ -136,7 +148,8 @@ ResponseAnalysisResult
 analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
                       unsigned channels, unsigned fftFrames,
                       const QString &sourceConfigPath,
-                      const QByteArray &sourceConfigSha256) {
+                      const QByteArray &sourceConfigSha256,
+                      std::function<bool()> cancellationRequested) {
   ResponseAnalysisResult result;
   if (sampleRate == 0 || channels == 0 || channels > MaxAnalysisChannels ||
       fftFrames < MinAnalysisFrames || fftFrames > MaxAnalysisFrames ||
@@ -152,6 +165,14 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
         "analysis budget.");
     return result;
   }
+  const auto cancelIfRequested = [&] {
+    if (!cancellationRequested || !cancellationRequested())
+      return false;
+    result.cancelled = true;
+    return true;
+  };
+  if (cancelIfRequested())
+    return result;
 
   try {
     QString dependencyError;
@@ -160,13 +181,17 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
       // Capture the loaded config/Include set before response engines parse it.
       Engine probe(sampleRate, channels, 1024, {}, false, false);
       probe.loadConfig(configPath.toStdString());
-      engineDependencies =
-          captureConfigDependencies(probe.configFiles(), dependencyError);
+      engineDependencies = captureConfigDependencies(
+          probe.configFiles(), dependencyError, cancellationRequested);
     }
     if (!dependencyError.isEmpty()) {
+      if (cancelIfRequested())
+        return result;
       result.error = dependencyError;
       return result;
     }
+    if (cancelIfRequested())
+      return result;
     if (engineDependencies.isEmpty()) {
       result.error =
           QStringLiteral("No configuration dependencies were loaded.");
@@ -203,6 +228,8 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
     double totalEngineProcessingMs = 0.0;
     unsigned initializedEngines = 0;
     for (unsigned inputChannel = 0; inputChannel < channels; ++inputChannel) {
+      if (cancelIfRequested())
+        return result;
       // Never load third-party module code in the editor process. Plugin
       // directives are reported as unsupported for this diagnostic analysis.
       const auto initializationStarted = std::chrono::steady_clock::now();
@@ -215,8 +242,10 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
       ++initializedEngines;
       QString currentDependencyError;
       const auto currentDependencies = captureConfigDependencies(
-          engine.configFiles(), currentDependencyError);
+          engine.configFiles(), currentDependencyError, cancellationRequested);
       if (!currentDependencyError.isEmpty()) {
+        if (cancelIfRequested())
+          return result;
         result.error = currentDependencyError;
         return result;
       }
@@ -228,6 +257,8 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
       std::vector<float> impulseResponse(fftFrames * channels, 0.0F);
       double engineProcessingMs = 0.0;
       for (unsigned blockStart = 0; blockStart < fftFrames;) {
+        if (cancelIfRequested())
+          return result;
         const unsigned frameCount = std::min(1024U, fftFrames - blockStart);
         std::fill(block.begin(), block.end(), 0.0F);
         if (blockStart == 0)
@@ -248,6 +279,8 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
 
       for (unsigned outputChannel = 0; outputChannel < channels;
            ++outputChannel) {
+        if (cancelIfRequested())
+          return result;
         float pathPeak = 0.0F;
         for (unsigned frame = 0; frame < fftFrames; ++frame) {
           const float sample =
@@ -308,7 +341,12 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
       }
       totalEngineProcessingMs += engineProcessingMs;
     }
-    if (!responseConfigDependenciesUnchanged(result.configDependencies)) {
+    if (cancelIfRequested())
+      return result;
+    if (!responseConfigDependenciesUnchanged(result.configDependencies,
+                                             cancellationRequested)) {
+      if (cancelIfRequested())
+        return result;
       result.error = changedConfigError();
       return result;
     }

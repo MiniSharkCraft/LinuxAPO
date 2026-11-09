@@ -1198,6 +1198,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
 }
 
 MainWindow::~MainWindow() {
+  if (responseAnalysisCancellation)
+    responseAnalysisCancellation->store(true, std::memory_order_release);
   if (responseThread && responseThread->isRunning())
     responseThread->wait();
   if (responseDependencyThread && responseDependencyThread->isRunning())
@@ -1216,6 +1218,8 @@ void MainWindow::analyzeResponse() {
 #else
   if (configPath.isEmpty())
     return;
+  auto cancellation = std::make_shared<std::atomic_bool>(false);
+  responseAnalysisCancellation = cancellation;
   responseAnalysisHasResult = false;
   responseDependencyCheckPending = false;
   responseDependencyChangedWhileChecking = false;
@@ -1286,8 +1290,9 @@ void MainWindow::analyzeResponse() {
   const auto startAnalysis = [self, snapshot, snapshotPath, sourceName,
                               sourceWatchPath = sourcePath,
                               sourcePathForValidation, sourceDigest,
-                              sourceTracksEditor, requestedRevision, fftFrames](
-                                 unsigned sampleRate, unsigned channels) {
+                              sourceTracksEditor, requestedRevision, fftFrames,
+                              cancellation](unsigned sampleRate,
+                                            unsigned channels) {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
@@ -1295,20 +1300,33 @@ void MainWindow::analyzeResponse() {
                                     sourceWatchPath, sourcePathForValidation,
                                     sourceDigest, sourceTracksEditor,
                                     requestedRevision, fftFrames, sampleRate,
-                                    channels] {
-      auto result =
-          analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames,
-                                sourcePathForValidation, sourceDigest);
+                                    channels, cancellation] {
+      auto result = analyzeConfigResponse(
+          snapshotPath, sampleRate, channels, fftFrames,
+          sourcePathForValidation, sourceDigest, [cancellation] {
+            return cancellation->load(std::memory_order_acquire);
+          });
       if (!self)
         return;
       QMetaObject::invokeMethod(
           self,
           [self, snapshot, snapshotPath, sourceName, sourceWatchPath,
            sourceTracksEditor, requestedRevision, fftFrames, sampleRate,
-           channels, result = std::move(result)]() mutable {
+           channels, cancellation, result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
+            if (result.cancelled) {
+              self->responseButton->setEnabled(true);
+              self->responseButton->setText(self->tr("Analyze response"));
+              self->analysisStatusLabel->setProperty("analysisState",
+                                                     "cancelled");
+              self->analysisStatusLabel->setText(
+                  self->tr("Response analysis cancelled."));
+              self->analysisSummaryLabel->clear();
+              self->clearResponsePlot(self->analysisStatusLabel->text());
+              return;
+            }
             if (sourceTracksEditor &&
                 self->configRevision != requestedRevision) {
               self->responseButton->setEnabled(true);
@@ -1442,20 +1460,40 @@ void MainWindow::analyzeResponse() {
                 sharedResult->configDependencies;
             auto *verification = QThread::create(
                 [self, snapshot, dependencies = std::move(dependencies),
-                 showResult, sourceTracksEditor, requestedRevision]() mutable {
+                 showResult, sourceTracksEditor, requestedRevision,
+                 cancellation]() mutable {
                   Q_UNUSED(snapshot);
-                  const bool unchanged =
-                      dependencies.isEmpty() ||
-                      responseConfigDependenciesUnchanged(dependencies);
+                  const bool unchanged = dependencies.isEmpty() ||
+                                         responseConfigDependenciesUnchanged(
+                                             dependencies, [cancellation] {
+                                               return cancellation->load(
+                                                   std::memory_order_acquire);
+                                             });
+                  const bool cancelled =
+                      cancellation->load(std::memory_order_acquire);
                   if (!self)
                     return;
                   QMetaObject::invokeMethod(
                       self,
-                      [self, unchanged, showResult, sourceTracksEditor,
-                       requestedRevision] {
+                      [self, unchanged, cancelled, cancellation, showResult,
+                       sourceTracksEditor, requestedRevision] {
                         if (!self)
                           return;
                         self->responseDependencyCheckPending = false;
+                        if (cancelled ||
+                            cancellation->load(std::memory_order_acquire)) {
+                          self->responseButton->setEnabled(true);
+                          self->responseButton->setText(
+                              self->tr("Analyze response"));
+                          self->analysisStatusLabel->setProperty(
+                              "analysisState", "cancelled");
+                          self->analysisStatusLabel->setText(
+                              self->tr("Response analysis cancelled."));
+                          self->analysisSummaryLabel->clear();
+                          self->clearResponsePlot(
+                              self->analysisStatusLabel->text());
+                          return;
+                        }
                         const bool editorUnchanged =
                             !sourceTracksEditor ||
                             self->configRevision == requestedRevision;

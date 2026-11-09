@@ -5,6 +5,7 @@
 #include <QMainWindow>
 #include <QString>
 #include <QStringList>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -101,6 +102,7 @@ private:
   QLabel *analysisCpuLabel{};
   QThread *responseThread{};
   QThread *responseDependencyThread{};
+  std::shared_ptr<std::atomic_bool> responseAnalysisCancellation;
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
   FilterTable *rowTable{};

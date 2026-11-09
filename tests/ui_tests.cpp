@@ -560,6 +560,16 @@ int main(int argc, char **argv) {
               << shortResponse.error.toStdString() << '\n';
     return 1;
   }
+  unsigned cancellationChecks = 0;
+  const auto cancelledResponse = analyzeConfigResponse(
+      defaultConfigPath, 44100, 1, 2048, {}, {},
+      [&cancellationChecks] { return ++cancellationChecks >= 9; });
+  if (!cancelledResponse.cancelled || !cancelledResponse.error.isEmpty() ||
+      !cancelledResponse.curves.isEmpty() || cancellationChecks != 9) {
+    std::cerr << "response analysis did not cancel between DSP blocks: "
+              << cancelledResponse.error.toStdString() << '\n';
+    return 1;
+  }
   const auto largestResponse =
       analyzeConfigResponse(defaultConfigPath, 44100, 1, 1U << 20);
   if (!largestResponse.error.isEmpty() || largestResponse.curves.size() != 1 ||
