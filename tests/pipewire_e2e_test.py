@@ -4361,7 +4361,8 @@ def main():
                             "replacement deterministic source exited")
                     if daemon_process.poll() is not None:
                         raise RuntimeError(
-                            "skyapod exited while recovering selected source")
+                            "skyapod exited while recovering selected source "
+                            f"(exit status {daemon_process.returncode})")
                     result = run([str(cli), "status"], env, timeout=5,
                                  check=False)
                     relinked_status = result.stdout
