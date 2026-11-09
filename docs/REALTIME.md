@@ -347,17 +347,23 @@ The test fixture's SPA null sink is not evidence of a hardware output. The
 v0.10.0 playback milestone remains open pending those checks plus the remaining
 playback recovery/configuration regression gates.
 
-Hosted compatibility check (2026-11-05): Ubuntu 24.04 CI uses WirePlumber
-0.4.17, where 15 playback smart-filter E2Es fail. The graph reported both
-SkyAPO filters streaming and internal links complete, but **0/2 target links**;
-the ordinary test playback stream remained suspended. The two PDC race E2Es
-passed after the test source began handling its trigger signals with
-`sigaction`. WirePlumber's Smart Filters policy is a 0.5 feature
-([official policy documentation](https://pipewire.pages.freedesktop.org/wireplumber/policies/smart_filters.html));
-the current LinuxAPO playback route depends on that policy. Playback is
-therefore not verified on WirePlumber 0.4, including the Ubuntu 24.04 CI
-environment. The compatibility gap remains open; these failing tests have not
-been disabled or counted as passing.
+Historical compatibility check (2026-11-05, pre-`944ace4`): an earlier
+playback implementation used WirePlumber Smart Filters, which are a 0.5
+feature ([official policy documentation](https://pipewire.pages.freedesktop.org/wireplumber/policies/smart_filters.html)).
+On WirePlumber 0.4.17, 15 E2Es then failed with **0/2 target links** and the
+ordinary stream suspended. This is not the current route implementation: the
+playback frontend was changed to a regular virtual sink, and `944ace4` added a
+paused-port refresh for WirePlumber 0.4 adapter activation. A private
+WirePlumber 0.4.17/PipeWire 1.6.10 graph passed at that commit with an
+independent `-6 dB` recording and complete app → SkyAPO → DSP → sink links.
+
+That result does not establish compatibility with Ubuntu 24.04's exact
+PipeWire 1.0.5 stack, nor with later playback commits on WirePlumber 0.4. The
+Ubuntu 24.04 CI build disables graph-mutation E2Es because they require
+PipeWire 1.0.6 or newer; the full PipeWire integration suite runs on Ubuntu
+26.04. Physical output, desktop-session routing and hardware recovery also
+remain unverified. See [the WirePlumber 0.4 investigation](development/wireplumber-0.4-playback.md)
+for the failure history and test details.
 
 Playback target switching/recovery follow-up (2026-10-16): while the daemon is
 running, `skyapo device output set <node>` now retargets the paired stream
