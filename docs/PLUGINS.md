@@ -124,3 +124,12 @@ The Lilv catalog is initialized lazily on first LV2 scan/use and retained once f
 An optional smoke test used the installed LSP CLAP effect `in.lsp-plug.filter_stereo` on a private PipeWire graph (F32 planar, 48 kHz stereo), with an independent consumer recording `SkyAPO Virtual Mic`. The LSP Input gain parameter (`2683833795`) was tested at 0 dB and +6 dB: both runs recorded 119808 frames, RMS changed from `0.07061148` to `0.14088930`, and the measured ratio `1.995275` differed from the expected `1.995262` by `0.001%`. SkyAPO's callback audit reported 0 allocations, 0 frees, and 0 overruns; the daemon log contained no ASan/UBSan diagnostics.
 
 Provenance: this manual run used binaries from the local worktree based on commit `64efe993` with uncommitted playback-candidate changes, not the PR #10 commit or a sanitizer-instrumented build. It verifies this one installed plugin's processing on a private graph; it does not establish physical-device operation, plugin-internal allocation behavior, general CLAP compatibility, or a CI result.
+
+The optional smoke is now repeatable from a built tree when the LSP CLAP package is installed:
+
+```sh
+python3 tests/third_party_lsp_clap_pipewire_smoke.py \
+  --build-dir build --tmp-root build/tmp --clap-path /usr/lib/clap
+```
+
+Re-run on 2026-11-09 used the locally built `skyapo`/`skyapod` at source HEAD `18703df062ce716e78e7e67b1724a780086923ae`, helper code from this branch, Arch package `lsp-plugins 1.2.35-1`, and a private PipeWire server. At 0 dB, 143360 frames measured RMS `0.07060831`; after reload with +6 dB Input gain, 144384 frames measured `0.14038836`. Ratio `1.988270` versus expected `1.995262` differed by `0.350%` (within the script's 5% tolerance). Callback allocation/deallocation counters were `0/0` and overruns were `0`. This is a real third-party CLAP processing check with an independent virtual-mic consumer, not a sanitizer run, physical-hardware test, playback test, or broad compatibility claim. The consumer links explicitly to `skyapo.virtual_mic`; its three-second capture duration is fixed by the helper in this branch.
