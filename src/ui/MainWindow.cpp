@@ -745,6 +745,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   configTabs->setDocumentMode(true);
   configTabs->setExpanding(false);
   configTabs->setTabsClosable(false);
+  connect(configTabs, &QTabBar::currentChanged, this,
+          &MainWindow::activateDocument);
   outer->addWidget(configTabs);
 
   auto *analysisFormatRow = new QHBoxLayout;
@@ -961,12 +963,6 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
           &MainWindow::validateLiveConfig);
 
   connect(openButton, &QPushButton::clicked, this, [this] {
-    if (modified &&
-        QMessageBox::question(
-            this, tr("Unsaved changes"),
-            tr("Discard unsaved edits and open another configuration?")) !=
-            QMessageBox::Yes)
-      return;
     QSettings settings;
     const QString initialDirectory =
         configPath.isEmpty()
@@ -1264,12 +1260,6 @@ void MainWindow::openRecentFile() {
   auto *action = qobject_cast<QAction *>(sender());
   if (!action)
     return;
-  if (modified &&
-      QMessageBox::question(
-          this, tr("Unsaved changes"),
-          tr("Discard unsaved edits and open another configuration?")) !=
-          QMessageBox::Yes)
-    return;
   openConfig(action->data().toString());
 }
 
@@ -1333,26 +1323,73 @@ void MainWindow::runCli(const QStringList &arguments,
 }
 
 void MainWindow::openConfig(const QString &path) {
+  const QString absolutePath = QFileInfo(path).absoluteFilePath();
+  for (size_t index = 0; index < openDocuments.size(); ++index) {
+    if (openDocuments[index].path == absolutePath) {
+      configTabs->setCurrentIndex(static_cast<int>(index));
+      return;
+    }
+  }
+
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) {
     QMessageBox::critical(this, tr("Open failed"), file.errorString());
     return;
   }
-  configPath = QFileInfo(path).absoluteFilePath();
-  if (configTabs->count() == 0) {
-    const int tab = configTabs->addTab(QFileInfo(configPath).fileName());
-    configTabs->setTabData(tab, configPath);
-    configTabs->setTabToolTip(tab, configPath);
-  }
-  rememberConfig(configPath);
-  document.load(file.readAll());
-  modified = false;
+  if (activeDocumentIndex >= 0)
+    snapshotActiveDocument();
+
+  OpenDocument opened;
+  opened.path = absolutePath;
+  opened.document.load(file.readAll());
+  openDocuments.push_back(std::move(opened));
+  const int tab = configTabs->addTab(QFileInfo(absolutePath).fileName());
+  configTabs->setTabData(tab, absolutePath);
+  configTabs->setTabToolTip(tab, absolutePath);
+  configTabs->setCurrentIndex(tab);
+  if (activeDocumentIndex == tab)
+    activateDocument(tab);
+}
+
+void MainWindow::snapshotActiveDocument() {
+  if (activeDocumentIndex < 0 ||
+      static_cast<size_t>(activeDocumentIndex) >= openDocuments.size())
+    return;
+  auto &active = openDocuments[static_cast<size_t>(activeDocumentIndex)];
+  active.path = configPath;
+  active.document = document;
+  active.modified = modified;
+}
+
+void MainWindow::activateDocument(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size() ||
+      index == activeDocumentIndex)
+    return;
+
+  snapshotActiveDocument();
+  activeDocumentIndex = index;
+  auto &active = openDocuments[static_cast<size_t>(index)];
+  configPath = active.path;
+  document = active.document;
+  modified = active.modified;
   ++configRevision;
+  clearRowDiagnostics();
   pathEdit->setText(configPath);
   rebuildRows();
   updateTitle();
   validationLabel->setText(tr("Checking configuration…"));
   scheduleLiveValidation();
+  rememberConfig(configPath);
+}
+
+void MainWindow::updateActiveTabLabel() {
+  if (activeDocumentIndex < 0 || activeDocumentIndex >= configTabs->count())
+    return;
+  const QString filename = QFileInfo(configPath).fileName();
+  configTabs->setTabText(activeDocumentIndex,
+                         modified ? QStringLiteral("* %1").arg(filename)
+                                  : filename);
+  configTabs->setTabToolTip(activeDocumentIndex, configPath);
 }
 
 void MainWindow::rebuildRows() {
@@ -1770,6 +1807,8 @@ void MainWindow::configureSelectedPluginParameters() {
 
 void MainWindow::markModified() {
   modified = true;
+  snapshotActiveDocument();
+  updateActiveTabLabel();
   clearRowDiagnostics();
   ++configRevision;
   updateTitle();
@@ -1949,6 +1988,7 @@ void MainWindow::updateTitle() {
   setWindowTitle(
       QStringLiteral("%1%2 — Equalizer APO Configuration Editor — SkyAPO")
           .arg(modified ? QStringLiteral("* ") : QString{}, configPath));
+  updateActiveTabLabel();
 }
 
 bool MainWindow::saveConfig() {
@@ -1963,6 +2003,7 @@ bool MainWindow::saveConfig() {
     return false;
   }
   modified = false;
+  snapshotActiveDocument();
   updateTitle();
   return true;
 }
@@ -2001,6 +2042,14 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   document = std::move(savedDocument);
   configPath = destination;
   modified = false;
+  if (activeDocumentIndex >= 0) {
+    auto &active = openDocuments[static_cast<size_t>(activeDocumentIndex)];
+    active.path = configPath;
+    active.document = document;
+    active.modified = false;
+    configTabs->setTabData(activeDocumentIndex, configPath);
+    configTabs->setTabToolTip(activeDocumentIndex, configPath);
+  }
   ++configRevision;
   pathEdit->setText(configPath);
   rebuildRows();

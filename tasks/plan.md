@@ -13,7 +13,7 @@ Add multiple open configuration documents to the Qt editor. The GitHub issue is 
 ## Task list
 
 1. [x] Add a tab strip and a UI test for the initial document tab.
-2. [ ] Add open/switch/deduplicate behavior and tests that edits remain isolated across tabs.
+2. [x] Add open/switch/deduplicate behavior and tests that edits remain isolated across tabs.
 3. [ ] Add dirty-tab close decisions and Save As collision handling with UI tests.
 4. [ ] Run focused UI/config tests, format checks, review the diff, then rely on hosted CI for the full build and sanitizer gates.
 

@@ -1209,6 +1209,57 @@ int main(int argc, char **argv) {
     std::cerr << "opening a config did not persist it in Open Recent\n";
     return 1;
   }
+  const QString secondConfigPath = temporary.filePath("second-config.txt");
+  QFile secondConfig(secondConfigPath);
+  if (!secondConfig.open(QIODevice::WriteOnly) ||
+      secondConfig.write("Preamp: -3 dB\n") != 14) {
+    std::cerr << "could not create second configuration fixture\n";
+    return 1;
+  }
+  secondConfig.close();
+  MainWindow tabsWindow(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *tabs = tabsWindow.findChild<QTabBar *>("configTabs");
+  if (!tabs ||
+      !QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigPath)) ||
+      tabs->count() != 2 ||
+      tabs->tabText(1) != QFileInfo(secondConfigPath).fileName()) {
+    std::cerr << "opening another config did not create a second tab\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, configPath)) ||
+      tabs->count() != 2 || tabs->currentIndex() != 0) {
+    std::cerr << "reopening a config created a duplicate tab or failed to "
+                 "select the existing tab\n";
+    return 1;
+  }
+  tabs->setCurrentIndex(1);
+  auto *secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  auto *secondGain =
+      secondPreamp ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain) {
+    std::cerr << "second configuration tab did not load its filter editor\n";
+    return 1;
+  }
+  secondGain->setValue(-8.0);
+  tabs->setCurrentIndex(0);
+  tabs->setCurrentIndex(1);
+  QCoreApplication::processEvents();
+  const auto tabPreampEditors = tabsWindow.findChildren<PreampFilterGUI *>();
+  bool preservedSecondGain = false;
+  for (auto *editor : tabPreampEditors) {
+    auto *gain = editor->findChild<QDoubleSpinBox *>("doubleSpinBox");
+    preservedSecondGain |= gain && qAbs(gain->value() + 8.0) < 1e-9;
+  }
+  if (!preservedSecondGain || !tabs->tabText(1).startsWith("* ") ||
+      !tabsWindow.windowTitle().startsWith("* ")) {
+    std::cerr << "switching config tabs lost the edited document state\n";
+    return 1;
+  }
   const QString saveAsSourcePath = temporary.filePath("save-as-source.txt");
   const QString saveAsDestinationPath =
       temporary.filePath("save-as-copy/renamed-config.txt");
