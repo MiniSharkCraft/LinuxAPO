@@ -84,6 +84,32 @@ def start_wireplumber(executable, env, log):
         stdout=log, stderr=subprocess.STDOUT)
 
 
+def wait_for_wireplumber_client(pw_dump, env, process, timeout=8):
+    """Wait until the private PipeWire registry exposes WirePlumber."""
+    deadline = time.monotonic() + timeout
+    last_clients = []
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                "private WirePlumber exited before registering with PipeWire")
+        result = run([str(pw_dump)], env, timeout=5, check=False)
+        if result.returncode == 0:
+            objects = pipewire_dump_objects(result.stdout)
+            last_clients = [
+                item.get("info", {}).get("props", item.get("props", {}))
+                for item in objects
+                if item.get("type", "").endswith(":Client")]
+            if any("wireplumber" in " ".join((
+                    str(props.get("application.name", "")),
+                    str(props.get("application.process.binary", ""))
+            )).lower() for props in last_clients):
+                return
+        time.sleep(0.05)
+    raise RuntimeError(
+        "private PipeWire registry did not expose a WirePlumber client before "
+        f"daemon startup; clients={last_clients}")
+
+
 class SystemdManagedDaemon:
     """Popen-like control for a transient per-user skyapod.service."""
 
@@ -1634,9 +1660,12 @@ def main():
                     wait_for_playback_application_route(
                         second_source_process, pw_dump, env, channel_count)
                     if wireplumber_playback:
-                        daemon_log.flush()
-                        daemon_log.seek(0)
-                        startup_log = daemon_log.read()
+                        if isinstance(daemon_process, SystemdManagedDaemon):
+                            startup_log = daemon_process.journal()
+                        else:
+                            daemon_log.flush()
+                            daemon_log.seek(0)
+                            startup_log = daemon_log.read()
                         manager_ready = (
                             "initial PipeWire registry synchronized; "
                             "session manager detected before playback adapter "
@@ -3597,20 +3626,44 @@ def main():
                       f"{daemon_process.restart_count()}; virtual source "
                       f"node {old_virtual_id} -> {new_virtual_id}.")
                 if playback_systemd_crash_restart:
+                    second_source_process = subprocess.Popen(
+                        [str(playback_client)], env=env, text=True,
+                        stdout=source_log, stderr=subprocess.STDOUT)
+                    wait_for_playback_application_route(
+                        second_source_process, pw_dump, env, channel_count)
+                    pre_dsp_playback = run(
+                        [str(consumer), "--expected-db", "0",
+                         "--expected-rate", str(sample_rate),
+                         "--duration-ms", "1500", "--capture-node",
+                         "skyapo.playback", "--signal-ready",
+                         "--signal-connected", "--internal-filter", "--name",
+                         "skyapo.test.consumer.playback-input-after-restart"],
+                        env, timeout=8, check=False)
+                    pre_dsp_ratio = re.search(
+                        r"RMS ratio to expected: ([0-9.]+)",
+                        pre_dsp_playback.stdout)
+                    if (pre_dsp_playback.returncode != 0 or
+                            not pre_dsp_ratio or
+                            abs(float(pre_dsp_ratio.group(1)) - 1.0) >= 0.03):
+                        raise RuntimeError(
+                            "systemd-restarted PipeWire playback input monitor "
+                            "did not receive the expected unity-level test "
+                            f"signal:\n{pre_dsp_playback.stdout}")
+                    print("Post-restart pre-DSP playback input was measured "
+                          "at unity; output/expected RMS ratio "
+                          f"{float(pre_dsp_ratio.group(1)):.6f}.")
                     post_crash_playback_consumer = subprocess.Popen(
                         [str(consumer), "--expected-db", "-6",
                          "--expected-rate", str(sample_rate),
                          "--duration-ms", "2500", "--capture-node",
                          "skyapo.test.null-target", "--signal-ready",
+                         "--signal-connected",
                          "--name", "skyapo.test.consumer.after-daemon-restart"],
                         env=env, text=True, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT)
                     ready_output = wait_for_consumer_ready(
                         post_crash_playback_consumer,
                         "post-crash independent playback monitor")
-                    second_source_process = subprocess.Popen(
-                        [str(playback_client)], env=env, text=True,
-                        stdout=source_log, stderr=subprocess.STDOUT)
                     try:
                         remaining_output, _ = (
                             post_crash_playback_consumer.communicate(
