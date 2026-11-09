@@ -1260,6 +1260,87 @@ int main(int argc, char **argv) {
     std::cerr << "switching config tabs lost the edited document state\n";
     return 1;
   }
+  tabs->setCurrentIndex(0);
+  bool saveAsCollisionResult = true;
+  if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, saveAsCollisionResult),
+                                 Q_ARG(QString, secondConfigPath)) ||
+      saveAsCollisionResult) {
+    std::cerr << "Save As allowed overwriting a configuration open in another "
+                 "tab\n";
+    return 1;
+  }
+  QFile collisionTarget(secondConfigPath);
+  if (!collisionTarget.open(QIODevice::ReadOnly) ||
+      collisionTarget.readAll() != "Preamp: -3 dB\n") {
+    std::cerr << "rejected Save As collision modified the open target file\n";
+    return 1;
+  }
+  const auto closeWithChoice = [](MainWindow &target, int index,
+                                  QMessageBox::StandardButton choice) {
+    QTimer clickChoice;
+    clickChoice.setInterval(5);
+    QObject::connect(&clickChoice, &QTimer::timeout, &target, [&] {
+      auto *message =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      if (message && message->button(choice))
+        message->button(choice)->click();
+    });
+    clickChoice.start();
+    const bool invoked = QMetaObject::invokeMethod(
+        &target, "closeConfigTab", Qt::DirectConnection, Q_ARG(int, index));
+    clickChoice.stop();
+    return invoked;
+  };
+  if (!closeWithChoice(tabsWindow, 1, QMessageBox::Cancel) ||
+      tabs->count() != 2 || !tabs->tabText(1).startsWith("* ")) {
+    std::cerr << "Cancel did not preserve the dirty configuration tab\n";
+    return 1;
+  }
+  if (!closeWithChoice(tabsWindow, 1, QMessageBox::Discard) ||
+      tabs->count() != 1 || tabs->currentIndex() != 0) {
+    std::cerr << "Discard did not close only the selected configuration tab\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "closeConfigTab",
+                                 Qt::DirectConnection, Q_ARG(int, 0)) ||
+      tabs->count() != 1) {
+    std::cerr << "editor allowed closing its final configuration tab\n";
+    return 1;
+  }
+  MainWindow saveCloseWindow(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *saveCloseTabs = saveCloseWindow.findChild<QTabBar *>("configTabs");
+  if (!saveCloseTabs ||
+      !QMetaObject::invokeMethod(&saveCloseWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigPath))) {
+    std::cerr << "could not prepare dirty-tab Save close test\n";
+    return 1;
+  }
+  saveCloseTabs->setCurrentIndex(1);
+  auto *saveClosePreamp = saveCloseWindow.findChild<PreampFilterGUI *>();
+  auto *saveCloseGain =
+      saveClosePreamp
+          ? saveClosePreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+          : nullptr;
+  if (!saveCloseGain) {
+    std::cerr << "could not locate inactive-tab Save test control\n";
+    return 1;
+  }
+  saveCloseGain->setValue(-7.0);
+  saveCloseTabs->setCurrentIndex(0);
+  if (!closeWithChoice(saveCloseWindow, 1, QMessageBox::Save) ||
+      saveCloseTabs->count() != 1) {
+    std::cerr << "Save did not persist and close the selected dirty tab\n";
+    return 1;
+  }
+  QFile savedClosedConfig(secondConfigPath);
+  if (!savedClosedConfig.open(QIODevice::ReadOnly) ||
+      savedClosedConfig.readAll() != "Preamp: -7 dB\n") {
+    std::cerr << "Save on tab close did not write the inactive config state\n";
+    return 1;
+  }
   const QString saveAsSourcePath = temporary.filePath("save-as-source.txt");
   const QString saveAsDestinationPath =
       temporary.filePath("save-as-copy/renamed-config.txt");

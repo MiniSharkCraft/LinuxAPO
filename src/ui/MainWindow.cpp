@@ -744,9 +744,11 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   configTabs->setObjectName(QStringLiteral("configTabs"));
   configTabs->setDocumentMode(true);
   configTabs->setExpanding(false);
-  configTabs->setTabsClosable(false);
+  configTabs->setTabsClosable(true);
   connect(configTabs, &QTabBar::currentChanged, this,
           &MainWindow::activateDocument);
+  connect(configTabs, &QTabBar::tabCloseRequested, this,
+          &MainWindow::closeConfigTab);
   outer->addWidget(configTabs);
 
   auto *analysisFormatRow = new QHBoxLayout;
@@ -1188,24 +1190,15 @@ void MainWindow::analyzeResponse() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-  if (!modified) {
-    saveWindowPreferences();
-    event->accept();
-    return;
+  snapshotActiveDocument();
+  for (int index = 0; index < static_cast<int>(openDocuments.size()); ++index) {
+    if (!confirmDocumentClose(index)) {
+      event->ignore();
+      return;
+    }
   }
-  const auto choice = QMessageBox::warning(
-      this, tr("Unsaved configuration"),
-      tr("Save changes to %1 before closing?").arg(configPath),
-      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-      QMessageBox::Save);
-  if (choice == QMessageBox::Cancel) {
-    event->ignore();
-  } else if (choice == QMessageBox::Save && !saveConfig()) {
-    event->ignore();
-  } else {
-    saveWindowPreferences();
-    event->accept();
-  }
+  saveWindowPreferences();
+  event->accept();
 }
 
 void MainWindow::saveWindowPreferences() {
@@ -1390,6 +1383,66 @@ void MainWindow::updateActiveTabLabel() {
                          modified ? QStringLiteral("* %1").arg(filename)
                                   : filename);
   configTabs->setTabToolTip(activeDocumentIndex, configPath);
+}
+
+bool MainWindow::saveDocumentAt(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size())
+    return false;
+  if (index == activeDocumentIndex)
+    return saveConfig();
+  auto &target = openDocuments[static_cast<size_t>(index)];
+  if (!target.modified)
+    return true;
+  QSaveFile file(target.path);
+  const QByteArray contents = target.document.serialize();
+  if (!file.open(QIODevice::WriteOnly) ||
+      file.write(contents) != contents.size() || !file.commit()) {
+    QMessageBox::critical(this, tr("Save failed"), file.errorString());
+    return false;
+  }
+  target.modified = false;
+  configTabs->setTabText(index, QFileInfo(target.path).fileName());
+  return true;
+}
+
+bool MainWindow::confirmDocumentClose(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size())
+    return false;
+  const auto &target = openDocuments[static_cast<size_t>(index)];
+  if (!target.modified)
+    return true;
+  const auto choice = QMessageBox::warning(
+      this, tr("Unsaved configuration"),
+      tr("Save changes to %1 before closing?").arg(target.path),
+      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+      QMessageBox::Save);
+  if (choice == QMessageBox::Cancel)
+    return false;
+  return choice != QMessageBox::Save || saveDocumentAt(index);
+}
+
+void MainWindow::closeConfigTab(int index) {
+  if (configTabs->count() <= 1 || index < 0 || index >= configTabs->count() ||
+      static_cast<size_t>(index) >= openDocuments.size())
+    return;
+  snapshotActiveDocument();
+  if (!confirmDocumentClose(index))
+    return;
+
+  const bool wasActive = index == activeDocumentIndex;
+  int nextIndex = activeDocumentIndex;
+  if (wasActive)
+    nextIndex = std::min(index, configTabs->count() - 2);
+  configTabs->blockSignals(true);
+  configTabs->removeTab(index);
+  openDocuments.erase(openDocuments.begin() + index);
+  configTabs->blockSignals(false);
+  if (wasActive) {
+    activeDocumentIndex = -1;
+    activateDocument(nextIndex);
+  } else if (index < activeDocumentIndex) {
+    --activeDocumentIndex;
+  }
 }
 
 void MainWindow::rebuildRows() {
@@ -2027,6 +2080,14 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   if (path.trimmed().isEmpty())
     return false;
   const QString destination = QFileInfo(path).absoluteFilePath();
+  for (size_t index = 0; index < openDocuments.size(); ++index) {
+    if (static_cast<int>(index) != activeDocumentIndex &&
+        QFileInfo(openDocuments[index].path).absoluteFilePath() ==
+            destination) {
+      saveAsError = tr("That configuration is already open in another tab.");
+      return false;
+    }
+  }
   ConfigFile savedDocument = document;
   if (!rebaseRelativeIncludes(savedDocument, configPath, destination,
                               saveAsError))

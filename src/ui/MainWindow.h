@@ -33,6 +33,7 @@ protected:
 
 private slots:
   void openConfig(const QString &path);
+  void closeConfigTab(int index);
 
 private:
   struct OpenDocument {
@@ -44,6 +45,8 @@ private:
   void activateDocument(int index);
   void snapshotActiveDocument();
   void updateActiveTabLabel();
+  bool saveDocumentAt(int index);
+  bool confirmDocumentClose(int index);
   void rebuildRows();
   void addFilter(const QString &line);
   void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {});
