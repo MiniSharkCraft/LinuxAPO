@@ -33,7 +33,11 @@ int main(int argc, char **argv) {
         const auto selection = settings::deviceSelection();
         runPipeWire(selection.name, selection.stableProperty, config, stopping);
       } catch (const std::exception &e) {
+#if defined(SKYAPO_PIPEWIRE_E2E_TESTING)
         const char *retryGate = std::getenv("SKYAPO_TEST_RETRY_GATE_FILE");
+#else
+        const char *retryGate = nullptr;
+#endif
         if (retryGate && retryGate[0] != '\0') {
           std::cerr << "skyapod: " << e.what()
                     << "; retry paused by test gate\n";
