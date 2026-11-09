@@ -1219,19 +1219,22 @@ int main(int argc, char **argv) {
   secondConfig.close();
   MainWindow tabsWindow(configPath, QString::fromLocal8Bit(argv[1]));
   auto *tabs = tabsWindow.findChild<QTabBar *>("configTabs");
+  auto *tabPath = tabsWindow.findChild<QLineEdit *>("configPath");
   if (!tabs ||
       !QMetaObject::invokeMethod(&tabsWindow, "openConfig",
                                  Qt::DirectConnection,
                                  Q_ARG(QString, secondConfigPath)) ||
       tabs->count() != 2 ||
-      tabs->tabText(1) != QFileInfo(secondConfigPath).fileName()) {
+      tabs->tabText(1) != QFileInfo(secondConfigPath).fileName() || !tabPath ||
+      tabPath->text() != QFileInfo(secondConfigPath).absoluteFilePath()) {
     std::cerr << "opening another config did not create a second tab\n";
     return 1;
   }
   if (!QMetaObject::invokeMethod(&tabsWindow, "openConfig",
                                  Qt::DirectConnection,
                                  Q_ARG(QString, configPath)) ||
-      tabs->count() != 2 || tabs->currentIndex() != 0) {
+      tabs->count() != 2 || tabs->currentIndex() != 0 || !tabPath ||
+      tabPath->text() != QFileInfo(configPath).absoluteFilePath()) {
     std::cerr << "reopening a config created a duplicate tab or failed to "
                  "select the existing tab\n";
     return 1;
@@ -1275,6 +1278,37 @@ int main(int argc, char **argv) {
                  "Save\n";
     return 1;
   }
+  const QString multiTabSaveAsPath =
+      temporary.filePath("second-config-save-as.txt");
+  bool multiTabSaveAsSucceeded = false;
+  if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, multiTabSaveAsSucceeded),
+                                 Q_ARG(QString, multiTabSaveAsPath)) ||
+      !multiTabSaveAsSucceeded ||
+      tabPath->text() != QFileInfo(multiTabSaveAsPath).absoluteFilePath() ||
+      tabs->tabToolTip(1) != QFileInfo(multiTabSaveAsPath).absoluteFilePath()) {
+    std::cerr << "Save As did not update the selected document tab/path\n";
+    return 1;
+  }
+  QFile secondConfigAfterSaveAs(secondConfigPath);
+  QFile multiTabSaveAs(multiTabSaveAsPath);
+  if (!secondConfigAfterSaveAs.open(QIODevice::ReadOnly) ||
+      secondConfigAfterSaveAs.readAll() != "Preamp: -8 dB\n" ||
+      !multiTabSaveAs.open(QIODevice::ReadOnly) ||
+      multiTabSaveAs.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "Save As did not isolate source and selected tab contents\n";
+    return 1;
+  }
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  secondGain = secondPreamp
+                   ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain) {
+    std::cerr << "Save As did not rebuild the selected filter editor\n";
+    return 1;
+  }
   secondGain->setValue(-9.0);
   secondGain->setValue(-8.0);
   tabs->setCurrentIndex(0);
@@ -1282,13 +1316,13 @@ int main(int argc, char **argv) {
   if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
                                  Qt::DirectConnection,
                                  Q_RETURN_ARG(bool, saveAsCollisionResult),
-                                 Q_ARG(QString, secondConfigPath)) ||
+                                 Q_ARG(QString, multiTabSaveAsPath)) ||
       saveAsCollisionResult) {
     std::cerr << "Save As allowed overwriting a configuration open in another "
                  "tab\n";
     return 1;
   }
-  QFile collisionTarget(secondConfigPath);
+  QFile collisionTarget(multiTabSaveAsPath);
   if (!collisionTarget.open(QIODevice::ReadOnly) ||
       collisionTarget.readAll() != "Preamp: -8 dB\n") {
     std::cerr << "rejected Save As collision modified the open target file\n";
