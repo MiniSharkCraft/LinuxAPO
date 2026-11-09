@@ -499,8 +499,26 @@ struct Runtime {
     }
 #endif
   }
+  void stopStatusServer() noexcept {
+    if (main && statusEvent) {
+      pw_loop_destroy_source(pw_main_loop_get_loop(main), statusEvent);
+      statusEvent = nullptr;
+    }
+    if (server >= 0) {
+      close(server);
+      server = -1;
+    }
+    if (ownsSocket) {
+      unlink(path.c_str());
+      ownsSocket = false;
+    }
+  }
   ~Runtime() {
     cleaning = true;
+    // Route restoration synchronously iterates the PipeWire loop. Stop status
+    // requests first so they cannot inspect dead PipeWire proxies while the
+    // core sync is being drained during teardown after a server restart.
+    stopStatusServer();
     skyapo::platform::LoudnessVolumeProvider::publish(false, 0.0f);
     // Release registry-bound proxies/listeners while their core is still live.
     restoreDefaultRouteAndWait();
@@ -530,10 +548,6 @@ struct Runtime {
         if (s)
           pw_loop_destroy_source(l, s);
     }
-    if (server >= 0)
-      close(server);
-    if (ownsSocket)
-      unlink(path.c_str());
     if (context)
       pw_context_destroy(context);
     if (main)
@@ -2777,6 +2791,8 @@ struct Runtime {
   }
   static void statusReady(void *data, int, uint32_t) {
     auto &r = *static_cast<Runtime *>(data);
+    if (r.cleaning || r.server < 0)
+      return;
     for (;;) {
       int client =
           accept4(r.server, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
