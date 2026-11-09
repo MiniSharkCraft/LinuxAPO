@@ -29,6 +29,8 @@
 #include <memory>
 #include <optional>
 #include <poll.h>
+#include <fcntl.h>
+#include <vector>
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -39,6 +41,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 constexpr unsigned MaxFrames = 65536, MaxChannels = 8;
@@ -109,6 +112,211 @@ std::string get(const spa_dict *p, const char *key) {
   auto *v = spa_dict_lookup(p, key);
   return v ? v : "";
 }
+struct PersistedMetadataValue {
+  bool present{};
+  std::string type;
+  std::string value;
+};
+struct PersistedDefaultRoute {
+  PersistedMetadataValue active;
+  PersistedMetadataValue configured;
+};
+std::optional<std::filesystem::path> defaultRouteSnapshotPath() {
+  if (const char *stateHome = std::getenv("XDG_STATE_HOME");
+      stateHome && *stateHome) {
+    std::filesystem::path base(stateHome);
+    if (base.is_absolute())
+      return base / "skyapo" / "playback-default-route-v1";
+  }
+  if (const char *home = std::getenv("HOME"); home && *home) {
+    std::filesystem::path base(home);
+    if (base.is_absolute())
+      return base / ".local" / "state" / "skyapo" / "playback-default-route-v1";
+  }
+  return std::nullopt;
+}
+void appendRouteSnapshotField(std::string &result, const std::string &value) {
+  result += std::to_string(value.size());
+  result.push_back('\n');
+  result.append(value);
+  result.push_back('\n');
+}
+bool readRouteSnapshotField(const std::string &data, size_t &offset,
+                            std::string &value) {
+  const size_t lineEnd = data.find('\n', offset);
+  if (lineEnd == std::string::npos || lineEnd - offset > 8)
+    return false;
+  char *end = nullptr;
+  errno = 0;
+  const auto length = std::strtoull(data.c_str() + offset, &end, 10);
+  if (errno || end != data.c_str() + lineEnd || length > 16384)
+    return false;
+  offset = lineEnd + 1;
+  if (length > data.size() - offset ||
+      data.size() - offset - static_cast<size_t>(length) < 1)
+    return false;
+  value.assign(data.data() + offset, static_cast<size_t>(length));
+  offset += static_cast<size_t>(length);
+  if (data[offset++] != '\n')
+    return false;
+  return true;
+}
+std::string encodeDefaultRouteSnapshot(const PersistedDefaultRoute &snapshot) {
+  std::string result = "SKYAPO_PLAYBACK_ROUTE 1\n";
+  for (const auto *value : {&snapshot.active, &snapshot.configured}) {
+    result += value->present ? "1\n" : "0\n";
+    appendRouteSnapshotField(result, value->type);
+    appendRouteSnapshotField(result, value->value);
+  }
+  return result;
+}
+bool decodeDefaultRouteSnapshot(const std::string &data,
+                                PersistedDefaultRoute &snapshot) {
+  if (data.size() > 65536 ||
+      data.compare(0, std::string("SKYAPO_PLAYBACK_ROUTE 1\n").size(),
+                   "SKYAPO_PLAYBACK_ROUTE 1\n") != 0)
+    return false;
+  size_t offset = std::string("SKYAPO_PLAYBACK_ROUTE 1\n").size();
+  for (auto *value : {&snapshot.active, &snapshot.configured}) {
+    if (offset + 2 > data.size() || data[offset + 1] != '\n' ||
+        (data[offset] != '0' && data[offset] != '1'))
+      return false;
+    value->present = data[offset] == '1';
+    offset += 2;
+    if (!readRouteSnapshotField(data, offset, value->type) ||
+        !readRouteSnapshotField(data, offset, value->value))
+      return false;
+    if (!value->present && (!value->type.empty() || !value->value.empty()))
+      return false;
+  }
+  return offset == data.size();
+}
+bool writeAll(int fd, const char *data, size_t size) {
+  size_t offset = 0;
+  while (offset < size) {
+    const auto count = ::write(fd, data + offset, size - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      return false;
+    offset += static_cast<size_t>(count);
+  }
+  return true;
+}
+bool writeDefaultRouteSnapshot(const std::filesystem::path &path,
+                               const PersistedDefaultRoute &snapshot,
+                               std::string &error) {
+  namespace fs = std::filesystem;
+  const auto directory = path.parent_path();
+  std::error_code fsError;
+  fs::create_directories(directory, fsError);
+  if (fsError || fs::is_symlink(fs::symlink_status(directory, fsError)) ||
+      fsError) {
+    error = "cannot safely create the playback route state directory";
+    return false;
+  }
+  if (::chmod(directory.c_str(), 0700) < 0) {
+    error = "cannot secure the playback route state directory";
+    return false;
+  }
+  std::string pattern = path.string() + ".tmp-XXXXXX";
+  std::vector<char> temporary(pattern.begin(), pattern.end());
+  temporary.push_back('\0');
+  const int fd = ::mkstemp(temporary.data());
+  if (fd < 0) {
+    error = "cannot create the playback route state file";
+    return false;
+  }
+  bool fdOpen = true;
+  bool renamed = false;
+  const auto fail = [&](const char *message) {
+    error = message;
+    if (fdOpen)
+      ::close(fd);
+    if (!renamed)
+      ::unlink(temporary.data());
+    return false;
+  };
+  if (::fchmod(fd, 0600) < 0)
+    return fail("cannot secure the playback route state file");
+  const std::string bytes = encodeDefaultRouteSnapshot(snapshot);
+  if (!writeAll(fd, bytes.data(), bytes.size()) || ::fsync(fd) < 0)
+    return fail("cannot write the playback route state file");
+  const int closeResult = ::close(fd);
+  fdOpen = false;
+  if (closeResult < 0)
+    return fail("cannot close the playback route state file");
+  if (::rename(temporary.data(), path.c_str()) < 0)
+    return fail("cannot atomically install the playback route state file");
+  renamed = true;
+  const int directoryFd =
+      ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (directoryFd < 0) {
+    error = "cannot open the playback route state directory for sync";
+    ::unlink(path.c_str());
+    return false;
+  }
+  const int syncResult = ::fsync(directoryFd);
+  ::close(directoryFd);
+  if (syncResult < 0) {
+    error = "cannot sync the playback route state directory";
+    ::unlink(path.c_str());
+    return false;
+  }
+  return true;
+}
+bool readDefaultRouteSnapshot(const std::filesystem::path &path,
+                              PersistedDefaultRoute &snapshot, bool &exists,
+                              std::string &error) {
+  exists = false;
+  struct stat pathInfo{};
+  if (::lstat(path.c_str(), &pathInfo) < 0) {
+    if (errno == ENOENT)
+      return true;
+    error = "cannot inspect the playback route state file";
+    return false;
+  }
+  exists = true;
+  if (!S_ISREG(pathInfo.st_mode) || pathInfo.st_uid != ::getuid() ||
+      (pathInfo.st_mode & 0077) != 0 || pathInfo.st_size < 0 ||
+      pathInfo.st_size > 65536) {
+    error =
+        "playback route state file has unsafe ownership, permissions, or size";
+    return false;
+  }
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    error = "cannot open the playback route state file safely";
+    return false;
+  }
+  struct stat fileInfo{};
+  if (::fstat(fd, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode) ||
+      fileInfo.st_uid != ::getuid() || (fileInfo.st_mode & 0077) != 0 ||
+      fileInfo.st_size != pathInfo.st_size) {
+    ::close(fd);
+    error = "playback route state file changed while opening";
+    return false;
+  }
+  std::string data(static_cast<size_t>(fileInfo.st_size), '\0');
+  size_t offset = 0;
+  while (offset < data.size()) {
+    const auto count = ::read(fd, data.data() + offset, data.size() - offset);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      ::close(fd);
+      error = "cannot read the playback route state file";
+      return false;
+    }
+    offset += static_cast<size_t>(count);
+  }
+  ::close(fd);
+  if (!decodeDefaultRouteSnapshot(data, snapshot)) {
+    error = "playback route state file is malformed or unsupported";
+    return false;
+  }
+  return true;
+}
 struct Runtime {
   volatile sig_atomic_t &stopping;
   AudioDevice device;
@@ -159,6 +367,8 @@ struct Runtime {
       renderVolumeMonitor;
   std::unique_ptr<skyapo::pipewire::PlaybackGraph> playbackGraph;
   bool defaultMetadataSnapshotReady{};
+  std::optional<std::filesystem::path> defaultRouteSnapshotFile;
+  bool defaultRouteSnapshotChecked{};
   bool defaultMetadataPresent{};
   bool configuredDefaultMetadataPresent{};
   bool originalDefaultMetadataCaptured{};
@@ -234,6 +444,7 @@ struct Runtime {
 #endif
   pw_filter_state state = PW_FILTER_STATE_UNCONNECTED;
   explicit Runtime(volatile sig_atomic_t &stop) : stopping(stop) {
+    defaultRouteSnapshotFile = defaultRouteSnapshotPath();
     ownInputs.fill(SPA_ID_INVALID);
     linkGlobalIds.fill(SPA_ID_INVALID);
 #ifdef SKYAPO_PIPEWIRE_E2E_TESTING
@@ -314,6 +525,112 @@ struct Runtime {
     const int requested = ++nextCoreSequence;
     return pw_core_sync(core, PW_ID_CORE, requested);
   }
+  void removeDefaultRouteSnapshot() noexcept {
+    if (!defaultRouteSnapshotFile)
+      return;
+    if (::unlink(defaultRouteSnapshotFile->c_str()) < 0 && errno != ENOENT) {
+      std::cerr << "skyapod: cannot remove stale playback route state: "
+                << std::strerror(errno) << '\n';
+      return;
+    }
+    const int directoryFd =
+        ::open(defaultRouteSnapshotFile->parent_path().c_str(),
+               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directoryFd >= 0) {
+      if (::fsync(directoryFd) < 0)
+        std::cerr << "skyapod: cannot sync playback route state removal: "
+                  << std::strerror(errno) << '\n';
+      ::close(directoryFd);
+    }
+  }
+  PersistedDefaultRoute currentOriginalDefaultRoute() const {
+    PersistedDefaultRoute snapshot;
+    snapshot.active = {originalDefaultMetadataPresent,
+                       originalDefaultMetadataType,
+                       originalDefaultMetadataValue};
+    snapshot.configured = {originalConfiguredDefaultMetadataPresent,
+                           originalConfiguredDefaultMetadataType,
+                           originalConfiguredDefaultMetadataValue};
+    return snapshot;
+  }
+  bool recoverPersistedDefaultRoute() {
+    if (defaultRouteSnapshotChecked)
+      return false;
+    defaultRouteSnapshotChecked = true;
+    if (!defaultRouteSnapshotFile)
+      return false;
+
+    PersistedDefaultRoute snapshot;
+    bool exists = false;
+    std::string readError;
+    if (!readDefaultRouteSnapshot(*defaultRouteSnapshotFile, snapshot, exists,
+                                  readError)) {
+      std::cerr << "skyapod: ignoring playback route recovery state: "
+                << readError << '\n';
+      if (exists)
+        removeDefaultRouteSnapshot();
+      return false;
+    }
+    if (!exists)
+      return false;
+
+    const auto matches = [](bool present, const std::string &type,
+                            const std::string &value,
+                            const PersistedMetadataValue &saved) {
+      return present == saved.present &&
+             (!present || (type == saved.type && value == saved.value));
+    };
+    const bool activeSkyApo = defaultMetadataName == "skyapo.playback";
+    const bool configuredSkyApo =
+        wirePlumberPresent &&
+        configuredDefaultMetadataName == "skyapo.playback";
+    const bool activeOriginal =
+        matches(defaultMetadataPresent, defaultMetadataType,
+                defaultMetadataValue, snapshot.active);
+    const bool configuredOriginal =
+        matches(configuredDefaultMetadataPresent, configuredDefaultMetadataType,
+                configuredDefaultMetadataValue, snapshot.configured);
+    const bool configuredCompatible =
+        !wirePlumberPresent || configuredSkyApo || configuredOriginal;
+    if (!activeSkyApo && !configuredSkyApo && activeOriginal &&
+        (!wirePlumberPresent || configuredOriginal)) {
+      // The session manager restored the saved route while SkyAPO was down.
+      // Discard the stale lease and let this daemon claim the same original
+      // route again, taking a fresh snapshot.
+      removeDefaultRouteSnapshot();
+      return false;
+    }
+    if ((!activeSkyApo && !activeOriginal) || !configuredCompatible) {
+      // At least one default changed to a value that is neither the saved
+      // original nor SkyAPO while the daemon was down. Do not overwrite it.
+      removeDefaultRouteSnapshot();
+      defaultRouteAttempted = true;
+      defaultRouteOverridden = true;
+      defaultRouteError = "playback default changed while SkyAPO was stopped; "
+                          "leaving it untouched";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return true;
+    }
+
+    originalDefaultMetadataPresent = snapshot.active.present;
+    originalDefaultMetadataType = snapshot.active.type;
+    originalDefaultMetadataValue = snapshot.active.value;
+    originalDefaultMetadataCaptured = true;
+    originalConfiguredDefaultMetadataPresent = snapshot.configured.present;
+    originalConfiguredDefaultMetadataType = snapshot.configured.type;
+    originalConfiguredDefaultMetadataValue = snapshot.configured.value;
+    originalConfiguredDefaultCaptured = true;
+    defaultRouteAttempted = true;
+    defaultRouteOwned = true;
+    defaultRouteActiveConfirmed = activeSkyApo;
+    defaultRouteConfiguredConfirmed = !wirePlumberPresent || configuredSkyApo;
+    defaultRouteError.clear();
+    std::cerr << "skyapod: recovered playback route ownership from the "
+                 "saved pre-crash default\n";
+    if (!activeSkyApo || (wirePlumberPresent && !configuredSkyApo))
+      reassertOwnedDefaultRoute();
+    return true;
+  }
   static int metadataProperty(void *data, uint32_t subject, const char *key,
                               const char *type, const char *value) {
     auto &r = *static_cast<Runtime *>(data);
@@ -392,6 +709,7 @@ struct Runtime {
         r.defaultRouteOwned = false;
         r.defaultRouteSetRequested = false;
         r.defaultRouteOverridden = true;
+        r.removeDefaultRouteSnapshot();
       }
       return 0;
     }
@@ -420,6 +738,7 @@ struct Runtime {
       r.defaultRouteOwned = false;
       r.defaultRouteSetRequested = false;
       r.defaultRouteOverridden = true;
+      r.removeDefaultRouteSnapshot();
     }
     if (!r.playbackGraph)
       r.schedulePlaybackRecovery();
@@ -482,6 +801,9 @@ struct Runtime {
         defaultRoutePending || defaultRouteOwned || defaultRouteOverridden)
       return;
 
+    if (recoverPersistedDefaultRoute())
+      return;
+
     if (!originalDefaultMetadataCaptured) {
       originalDefaultMetadataPresent = defaultMetadataPresent;
       originalDefaultMetadataType = defaultMetadataType;
@@ -513,6 +835,23 @@ struct Runtime {
       defaultRouteError =
           "PipeWire default metadata is not writable; ordinary application "
           "playback remains on the existing default sink";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return;
+    }
+
+    if (!defaultRouteSnapshotFile) {
+      defaultRouteError =
+          "cannot locate an XDG state directory; leaving the playback default "
+          "unchanged because crash recovery cannot be saved";
+      std::cerr << "skyapod: " << defaultRouteError << '\n';
+      return;
+    }
+    std::string snapshotError;
+    if (!writeDefaultRouteSnapshot(*defaultRouteSnapshotFile,
+                                   currentOriginalDefaultRoute(),
+                                   snapshotError)) {
+      defaultRouteError =
+          snapshotError + "; leaving the playback default unchanged";
       std::cerr << "skyapod: " << defaultRouteError << '\n';
       return;
     }
@@ -717,6 +1056,8 @@ struct Runtime {
     if (activeMetadataNotRestored || configuredMetadataNotRestored)
       std::cerr << "skyapod: PipeWire did not confirm restoration of the "
                    "previous playback default metadata\n";
+    else
+      removeDefaultRouteSnapshot();
   }
   bool sameFormat(const Engine &a, const Engine &b) const noexcept {
     return a.sampleRate() == b.sampleRate() && a.channels() == b.channels() &&
@@ -2033,6 +2374,7 @@ struct Runtime {
       }
       r.defaultMetadataId = SPA_ID_INVALID;
       r.defaultMetadataSnapshotReady = false;
+      r.defaultRouteSnapshotChecked = false;
       r.originalDefaultMetadataCaptured = false;
       r.originalConfiguredDefaultCaptured = false;
       r.defaultRouteActiveConfirmed = false;

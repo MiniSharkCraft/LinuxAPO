@@ -188,7 +188,7 @@ def create_null_sink(manager, properties):
 
 
 def start_systemd_daemon(systemd_run, systemctl, daemon, config, env,
-                         unit_template):
+                         unit_template, restart_sec_override=None):
     template = pathlib.Path(unit_template).read_text()
     properties = {}
     for line in template.splitlines():
@@ -206,7 +206,7 @@ def start_systemd_daemon(systemd_run, systemctl, daemon, config, env,
         str(systemd_run), "--user", f"--unit={unit}", "--no-block",
         "--property=Type=exec",
         f"--property=Restart={properties['Restart']}",
-        f"--property=RestartSec={restart_sec}",
+        f"--property=RestartSec={restart_sec_override or restart_sec}",
         "--property=StartLimitIntervalSec=0",
     ]
     for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
@@ -626,6 +626,7 @@ def main():
         "transition-format", "device-filter", "stage-warning",
         "systemd-crash-restart",
         "playback-wireplumber-systemd-crash-restart",
+        "playback-wireplumber-systemd-crash-user-override",
         "playback-wireplumber-configured-write-failure",
         "device-switch", "delay-pdc", "source-consumer-latency",
         "playback-preamp", "playback-wireplumber",
@@ -660,6 +661,7 @@ def main():
             "lv2-pdc-recovery|lv2-pdc-config-commit-race|"
             "renegotiate|transition-format|systemd-crash-restart|"
             "playback-wireplumber-systemd-crash-restart|"
+            "playback-wireplumber-systemd-crash-user-override|"
             "device-filter|stage-warning|device-switch|delay-pdc|"
             "source-consumer-latency|playback-preamp|playback-wireplumber|"
             "playback-wireplumber-link-error|"
@@ -730,8 +732,11 @@ def main():
     source_replug = mode == "source-replug" or stable_id_replug
     playback_server_restart = mode == "playback-wireplumber-server-restart"
     server_restart = mode == "server-restart" or playback_server_restart
-    playback_systemd_crash_restart = (
-        mode == "playback-wireplumber-systemd-crash-restart")
+    playback_systemd_user_override = (
+        mode == "playback-wireplumber-systemd-crash-user-override")
+    playback_systemd_crash_restart = mode in (
+        "playback-wireplumber-systemd-crash-restart",
+        "playback-wireplumber-systemd-crash-user-override")
     vst2_live = mode == "vst2-live-param"
     vst2_latency_change = mode == "vst2-latency-change"
     vst3_latency_change = mode == "vst3-latency-change"
@@ -755,7 +760,8 @@ def main():
     stage_warning = mode == "stage-warning"
     device_switch = mode == "device-switch"
     systemd_crash_restart = (mode == "systemd-crash-restart" or
-                             playback_systemd_crash_restart)
+                             playback_systemd_crash_restart or
+                             playback_systemd_user_override)
     latency_probe = mode == "source-consumer-latency"
     convolution = mode == "convolution"
     callback_process_exception = mode in (
@@ -1083,7 +1089,8 @@ def main():
                         f"pw-cli process status {null_target_manager.poll()}; "
                         f"pw-dump returned {graph.returncode}; nodes="
                         f"{graph_nodes}; error={graph.stderr}")
-                if output_switch or playback_isolation or recovery_playback_target:
+                if (output_switch or playback_isolation or recovery_playback_target
+                        or playback_systemd_user_override):
                     alternate_properties = target_properties.replace(
                         'node.name = "skyapo.test.null-target"',
                         'node.name = "skyapo.test.null-target-alt"').replace(
@@ -1205,6 +1212,7 @@ def main():
                         "playback-wireplumber-startup-recovery",
                         "playback-wireplumber-server-restart",
                         "playback-wireplumber-systemd-crash-restart",
+                        "playback-wireplumber-systemd-crash-user-override",
                         "playback-wireplumber-output-switch",
                         "playback-wireplumber-surround51",
                         "playback-wireplumber-surround71",
@@ -1309,7 +1317,8 @@ def main():
                         "systemd-crash-restart requires systemd-run and systemctl")
                 daemon_process = start_systemd_daemon(
                     systemd_run, systemctl, daemon, dsp_config, env,
-                    os.environ.get("SKYAPO_SYSTEMD_UNIT_TEMPLATE", ""))
+                    os.environ.get("SKYAPO_SYSTEMD_UNIT_TEMPLATE", ""),
+                    "10s" if playback_systemd_user_override else None)
             else:
                 daemon_process = subprocess.Popen(
                     [str(daemon), "--config", str(dsp_config)], env=env,
@@ -1764,6 +1773,7 @@ def main():
                              "playback-wireplumber-startup-recovery",
                              "playback-wireplumber-server-restart",
                              "playback-wireplumber-systemd-crash-restart",
+                             "playback-wireplumber-systemd-crash-user-override",
                              "playback-wireplumber-output-switch",
                              "playback-wireplumber-surround51",
                              "playback-wireplumber-surround71",
@@ -3588,6 +3598,23 @@ def main():
                          "pre-crash ordinary playback stream")
                     second_source_process = None
                 daemon_process.send_signal(signal.SIGKILL)
+                if playback_systemd_user_override:
+                    # Hold systemd's automatic restart long enough to model a
+                    # user changing the default while the daemon is down.
+                    override_graph = pipewire_dump_objects(
+                        run([str(pw_dump)], env, timeout=5).stdout)
+                    override_target_id = next((
+                        str(item.get("id")) for item in override_graph
+                        if item.get("type", "").endswith(":Node") and
+                        item.get("info", {}).get(
+                            "props", item.get("props", {})).get("node.name") ==
+                        "skyapo.test.null-target-alt"), None)
+                    if override_target_id is None:
+                        raise RuntimeError(
+                            "cannot find alternate target for simulated user "
+                            "default change")
+                    run([wpctl, "set-default", override_target_id], env,
+                        timeout=5)
                 deadline = time.monotonic() + 15
                 restarted_status = ""
                 new_pid = 0
@@ -3601,12 +3628,14 @@ def main():
                                  check=False)
                     restarted_status = result.stdout
                     if (new_pid > 0 and new_pid != old_pid and
-                            restarts > restart_count and result.returncode == 0 and
+                            (playback_systemd_user_override or
+                             restarts > restart_count) and result.returncode == 0 and
                             "Daemon: streaming" in restarted_status and
                             "Active capture links: " +
                             f"{channel_count}/{channel_count}" in
                             restarted_status and
                             (not playback_systemd_crash_restart or
+                             playback_systemd_user_override or
                              "Playback graph: streaming / streaming, "
                              "internal links 2/2, target links 2/2 channels"
                              in restarted_status)):
@@ -3621,11 +3650,45 @@ def main():
                 status = restarted_status
                 new_virtual_id = virtual_source_id(status)
                 assert_virtual_source(pw_dump, env, new_virtual_id)
+                if playback_systemd_user_override:
+                    override_deadline = time.monotonic() + 8
+                    while time.monotonic() < override_deadline:
+                        result = run([str(cli), "status"], env, timeout=5,
+                                     check=False)
+                        restarted_status = result.stdout
+                        if (result.returncode == 0 and
+                                "system default was changed externally; "
+                                "SkyAPO left it untouched" in restarted_status):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "daemon did not report preserving the playback "
+                            "default changed while it was stopped:\n" +
+                            restarted_status)
+                if playback_systemd_crash_restart and not playback_systemd_user_override:
+                    recovery_deadline = time.monotonic() + 5
+                    restart_journal = ""
+                    while time.monotonic() < recovery_deadline:
+                        restart_journal = daemon_process.journal()
+                        if ("recovered playback route ownership from the "
+                                "saved pre-crash default" in restart_journal):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError(
+                            "systemd restarted playback without reclaiming the "
+                            "persisted pre-crash default route:\n"
+                            f"{restart_journal}")
                 print(f"User-systemd crash recovery passed: skyapod PID "
                       f"{old_pid} -> {new_pid}; restart count "
                       f"{daemon_process.restart_count()}; virtual source "
                       f"node {old_virtual_id} -> {new_virtual_id}.")
-                if playback_systemd_crash_restart:
+                if playback_systemd_crash_restart and not playback_systemd_user_override:
+                    print("Restarted daemon reclaimed the persisted original "
+                          "playback route lease.")
+                if (playback_systemd_crash_restart and
+                        not playback_systemd_user_override):
                     second_source_process = subprocess.Popen(
                         [str(playback_client)], env=env, text=True,
                         stdout=source_log, stderr=subprocess.STDOUT)
@@ -4676,6 +4739,8 @@ def main():
                     [metadata, "-n", "default"], env, timeout=5).stdout
                 expected_defaults = (
                     {"skyapo.test.null-target-alt"}
+                    if playback_systemd_user_override else
+                    {"skyapo.test.null-target-alt"}
                     if mode in (
                         "playback-wireplumber",
                         "playback-wireplumber-target-recovery-stable-id") else
@@ -4695,13 +4760,32 @@ def main():
                         "PipeWire default sink metadata; expected one of "
                         f"{sorted(expected_defaults)}, found "
                         f"{restored_default!r}:\n{default_metadata}")
-                if (stable_playback_target and
+                if ((stable_playback_target or playback_systemd_crash_restart) and
+                        not playback_systemd_user_override and
                         metadata_node_name(default_metadata,
                                            "default.configured.audio.sink") !=
                         initial_configured_sink):
                     raise RuntimeError(
                         "orderly daemon shutdown did not restore WirePlumber's "
                         "configured playback default:\n" + default_metadata)
+                if playback_systemd_user_override:
+                    if (metadata_node_name(default_metadata,
+                                           "default.audio.sink") !=
+                            "skyapo.test.null-target-alt" or
+                            metadata_node_name(
+                                default_metadata,
+                                "default.configured.audio.sink") !=
+                            "skyapo.test.null-target-alt"):
+                        raise RuntimeError(
+                            "daemon overwrote the user's playback default "
+                            "changed while it was down:\n" + default_metadata)
+                if playback_systemd_crash_restart:
+                    route_state = (state_home / "skyapo" /
+                                   "playback-default-route-v1")
+                    if route_state.exists():
+                        raise RuntimeError(
+                            "clean daemon shutdown left a stale playback "
+                            f"route recovery file: {route_state}")
             state_layout = {
                 "plugin-live-param": ("clap-state", "*.clapstate", "CLAP"),
                 "clap-state-restart": ("clap-state", "*.clapstate", "CLAP"),
