@@ -262,6 +262,23 @@ def make_rate_config(base_config, destination, sample_rate):
     return destination
 
 
+def short_runtime_parent():
+    candidates = []
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        candidates.append(pathlib.Path(xdg_runtime))
+    candidates.append(pathlib.Path("/tmp"))
+    for candidate in candidates:
+        if not candidate.is_dir() or not os.access(candidate, os.W_OK | os.X_OK):
+            continue
+        socket_path = candidate / "lapo-XXXXXXXX" / "pipewire-0"
+        if len(os.fsencode(socket_path)) < 108:
+            return candidate
+    raise RuntimeError(
+        "no writable short-path runtime directory for PipeWire's UNIX socket"
+    )
+
+
 def start_test_source(source, mono, env, source_log, name=None, serial=None,
                       surround51=False, surround71=False,
                       latency_probe=False):
@@ -372,12 +389,13 @@ def main():
         "MONO" if mono else
         "FL FR FC LFE RL RR" if surround51 else
         "FL FR FC LFE RL RR SL SR" if surround71 else "FL FR")
-    with tempfile.TemporaryDirectory(prefix="skyapo-pipewire-e2e-") as temp:
+    with tempfile.TemporaryDirectory(prefix="skyapo-pipewire-e2e-") as temp, \
+            tempfile.TemporaryDirectory(
+                prefix="lapo-", dir=short_runtime_parent()) as runtime_temp:
         root = pathlib.Path(temp)
-        runtime = root / "runtime"
+        runtime = pathlib.Path(runtime_temp)
         config_home = root / "config"
         state_home = root / "state"
-        runtime.mkdir(mode=0o700)
         config_home.mkdir(mode=0o700)
         state_home.mkdir(mode=0o700)
         rate_config = make_rate_config(
