@@ -26,6 +26,7 @@
 #include "Editor/guis/StageFilterGUIFactory.h"
 #include <QApplication>
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QColor>
 #include <QCheckBox>
 #include <QComboBox>
@@ -33,12 +34,15 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QDialog>
+#include <QDockWidget>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QProcess>
+#include <QSaveFile>
 #include <QPlainTextEdit>
 #include <QPalette>
 #include <QLabel>
@@ -54,15 +58,19 @@
 #include <QMenu>
 #include <QSettings>
 #include <QStandardPaths>
+#include <array>
 #include <cmath>
 #include <limits>
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
 #include <QTableWidget>
 #endif
 #include <iostream>
+#include <filesystem>
 
 namespace {
-bool writeTestImpulseResponse(const QString &path) {
+bool writeTestImpulseResponse(const QString &path,
+                              const std::array<qint16, 8> &samples = {
+                                  0, 256, 512, 768, 1024, 1280, 1536, 1792}) {
   QByteArray wav;
   const auto append16 = [&wav](quint16 value) {
     wav.append(static_cast<char>(value & 0xff));
@@ -84,8 +92,8 @@ bool writeTestImpulseResponse(const QString &path) {
   append16(16);
   wav.append("data", 4);
   append32(16);
-  for (int sample = 0; sample < 8; ++sample)
-    append16(static_cast<quint16>(sample * 256));
+  for (const qint16 sample : samples)
+    append16(static_cast<quint16>(sample));
 
   QFile file(path);
   return file.open(QIODevice::WriteOnly) && file.write(wav) == wav.size();
@@ -555,6 +563,16 @@ int main(int argc, char **argv) {
               << shortResponse.error.toStdString() << '\n';
     return 1;
   }
+  unsigned cancellationChecks = 0;
+  const auto cancelledResponse = analyzeConfigResponse(
+      defaultConfigPath, 44100, 1, 2048, {}, {},
+      [&cancellationChecks] { return ++cancellationChecks >= 9; });
+  if (!cancelledResponse.cancelled || !cancelledResponse.error.isEmpty() ||
+      !cancelledResponse.curves.isEmpty() || cancellationChecks != 9) {
+    std::cerr << "response analysis did not cancel between DSP blocks: "
+              << cancelledResponse.error.toStdString() << '\n';
+    return 1;
+  }
   const auto largestResponse =
       analyzeConfigResponse(defaultConfigPath, 44100, 1, 1U << 20);
   if (!largestResponse.error.isEmpty() || largestResponse.curves.size() != 1 ||
@@ -596,6 +614,147 @@ int main(int argc, char **argv) {
               << monoResponse.error.toStdString() << '\n';
     return 1;
   }
+  const QString unsupportedStagePath =
+      temporary.filePath(QStringLiteral("unsupported-analysis-stage.txt"));
+  QFile unsupportedStageFile(unsupportedStagePath);
+  if (!unsupportedStageFile.open(QIODevice::WriteOnly) ||
+      unsupportedStageFile.write("Stage: pre-mix\nPreamp: 12 dB\n") < 0) {
+    std::cerr << "could not create unsupported-stage analysis fixture\n";
+    return 1;
+  }
+  unsupportedStageFile.close();
+  const auto unsupportedStageResponse =
+      analyzeConfigResponse(unsupportedStagePath, 48000, 1, 2048);
+  if (unsupportedStageResponse.error.isEmpty() ||
+      !unsupportedStageResponse.error.contains("pre-mix/post-mix") ||
+      !unsupportedStageResponse.error.contains(
+          QStringLiteral("unsupported-analysis-stage.txt:1"))) {
+    std::cerr << "response analysis silently modeled a config with an "
+                 "unsupported processing stage: "
+              << unsupportedStageResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  const QString includeAnalysisDirectory =
+      temporary.filePath(QStringLiteral("response-includes"));
+  if (!QDir().mkpath(includeAnalysisDirectory)) {
+    std::cerr << "could not create response Include fixture directory\n";
+    return 1;
+  }
+  const QString includeAnalysisRoot =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("root.txt"));
+  const QString includeAnalysisSnapshot =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("snapshot.txt"));
+  const QString includeAnalysisChild =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("child.txt"));
+  const QByteArray includeRootContents = "Include: child.txt\n";
+  QFile includeAnalysisRootFile(includeAnalysisRoot);
+  QFile includeAnalysisSnapshotFile(includeAnalysisSnapshot);
+  QFile includeAnalysisChildFile(includeAnalysisChild);
+  if (!includeAnalysisRootFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisRootFile.write(includeRootContents) !=
+          includeRootContents.size() ||
+      !includeAnalysisSnapshotFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisSnapshotFile.write(includeRootContents) !=
+          includeRootContents.size() ||
+      !includeAnalysisChildFile.open(QIODevice::WriteOnly) ||
+      includeAnalysisChildFile.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not write response Include fixture\n";
+    return 1;
+  }
+  includeAnalysisRootFile.close();
+  includeAnalysisSnapshotFile.close();
+  includeAnalysisChildFile.close();
+  const auto includeResponse = analyzeConfigResponse(
+      includeAnalysisSnapshot, 44100, 1, 128, includeAnalysisRoot,
+      QCryptographicHash::hash(includeRootContents,
+                               QCryptographicHash::Sha256));
+  if (!includeResponse.error.isEmpty() ||
+      includeResponse.configDependencies.size() != 3) {
+    std::cerr << "response analysis did not record its snapshot, source root "
+                 "and Include "
+                 "dependencies: "
+              << includeResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  bool includeChildTracked = false;
+  bool originalRootTracked = false;
+  for (const auto &dependency : includeResponse.configDependencies) {
+    includeChildTracked =
+        includeChildTracked ||
+        dependency.path.find("child.txt") != std::string::npos;
+    originalRootTracked =
+        originalRootTracked ||
+        dependency.path == includeAnalysisRoot.toLocal8Bit().toStdString();
+  }
+  if (!includeChildTracked || !originalRootTracked ||
+      !responseConfigDependenciesUnchanged(
+          includeResponse.configDependencies)) {
+    std::cerr << "response analysis did not retain stable source and Include "
+                 "fingerprints\n";
+    return 1;
+  }
+  QFile changedInclude(includeAnalysisChild);
+  if (!changedInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedInclude.write("Preamp: -12 dB\n") != 15) {
+    std::cerr << "could not change response Include fixture\n";
+    return 1;
+  }
+  changedInclude.close();
+  if (responseConfigDependenciesUnchanged(includeResponse.configDependencies)) {
+    std::cerr << "response analysis did not detect a changed Include "
+                 "dependency\n";
+    return 1;
+  }
+  QFile restoredInclude(includeAnalysisChild);
+  if (!restoredInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      restoredInclude.write("Preamp: -6 dB\n") != 14) {
+    std::cerr << "could not restore response Include fixture\n";
+    return 1;
+  }
+  restoredInclude.close();
+  QFile changedRoot(includeAnalysisRoot);
+  if (!changedRoot.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedRoot.write("Preamp: 0 dB\n") != 13) {
+    std::cerr << "could not change response source-root fixture\n";
+    return 1;
+  }
+  changedRoot.close();
+  if (responseConfigDependenciesUnchanged(includeResponse.configDependencies)) {
+    std::cerr
+        << "response analysis did not detect a changed source-root file\n";
+    return 1;
+  }
+  if (!changedRoot.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      changedRoot.write(includeRootContents) != includeRootContents.size()) {
+    std::cerr << "could not restore response source-root fixture\n";
+    return 1;
+  }
+  changedRoot.close();
+  const QString includeAnalysisAlias =
+      QDir(includeAnalysisDirectory).filePath(QStringLiteral("alias"));
+  if (!QFile::link(includeAnalysisDirectory, includeAnalysisAlias)) {
+    std::cerr << "could not create response-analysis symlink fixture\n";
+    return 1;
+  }
+  const QString aliasSnapshot =
+      QDir(includeAnalysisAlias).filePath(QStringLiteral("snapshot.txt"));
+  QFile aliasSnapshotFile(aliasSnapshot);
+  if (!aliasSnapshotFile.open(QIODevice::WriteOnly) ||
+      aliasSnapshotFile.write(includeRootContents) !=
+          includeRootContents.size()) {
+    std::cerr << "could not write response-analysis symlink snapshot\n";
+    return 1;
+  }
+  aliasSnapshotFile.close();
+  const auto symlinkResponse = analyzeConfigResponse(
+      aliasSnapshot, 44100, 1, 128, includeAnalysisRoot,
+      QCryptographicHash::hash(includeRootContents,
+                               QCryptographicHash::Sha256));
+  if (!symlinkResponse.error.isEmpty()) {
+    std::cerr << "response analysis rejected a valid symlink config path: "
+              << symlinkResponse.error.toStdString() << '\n';
+    return 1;
+  }
   const auto gainAt = [](const ResponseCurve &curve, double frequency) {
     auto closest = curve.points.constBegin();
     for (auto point = curve.points.constBegin();
@@ -604,6 +763,390 @@ int main(int argc, char **argv) {
         closest = point;
     return closest->y();
   };
+  const auto writeAnalysisConfig = [](const QString &path,
+                                      const QByteArray &contents) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) ||
+        file.write(contents) != contents.size())
+      return false;
+    file.close();
+    return true;
+  };
+  const QString graphicEqPath = temporary.filePath("analysis-graphic-eq.txt");
+  if (!writeAnalysisConfig(graphicEqPath, "GraphicEQ: 1000 -6\n")) {
+    std::cerr << "could not write GraphicEQ response fixture\n";
+    return 1;
+  }
+  const auto graphicEqResponse =
+      analyzeConfigResponse(graphicEqPath, 48000, 1, 8192);
+  if (!graphicEqResponse.error.isEmpty() ||
+      graphicEqResponse.curves.size() != 1 ||
+      std::abs(gainAt(graphicEqResponse.curves.front(), 1000.0) + 6.0) > 0.25) {
+    std::cerr << "response analysis did not apply the actual GraphicEQ DSP: "
+              << graphicEqResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString delayAnalysisPath = temporary.filePath("analysis-delay.txt");
+  if (!writeAnalysisConfig(delayAnalysisPath, "Delay: 1 ms\n")) {
+    std::cerr << "could not write Delay response fixture\n";
+    return 1;
+  }
+  const auto delayResponse =
+      analyzeConfigResponse(delayAnalysisPath, 48000, 1, 8192);
+  if (!delayResponse.error.isEmpty() || !delayResponse.impulseOnsetSamples ||
+      *delayResponse.impulseOnsetSamples != 48) {
+    std::cerr << "response analysis did not measure the 1 ms DSP delay as 48 "
+                 "samples: "
+              << delayResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString copyAnalysisPath = temporary.filePath("analysis-copy.txt");
+  if (!writeAnalysisConfig(copyAnalysisPath, "Copy: R=L\n")) {
+    std::cerr << "could not write Copy response fixture\n";
+    return 1;
+  }
+  const auto copyResponse =
+      analyzeConfigResponse(copyAnalysisPath, 48000, 2, 8192);
+  bool leftToRightCopyVerified = false;
+  for (const auto &curve : copyResponse.curves) {
+    if (curve.channel == QStringLiteral("L → R") &&
+        std::abs(gainAt(curve, 1000.0)) < 0.1)
+      leftToRightCopyVerified = true;
+  }
+  if (!copyResponse.error.isEmpty() || !leftToRightCopyVerified) {
+    std::cerr << "response analysis did not show the configured L-to-R "
+                 "channel copy: "
+              << copyResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString convolutionDirectory =
+      temporary.filePath("analysis-convolution");
+  if (!QDir().mkpath(convolutionDirectory)) {
+    std::cerr << "could not create convolution response fixture directory\n";
+    return 1;
+  }
+  const QString convolutionIrPath =
+      QDir(convolutionDirectory).filePath("half-gain.wav");
+  const QString analysisConvolutionConfigPath =
+      QDir(convolutionDirectory).filePath("config.txt");
+  if (!writeTestImpulseResponse(
+          convolutionIrPath,
+          std::array<qint16, 8>{16384, 0, 0, 0, 0, 0, 0, 0}) ||
+      !writeAnalysisConfig(analysisConvolutionConfigPath,
+                           "Convolution: half-gain.wav\n")) {
+    std::cerr << "could not write convolution response fixture\n";
+    return 1;
+  }
+  const auto convolutionResponse =
+      analyzeConfigResponse(analysisConvolutionConfigPath, 48000, 1, 8192);
+  if (!convolutionResponse.error.isEmpty() ||
+      convolutionResponse.curves.size() != 1 ||
+      std::abs(gainAt(convolutionResponse.curves.front(), 1000.0) + 6.0206) >
+          0.25) {
+    std::cerr << "response analysis did not apply the 0.5-gain convolution "
+                 "IR: "
+              << convolutionResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString deviceAnalysisPath =
+      temporary.filePath(QStringLiteral("device-analysis.txt"));
+  QFile deviceAnalysisFile(deviceAnalysisPath);
+  const QByteArray deviceAnalysisConfig =
+      "Device: device.serial=SERIAL-42\n"
+      "If: deviceName == \"USB Microphone\"\n"
+      "If: connectionName == \"alsa_input.test\"\n"
+      "Preamp: -6 dB\n"
+      "EndIf:\nEndIf:\nDevice: all\n";
+  if (!deviceAnalysisFile.open(QIODevice::WriteOnly) ||
+      deviceAnalysisFile.write(deviceAnalysisConfig) !=
+          deviceAnalysisConfig.size()) {
+    std::cerr << "could not write device-specific response fixture\n";
+    return 1;
+  }
+  deviceAnalysisFile.close();
+  ResponseAnalysisDeviceContext selectedDeviceContext{
+      L"node.name=alsa_input.test device.description=USB Microphone "
+      L"device.serial=SERIAL-42",
+      L"USB Microphone", L"alsa_input.test"};
+  const auto deviceSpecificResponse = analyzeConfigResponse(
+      deviceAnalysisPath, 48000, 1, 8192, {}, {}, {}, selectedDeviceContext);
+  if (!deviceSpecificResponse.error.isEmpty() ||
+      deviceSpecificResponse.curves.size() != 1 ||
+      std::abs(gainAt(deviceSpecificResponse.curves.front(), 1000.0) + 6.0) >
+          0.1) {
+    std::cerr << "response analysis did not apply the selected device's "
+                 "Device/If conditions: "
+              << deviceSpecificResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  const QString deviceListPath =
+      temporary.filePath(QStringLiteral("analysis-device-list.tsv"));
+  QFile deviceListFile(deviceListPath);
+  const QByteArray deviceListContents =
+      "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+      "STABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA PATH\tDEFAULT\n"
+      "42\talsa_input.test\tUSB Microphone\tyes\t1\t48000\t"
+      "device.serial=SERIAL-42\t\t\t\tno\n"
+      "43\talsa_input.other\tOther Microphone\t\t1\t48000\t"
+      "device.serial=SERIAL-43\t\t\t\tno\n";
+  if (!deviceListFile.open(QIODevice::WriteOnly) ||
+      deviceListFile.write(deviceListContents) != deviceListContents.size()) {
+    std::cerr << "could not create selected-device UI fixture\n";
+    return 1;
+  }
+  deviceListFile.close();
+  qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE", deviceListPath.toLocal8Bit());
+  {
+    MainWindow deviceAnalysisWindow(deviceAnalysisPath,
+                                    QString::fromLocal8Bit(argv[1]));
+    auto *deviceCombo =
+        deviceAnalysisWindow.findChild<QComboBox *>("inputDeviceCombo");
+    auto *deviceAnalysisSource =
+        deviceAnalysisWindow.findChild<QComboBox *>("analysisSource");
+    auto *deviceAnalysisFormat =
+        deviceAnalysisWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *deviceAnalysisChannels =
+        deviceAnalysisWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *deviceAnalysisButton =
+        deviceAnalysisWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *deviceAnalysisStatus =
+        deviceAnalysisWindow.findChild<QLabel *>("analysisResultStatus");
+    QElapsedTimer deviceReadyWait;
+    deviceReadyWait.start();
+    while (deviceReadyWait.elapsed() < 2000 &&
+           (!deviceCombo ||
+            deviceCombo->currentData().toString() != "alsa_input.test")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!deviceCombo || !deviceAnalysisSource || !deviceAnalysisFormat ||
+        !deviceAnalysisChannels || !deviceAnalysisButton ||
+        !deviceAnalysisStatus ||
+        deviceCombo->currentData().toString() != "alsa_input.test") {
+      std::cerr << "selected-device response analysis fixture did not load\n";
+      return 1;
+    }
+    deviceAnalysisSource->setCurrentIndex(1);
+    deviceAnalysisFormat->setChecked(false);
+    deviceAnalysisChannels->setValue(1);
+    deviceAnalysisButton->click();
+    QElapsedTimer deviceAnalysisWait;
+    deviceAnalysisWait.start();
+    while (!deviceAnalysisStatus->text().startsWith("Calculated response") &&
+           !deviceAnalysisStatus->text().startsWith("Analysis failed") &&
+           deviceAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    auto *devicePlot =
+        deviceAnalysisWindow.findChild<QWidget *>("responsePlot");
+    if (!devicePlot ||
+        std::abs(devicePlot->property("responseAt1000HzLtoLDb").toDouble() +
+                 6.0) > 0.25) {
+      std::cerr << "UI response analysis did not use selected PipeWire device "
+                   "identity; status="
+                << deviceAnalysisStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    const int otherDeviceIndex =
+        deviceCombo->findData(QStringLiteral("alsa_input.other"));
+    if (otherDeviceIndex < 0 ||
+        deviceAnalysisStatus->property("analysisState").toString() !=
+            QStringLiteral("current")) {
+      std::cerr << "device-specific response fixture did not reach current "
+                   "state before switching devices\n";
+      return 1;
+    }
+    deviceCombo->setCurrentIndex(otherDeviceIndex);
+    if (!QMetaObject::invokeMethod(deviceCombo, "activated",
+                                   Qt::DirectConnection,
+                                   Q_ARG(int, otherDeviceIndex))) {
+      std::cerr << "could not trigger the input-device selection path\n";
+      return 1;
+    }
+    if (deviceAnalysisStatus->property("analysisState").toString() !=
+            QStringLiteral("stale") ||
+        !deviceAnalysisStatus->text().startsWith("Stale response")) {
+      std::cerr << "changing the selected device left a device-specific "
+                   "response marked current\n";
+      return 1;
+    }
+  }
+
+  {
+    MainWindow inFlightDeviceWindow(deviceAnalysisPath,
+                                    QString::fromLocal8Bit(argv[1]));
+    auto *inFlightDeviceCombo =
+        inFlightDeviceWindow.findChild<QComboBox *>("inputDeviceCombo");
+    auto *inFlightSource =
+        inFlightDeviceWindow.findChild<QComboBox *>("analysisSource");
+    auto *inFlightFormat =
+        inFlightDeviceWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *inFlightChannels =
+        inFlightDeviceWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *inFlightAnalyze =
+        inFlightDeviceWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *inFlightStatus =
+        inFlightDeviceWindow.findChild<QLabel *>("analysisResultStatus");
+    QElapsedTimer inFlightDeviceWait;
+    inFlightDeviceWait.start();
+    while (
+        inFlightDeviceWait.elapsed() < 2000 &&
+        (!inFlightDeviceCombo ||
+         inFlightDeviceCombo->currentData().toString() != "alsa_input.test")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    const int otherDeviceIndex =
+        inFlightDeviceCombo
+            ? inFlightDeviceCombo->findData(QStringLiteral("alsa_input.other"))
+            : -1;
+    if (!inFlightDeviceCombo || !inFlightSource || !inFlightFormat ||
+        !inFlightChannels || !inFlightAnalyze || !inFlightStatus ||
+        otherDeviceIndex < 0) {
+      std::cerr << "could not prepare in-flight device-analysis fixture\n";
+      return 1;
+    }
+    inFlightSource->setCurrentIndex(1);
+    inFlightFormat->setChecked(false);
+    inFlightChannels->setValue(1);
+    inFlightAnalyze->click();
+    inFlightDeviceCombo->setCurrentIndex(otherDeviceIndex);
+    if (!QMetaObject::invokeMethod(inFlightDeviceCombo, "activated",
+                                   Qt::DirectConnection,
+                                   Q_ARG(int, otherDeviceIndex))) {
+      std::cerr << "could not change device during response analysis\n";
+      return 1;
+    }
+    inFlightDeviceWait.restart();
+    while (inFlightDeviceWait.elapsed() < 5000 &&
+           !inFlightStatus->text().startsWith("Stale response") &&
+           !inFlightStatus->text().startsWith("Calculated response") &&
+           !inFlightStatus->text().startsWith("Analysis failed")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!inFlightStatus->text().startsWith("Stale response") ||
+        inFlightStatus->property("analysisState").toString() !=
+            QStringLiteral("stale") ||
+        inFlightDeviceWindow.findChild<QWidget *>("responsePlot")) {
+      std::cerr
+          << "in-flight response analysis was published as current "
+             "after the selected device changed: state="
+          << inFlightStatus->property("analysisState").toString().toStdString()
+          << ", status=" << inFlightStatus->text().toStdString() << '\n';
+      return 1;
+    }
+  }
+  qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
+  const QString symlinkWatchDirectory =
+      temporary.filePath(QStringLiteral("response-symlink-watch"));
+  if (!QDir().mkpath(symlinkWatchDirectory)) {
+    std::cerr << "could not create response symlink-watch directory\n";
+    return 1;
+  }
+  const QString symlinkTargetOne =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("one.txt"));
+  const QString symlinkTargetTwo =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("two.txt"));
+  const QString symlinkConfigPath =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("active.txt"));
+  QFile targetOne(symlinkTargetOne);
+  QFile targetTwo(symlinkTargetTwo);
+  if (!targetOne.open(QIODevice::WriteOnly) ||
+      targetOne.write("Preamp: -6 dB\n") != 14 ||
+      !targetTwo.open(QIODevice::WriteOnly) ||
+      targetTwo.write("Preamp: -12 dB\n") != 15) {
+    std::cerr << "could not create response symlink targets\n";
+    return 1;
+  }
+  targetOne.close();
+  targetTwo.close();
+  if (!QFile::link(symlinkTargetOne, symlinkConfigPath)) {
+    std::cerr << "could not create response config symlink\n";
+    return 1;
+  }
+  {
+    MainWindow symlinkWatchWindow(symlinkConfigPath,
+                                  QString::fromLocal8Bit(argv[1]));
+    auto *symlinkSource =
+        symlinkWatchWindow.findChild<QComboBox *>("analysisSource");
+    auto *symlinkFormat =
+        symlinkWatchWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *symlinkChannels =
+        symlinkWatchWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *symlinkAnalyze =
+        symlinkWatchWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *symlinkStatus =
+        symlinkWatchWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!symlinkSource || !symlinkFormat || !symlinkChannels ||
+        !symlinkAnalyze || !symlinkStatus) {
+      std::cerr << "could not prepare response symlink freshness test\n";
+      return 1;
+    }
+    symlinkSource->setCurrentIndex(1);
+    symlinkFormat->setChecked(false);
+    symlinkChannels->setValue(1);
+    symlinkAnalyze->click();
+    QElapsedTimer initialSymlinkAnalysisWait;
+    initialSymlinkAnalysisWait.start();
+    while (!symlinkStatus->text().startsWith("Calculated response") &&
+           !symlinkStatus->text().startsWith("Analysis failed") &&
+           initialSymlinkAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Calculated response") ||
+        symlinkStatus->property("analysisState").toString() != "current") {
+      std::cerr << "analysis of symlinked config did not complete: "
+                << symlinkStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    const QString unrelatedPath =
+        QDir(symlinkWatchDirectory).filePath(QStringLiteral("unrelated.txt"));
+    QFile unrelatedFile(unrelatedPath);
+    if (!unrelatedFile.open(QIODevice::WriteOnly) ||
+        unrelatedFile.write("unrelated sibling change") < 0 ||
+        !unrelatedFile.flush()) {
+      std::cerr << "could not create unrelated sibling file\n";
+      return 1;
+    }
+    unrelatedFile.close();
+    QElapsedTimer unrelatedChangeWait;
+    unrelatedChangeWait.start();
+    while (unrelatedChangeWait.elapsed() < 500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Calculated response") ||
+        symlinkStatus->property("analysisState").toString() != "current") {
+      std::cerr << "unrelated sibling file change incorrectly staled the "
+                   "response\n";
+      return 1;
+    }
+    if (!QFile::remove(symlinkConfigPath) ||
+        !QFile::link(symlinkTargetTwo, symlinkConfigPath)) {
+      std::cerr << "could not retarget response config symlink\n";
+      return 1;
+    }
+    QElapsedTimer retargetWait;
+    retargetWait.start();
+    while (!symlinkStatus->text().startsWith("Stale response") &&
+           retargetWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Stale response") ||
+        symlinkStatus->property("analysisState").toString() != "stale") {
+      std::cerr << "retargeting an analyzed config symlink left its response "
+                   "marked current\n";
+      return 1;
+    }
+  }
   for (const auto &curve : response.curves) {
     if (curve.channel != "L → L" && curve.channel != "R → R")
       continue;
@@ -719,7 +1262,20 @@ int main(int argc, char **argv) {
   }
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
   auto *responseButton = liveWindow.findChild<QPushButton *>("analyzeResponse");
+  auto *responseDock =
+      liveWindow.findChild<QDockWidget *>("responseAnalysisDock");
+  auto *analysisStatus = liveWindow.findChild<QLabel *>("analysisResultStatus");
+  auto *analysisSummary = liveWindow.findChild<QLabel *>("analysisSummary");
+  auto *analysisPeakGain = liveWindow.findChild<QLabel *>("analysisPeakGain");
+  auto *analysisLatency = liveWindow.findChild<QLabel *>("analysisLatency");
+  auto *analysisInitialization =
+      liveWindow.findChild<QLabel *>("analysisInitializationTime");
+  auto *analysisCpu = liveWindow.findChild<QLabel *>("analysisCpuUsage");
+  auto *viewMenu = liveWindow.findChild<QMenu *>("viewMenu");
+  auto *toggleAnalysisAction =
+      liveWindow.findChild<QAction *>("toggleAnalysisPanel");
   auto *responseSource = liveWindow.findChild<QComboBox *>("analysisSource");
+  auto *analysisChannel = liveWindow.findChild<QComboBox *>("analysisChannel");
   auto *responseResolution =
       liveWindow.findChild<QComboBox *>("analysisResolution");
   auto *useLiveAnalysisFormat =
@@ -727,51 +1283,45 @@ int main(int argc, char **argv) {
   auto *analysisSampleRate =
       liveWindow.findChild<QSpinBox *>("analysisSampleRate");
   auto *analysisChannels = liveWindow.findChild<QSpinBox *>("analysisChannels");
-  bool responseDialogOpened = false;
-  bool responseDialogFailed = false;
   double responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
   qlonglong responseBinCount = -1;
   QString responseFormatLabel;
-  QString responseFailureText;
-  QTimer responseDialogCloser;
-  responseDialogCloser.setInterval(10);
-  QObject::connect(&responseDialogCloser, &QTimer::timeout, &application, [&] {
-    for (auto *widget : QApplication::topLevelWidgets()) {
-      auto *dialog = qobject_cast<QDialog *>(widget);
-      if (!dialog)
-        continue;
-      if (dialog->windowTitle() == "Calculated filter response") {
-        responseDialogOpened = true;
-        if (auto *plot = dialog->findChild<QWidget *>("responsePlot")) {
-          responseGainAt1kHz =
-              plot->property("responseAt1000HzLtoLDb").toDouble();
-          responseBinCount = plot->property("analysisBinCount").toLongLong();
-        }
-        for (auto *label : dialog->findChildren<QLabel *>())
-          if (label->text().contains("FFT samples"))
-            responseFormatLabel = label->text();
-        dialog->accept();
-        responseDialogCloser.stop();
-      } else if (dialog->windowTitle() == "Response analysis") {
-        responseDialogFailed = true;
-        for (auto *label : dialog->findChildren<QLabel *>())
-          responseFailureText += label->text();
-        dialog->accept();
-        responseDialogCloser.stop();
-      }
-    }
-  });
-  if (!responseButton || !responseSource || !responseResolution ||
-      !useLiveAnalysisFormat || !analysisSampleRate || !analysisChannels ||
-      responseResolution->count() != 14 ||
+  if (!responseButton || !responseDock || !analysisStatus || !analysisSummary ||
+      !viewMenu || !toggleAnalysisAction || !analysisPeakGain ||
+      !analysisLatency || !analysisInitialization || !analysisCpu ||
+      responseDock->isHidden() || !responseSource || !analysisChannel ||
+      !responseResolution || !useLiveAnalysisFormat || !analysisSampleRate ||
+      !analysisChannels || responseResolution->count() != 14 ||
       responseResolution->currentData().toUInt() != 16384U ||
       responseResolution->itemData(0).toUInt() != 128U ||
       responseResolution->itemData(responseResolution->count() - 1).toUInt() !=
           (1U << 20) ||
       responseSource->count() != 2 ||
       responseSource->itemText(0) != "config.txt" ||
-      responseSource->itemText(1) != "Current file") {
+      responseSource->itemText(1) != "Current file" ||
+      analysisChannel->findText("L") < 0 ||
+      analysisChannel->findText("R") < 0) {
     std::cerr << "response analysis source/resolution controls are missing\n";
+    return 1;
+  }
+  if (liveWindow.dockWidgetArea(responseDock) != Qt::BottomDockWidgetArea) {
+    std::cerr << "response analysis is not docked below the editor\n";
+    return 1;
+  }
+  liveWindow.resize(1080, 760);
+  liveWindow.show();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  toggleAnalysisAction->trigger();
+  if (!responseDock->isHidden()) {
+    std::cerr << "View menu did not hide the Analysis Panel (hidden="
+              << responseDock->isHidden()
+              << ", visible=" << responseDock->isVisible()
+              << ", checked=" << toggleAnalysisAction->isChecked() << ")\n";
+    return 1;
+  }
+  toggleAnalysisAction->trigger();
+  if (responseDock->isHidden()) {
+    std::cerr << "View menu did not restore the Analysis Panel\n";
     return 1;
   }
   if (!useLiveAnalysisFormat->isChecked() || analysisSampleRate->isEnabled() ||
@@ -801,62 +1351,90 @@ int main(int argc, char **argv) {
     return 1;
   }
   const auto runResponseAndCaptureGain = [&] {
-    responseDialogOpened = false;
-    responseDialogFailed = false;
     responseGainAt1kHz = std::numeric_limits<double>::quiet_NaN();
     responseBinCount = -1;
     responseFormatLabel.clear();
-    responseDialogCloser.start();
+    analysisSummary->clear();
     responseButton->click();
     QElapsedTimer responseWait;
     responseWait.start();
-    while (!responseDialogOpened && !responseDialogFailed &&
+    while (!analysisStatus->text().startsWith("Calculated response") &&
+           !analysisStatus->text().startsWith("Analysis failed") &&
            responseWait.elapsed() < 5000) {
       QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
       QThread::msleep(5);
     }
-    return responseDialogOpened && !responseDialogFailed &&
+    auto *plot = liveWindow.findChild<QWidget *>("responsePlot");
+    if (plot) {
+      responseGainAt1kHz = plot->property("responseAt1000HzLtoLDb").toDouble();
+      responseBinCount = plot->property("analysisBinCount").toLongLong();
+    }
+    responseFormatLabel = analysisSummary->text();
+    return analysisStatus->text().startsWith("Calculated response") && plot &&
            std::isfinite(responseGainAt1kHz) && responseBinCount == 4096;
   };
   responseSource->setCurrentIndex(0);
+  analysisChannel->setCurrentText("R");
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 6.0) > 0.25 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
-    std::cerr << "analysis did not use the saved default config.txt; gain="
-              << responseGainAt1kHz << " dB\n";
+      !responseFormatLabel.contains("1 channel") ||
+      analysisChannel->findText("R") >= 0 ||
+      analysisChannel->currentText() != "All channels" ||
+      responseFormatLabel.contains("editor revision") ||
+      liveWindow.findChild<QWidget *>("responsePlot")
+              ->property("selectedInputChannel")
+              .toString() != "All channels") {
+    std::cerr
+        << "analysis did not use the saved default config.txt; gain="
+        << responseGainAt1kHz
+        << " dB, status=" << analysisStatus->text().toStdString() << ", state="
+        << analysisStatus->property("analysisState").toString().toStdString()
+        << '\n';
     return 1;
   }
   responseSource->setCurrentIndex(1);
   if (!runResponseAndCaptureGain() ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
       !responseFormatLabel.contains("44100 Hz") ||
-      !responseFormatLabel.contains("1 channel")) {
-    std::cerr << "analysis did not use the current editor document; gain="
-              << responseGainAt1kHz << " dB\n";
+      !responseFormatLabel.contains("1 channel") ||
+      !responseFormatLabel.contains("editor revision")) {
+    std::cerr
+        << "analysis did not use the current editor document; gain="
+        << responseGainAt1kHz
+        << " dB, status=" << analysisStatus->text().toStdString() << ", state="
+        << analysisStatus->property("analysisState").toString().toStdString()
+        << '\n';
+    return 1;
+  }
+  if (!analysisPeakGain->text().contains("Peak sampled gain: -3.00 dB") ||
+      !analysisLatency->text().contains("0 samples") ||
+      !analysisInitialization->text().contains("ms per engine") ||
+      !analysisCpu->text().contains("(one core)")) {
+    std::cerr << "analysis panel fabricated or omitted unavailable metrics\n";
     return 1;
   }
   useLiveAnalysisFormat->setChecked(true);
-  responseFailureText.clear();
-  responseDialogFailed = false;
-  responseDialogCloser.start();
   responseButton->click();
   QElapsedTimer unavailableFormatWait;
   unavailableFormatWait.start();
-  while (!responseDialogFailed && unavailableFormatWait.elapsed() < 5000) {
+  while (!analysisStatus->text().startsWith("Analysis failed") &&
+         unavailableFormatWait.elapsed() < 5000) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
-  if (!responseDialogFailed ||
-      !responseFailureText.contains("not streaming with a known sample rate") ||
+  if (!analysisStatus->text().contains(
+          "not streaming with a known sample rate") ||
       !responseButton->isEnabled()) {
     std::cerr << "response analysis fabricated/failed to report an unknown "
                  "live format\n";
     return 1;
   }
   qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
+  const bool liveFormatResponseSucceeded = runResponseAndCaptureGain();
+  analysisChannel->setCurrentText("R");
   if (analysisSampleRate->isEnabled() || analysisChannels->isEnabled() ||
-      !runResponseAndCaptureGain() ||
+      !liveFormatResponseSucceeded ||
       std::abs(responseGainAt1kHz + 3.0) > 0.25 ||
       !responseFormatLabel.contains("96000 Hz") ||
       !responseFormatLabel.contains("2 channels")) {
@@ -865,12 +1443,297 @@ int main(int argc, char **argv) {
               << responseFormatLabel.toStdString() << '\n';
     return 1;
   }
+  if (liveWindow.findChild<QWidget *>("responsePlot")
+              ->property("selectedInputChannel")
+              .toString() != "R" ||
+      QSettings().value(QStringLiteral("analysis/channel")).toString() != "R") {
+    std::cerr << "analysis channel selection was not applied or persisted\n";
+    return 1;
+  }
   qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+
+  {
+    const QString highGainConfigPath =
+        temporary.filePath("high-gain-response.txt");
+    QFile highGainConfig(highGainConfigPath);
+    if (!highGainConfig.open(QIODevice::WriteOnly) ||
+        highGainConfig.write("Preamp: 70.5 dB\n") != 16) {
+      std::cerr << "could not create high-gain response fixture\n";
+      return 1;
+    }
+    highGainConfig.close();
+    MainWindow highGainWindow(highGainConfigPath,
+                              QString::fromLocal8Bit(argv[1]));
+    auto *highGainAnalyze =
+        highGainWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *highGainSource =
+        highGainWindow.findChild<QComboBox *>("analysisSource");
+    auto *highGainLiveFormat =
+        highGainWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *highGainChannels =
+        highGainWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *highGainStatus =
+        highGainWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!highGainAnalyze || !highGainSource || !highGainLiveFormat ||
+        !highGainChannels || !highGainStatus) {
+      std::cerr << "high-gain response controls are missing\n";
+      return 1;
+    }
+    highGainSource->setCurrentIndex(1);
+    highGainLiveFormat->setChecked(false);
+    highGainChannels->setValue(1);
+    highGainWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    highGainAnalyze->click();
+    QElapsedTimer highGainWait;
+    highGainWait.start();
+    while (!highGainStatus->text().startsWith("Calculated response") &&
+           !highGainStatus->text().startsWith("Analysis failed") &&
+           highGainWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    auto *highGainPlot = highGainWindow.findChild<QWidget *>("responsePlot");
+    if (!highGainPlot ||
+        std::abs(highGainPlot->property("responseAt1000HzLtoLDb").toDouble() -
+                 70.5) > 0.1) {
+      std::cerr << "high-gain response analysis did not preserve the 70.5 dB "
+                   "magnitude\n";
+      return 1;
+    }
+    QImage rendered(highGainPlot->size(), QImage::Format_ARGB32_Premultiplied);
+    rendered.fill(Qt::transparent);
+    highGainPlot->render(&rendered);
+    const double plotWidth = highGainPlot->width() - 88.0;
+    const int oneKhzX = static_cast<int>(std::lround(
+        68.0 + std::log(1000.0 / 20.0) / std::log(24000.0 / 20.0) * plotWidth));
+    int blueResponseY = -1;
+    int blueAreaPixels = 0;
+    for (int y = 0; y < rendered.height(); ++y) {
+      const QColor pixel = rendered.pixelColor(oneKhzX, y);
+      if (pixel.blue() > pixel.green() + 50 && pixel.green() > pixel.red() + 40)
+        blueResponseY = y;
+      for (int x = 68; x < rendered.width() - 20; ++x) {
+        const QColor areaPixel = rendered.pixelColor(x, y);
+        if (areaPixel.blue() > areaPixel.red() + 20 &&
+            areaPixel.blue() > areaPixel.green() + 12)
+          ++blueAreaPixels;
+      }
+    }
+    if (blueResponseY <= 24 || blueAreaPixels <= highGainPlot->width() * 8) {
+      std::cerr << "high-gain response is clipped or has no filled response "
+                   "area: curveY="
+                << blueResponseY << " filledPixels=" << blueAreaPixels << '\n';
+      return 1;
+    }
+  }
+
+  {
+    const QString delayedConfigPath =
+        temporary.filePath("delayed-response.txt");
+    QFile delayedConfig(delayedConfigPath);
+    if (!delayedConfig.open(QIODevice::WriteOnly) ||
+        delayedConfig.write("Delay: 480 Samples\n") != 19) {
+      std::cerr << "could not create delayed response fixture\n";
+      return 1;
+    }
+    delayedConfig.close();
+    MainWindow delayedWindow(delayedConfigPath,
+                             QString::fromLocal8Bit(argv[1]));
+    auto *delayedAnalyze =
+        delayedWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *delayedSource =
+        delayedWindow.findChild<QComboBox *>("analysisSource");
+    auto *delayedRuntimeFormat =
+        delayedWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *delayedSampleRate =
+        delayedWindow.findChild<QSpinBox *>("analysisSampleRate");
+    auto *delayedChannels =
+        delayedWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *delayedStatus =
+        delayedWindow.findChild<QLabel *>("analysisResultStatus");
+    auto *delayedLatency = delayedWindow.findChild<QLabel *>("analysisLatency");
+    auto *delayedInitialization =
+        delayedWindow.findChild<QLabel *>("analysisInitializationTime");
+    auto *delayedCpu = delayedWindow.findChild<QLabel *>("analysisCpuUsage");
+    if (!delayedAnalyze || !delayedSource || !delayedRuntimeFormat ||
+        !delayedSampleRate || !delayedChannels || !delayedStatus ||
+        !delayedLatency || !delayedInitialization || !delayedCpu) {
+      std::cerr << "delay analysis controls are missing\n";
+      return 1;
+    }
+    delayedSource->setCurrentIndex(1);
+    delayedRuntimeFormat->setChecked(false);
+    delayedSampleRate->setValue(48000);
+    delayedChannels->setValue(1);
+    delayedWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    delayedAnalyze->click();
+    QElapsedTimer delayedWait;
+    delayedWait.start();
+    while (!delayedStatus->text().startsWith("Calculated response") &&
+           !delayedStatus->text().startsWith("Analysis failed") &&
+           delayedWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    const QString initializationPrefix =
+        QStringLiteral("Engine initialization time: ");
+    const QString cpuPrefix = QStringLiteral("CPU usage: ");
+    const int initializationUnit =
+        delayedInitialization->text().indexOf(" ms per engine");
+    const int cpuUnit = delayedCpu->text().indexOf(" % (one core)");
+    bool initializationParsed = false;
+    bool cpuParsed = false;
+    const double initializationMs =
+        delayedInitialization->text()
+            .mid(initializationPrefix.size(),
+                 initializationUnit - initializationPrefix.size())
+            .toDouble(&initializationParsed);
+    const double cpuPercent =
+        delayedCpu->text()
+            .mid(cpuPrefix.size(), cpuUnit - cpuPrefix.size())
+            .toDouble(&cpuParsed);
+    if (!delayedStatus->text().startsWith("Calculated response") ||
+        !delayedLatency->text().contains("10.00 ms") ||
+        !delayedLatency->text().contains("480 samples") ||
+        initializationUnit < static_cast<int>(initializationPrefix.size()) ||
+        cpuUnit < static_cast<int>(cpuPrefix.size()) || !initializationParsed ||
+        !cpuParsed || !std::isfinite(initializationMs) ||
+        !std::isfinite(cpuPercent) || initializationMs <= 0.0 ||
+        cpuPercent <= 0.0) {
+      std::cerr << "analysis did not report measured impulse onset and engine "
+                   "initialization: latency="
+                << delayedLatency->text().toStdString() << ", initialization="
+                << delayedInitialization->text().toStdString()
+                << ", CPU=" << delayedCpu->text().toStdString() << '\n';
+      return 1;
+    }
+  }
+
+  {
+    MainWindow activeDefaultWindow(defaultConfigPath,
+                                   QString::fromLocal8Bit(argv[1]));
+    auto *defaultSource =
+        activeDefaultWindow.findChild<QComboBox *>("analysisSource");
+    auto *defaultAnalyze =
+        activeDefaultWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *defaultStatus =
+        activeDefaultWindow.findChild<QLabel *>("analysisResultStatus");
+    auto *defaultGain =
+        activeDefaultWindow.findChild<QDoubleSpinBox *>("doubleSpinBox");
+    auto *defaultSave = [&activeDefaultWindow] {
+      for (auto *button : activeDefaultWindow.findChildren<QPushButton *>())
+        if (button->text() == "Save")
+          return button;
+      return static_cast<QPushButton *>(nullptr);
+    }();
+    auto *defaultRuntimeFormat =
+        activeDefaultWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    if (!defaultSource || !defaultAnalyze || !defaultStatus || !defaultGain ||
+        !defaultSave || !defaultRuntimeFormat) {
+      std::cerr
+          << "could not prepare the active default-config analysis test\n";
+      return 1;
+    }
+    defaultSource->setCurrentIndex(0);
+    defaultRuntimeFormat->setChecked(false);
+    defaultAnalyze->click();
+    QElapsedTimer defaultAnalysisWait;
+    defaultAnalysisWait.start();
+    while (!defaultStatus->text().startsWith("Calculated response") &&
+           !defaultStatus->text().startsWith("Analysis failed") &&
+           defaultAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!defaultStatus->text().startsWith("Calculated response")) {
+      std::cerr << "default config analysis did not finish before edit\n";
+      return 1;
+    }
+    defaultGain->setValue(defaultGain->value() + 1.0);
+    defaultSave->click();
+    QElapsedTimer defaultStaleWait;
+    defaultStaleWait.start();
+    while (!defaultStatus->text().startsWith("Stale response") &&
+           defaultStaleWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!defaultStatus->text().startsWith("Stale response") ||
+        defaultStatus->property("analysisState").toString() != "stale") {
+      std::cerr
+          << "saving the active default config left its old response current\n";
+      return 1;
+    }
+  }
+
+  liveGain->setValue(-2.0);
+  if (!analysisStatus->text().startsWith("Stale response") ||
+      analysisStatus->property("analysisState").toString() != "stale") {
+    std::cerr << "the response panel continued to present an outdated curve "
+                 "as current after an editor change\n";
+    return 1;
+  }
+  qputenv("SKYAPO_UI_TEST_STREAMING_FORMAT", "96000:2");
+  responseButton->click();
+  liveGain->setValue(-1.0);
+  QElapsedTimer staleAnalysisWait;
+  staleAnalysisWait.start();
+  while (
+      !analysisStatus->text().contains("changed while analysis was running") &&
+      staleAnalysisWait.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!analysisStatus->text().contains("changed while analysis was running") ||
+      analysisStatus->property("analysisState").toString() != "failed" ||
+      !responseButton->isEnabled() ||
+      liveWindow.findChild<QWidget *>("responsePlot")) {
+    std::cerr << "an in-flight analysis result survived a config edit or did "
+                 "not restore panel controls\n";
+    return 1;
+  }
+  qunsetenv("SKYAPO_UI_TEST_STREAMING_FORMAT");
+
+  {
+    MainWindow closingWindow(responseConfigPath,
+                             QString::fromLocal8Bit(argv[1]));
+    auto *closingAnalyze =
+        closingWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *closingSource =
+        closingWindow.findChild<QComboBox *>("analysisSource");
+    auto *closingResolution =
+        closingWindow.findChild<QComboBox *>("analysisResolution");
+    auto *closingRuntimeFormat =
+        closingWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *closingChannels =
+        closingWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *closingStatus =
+        closingWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!closingAnalyze || !closingSource || !closingResolution ||
+        !closingRuntimeFormat || !closingChannels || !closingStatus ||
+        closingResolution->findData(1U << 20) < 0) {
+      std::cerr << "could not prepare an in-flight analysis close test\n";
+      return 1;
+    }
+    closingSource->setCurrentIndex(1);
+    closingResolution->setCurrentIndex(closingResolution->findData(1U << 20));
+    closingRuntimeFormat->setChecked(false);
+    closingChannels->setValue(1);
+    closingAnalyze->click();
+    if (closingStatus->property("analysisState").toString() != "running") {
+      std::cerr << "analysis did not enter its worker state before close\n";
+      return 1;
+    }
+  }
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
 #endif
   QFile liveConfigAfterValid(liveConfigPath);
   if (!liveConfigAfterValid.open(QIODevice::ReadOnly) ||
       liveConfigAfterValid.readAll() != "Preamp: -3 dB\n") {
-    std::cerr << "live validation changed the on-disk config\n";
+    std::cerr << "response analysis changed the on-disk config\n";
     return 1;
   }
 
@@ -890,6 +1753,104 @@ int main(int argc, char **argv) {
     return 1;
   }
   includeLiveConfig.close();
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  {
+    MainWindow includeAnalysisWindow(includeLiveConfigPath,
+                                     QString::fromLocal8Bit(argv[2]));
+    auto *includeAnalysisButton =
+        includeAnalysisWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *includeAnalysisSource =
+        includeAnalysisWindow.findChild<QComboBox *>("analysisSource");
+    auto *includeAnalysisRuntimeFormat =
+        includeAnalysisWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *includeAnalysisChannels =
+        includeAnalysisWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *includeAnalysisStatus =
+        includeAnalysisWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!includeAnalysisButton || !includeAnalysisSource ||
+        !includeAnalysisRuntimeFormat || !includeAnalysisChannels ||
+        !includeAnalysisStatus) {
+      std::cerr << "could not prepare post-analysis Include monitoring test\n";
+      return 1;
+    }
+    includeAnalysisSource->setCurrentIndex(1);
+    includeAnalysisRuntimeFormat->setChecked(false);
+    includeAnalysisChannels->setValue(1);
+    includeAnalysisButton->click();
+    QElapsedTimer includeAnalysisWait;
+    includeAnalysisWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Calculated response") &&
+           !includeAnalysisStatus->text().startsWith("Analysis failed") &&
+           includeAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Calculated response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "current") {
+      std::cerr << "Include-backed response analysis did not complete: "
+                << includeAnalysisStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    QFile changedLiveInclude(includeLiveChild.fileName());
+    if (!changedLiveInclude.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        changedLiveInclude.write("Preamp: -9 dB\n") != 14) {
+      std::cerr << "could not change Include after response analysis\n";
+      return 1;
+    }
+    changedLiveInclude.close();
+    QElapsedTimer staleIncludeWait;
+    staleIncludeWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Stale response") &&
+           staleIncludeWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Stale response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "stale") {
+      std::cerr << "editing an Include after analysis left its response marked "
+                   "current\n";
+      return 1;
+    }
+    includeAnalysisButton->click();
+    QElapsedTimer replacementAnalysisWait;
+    replacementAnalysisWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Calculated response") &&
+           !includeAnalysisStatus->text().startsWith("Analysis failed") &&
+           replacementAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Calculated response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "current") {
+      std::cerr << "Include response did not recover after re-analysis\n";
+      return 1;
+    }
+    QSaveFile atomicInclude(includeLiveChild.fileName());
+    if (!atomicInclude.open(QIODevice::WriteOnly) ||
+        atomicInclude.write("Preamp: -12 dB\n") != 15 ||
+        !atomicInclude.commit()) {
+      std::cerr << "could not atomically replace the analyzed Include\n";
+      return 1;
+    }
+    QElapsedTimer atomicStaleWait;
+    atomicStaleWait.start();
+    while (!includeAnalysisStatus->text().startsWith("Stale response") &&
+           atomicStaleWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!includeAnalysisStatus->text().startsWith("Stale response") ||
+        includeAnalysisStatus->property("analysisState").toString() !=
+            "stale") {
+      std::cerr << "an atomic Include replacement left its response marked "
+                   "current\n";
+      return 1;
+    }
+  }
+#endif
   MainWindow includeLiveWindow(includeLiveConfigPath,
                                QString::fromLocal8Bit(argv[2]));
   auto *includeLiveValidation =
@@ -1170,9 +2131,29 @@ int main(int argc, char **argv) {
                      temporary.path() + QStringLiteral("/settings"));
   QSettings uiSettings;
   uiSettings.clear();
+  int savedAnalysisDockHeight = -1;
   {
     MainWindow preferencesWindow(configPath, QString::fromLocal8Bit(argv[1]));
-    preferencesWindow.resize(777, 555);
+    preferencesWindow.resize(1100, 760);
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+    auto *dock = preferencesWindow.findChild<QDockWidget *>(
+        QStringLiteral("responseAnalysisDock"));
+    if (!dock) {
+      std::cerr << "editor did not create the Analysis Panel dock\n";
+      return 1;
+    }
+    preferencesWindow.show();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    preferencesWindow.resizeDocks({dock}, {260}, Qt::Vertical);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    savedAnalysisDockHeight = dock->height();
+    if (savedAnalysisDockHeight < 100) {
+      std::cerr << "could not resize the Analysis Panel before saving state\n";
+      return 1;
+    }
+    dock->hide();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+#endif
     preferencesWindow.close();
   }
   if (uiSettings.value(QStringLiteral("ui/geometry")).toByteArray().isEmpty() ||
@@ -1184,13 +2165,40 @@ int main(int argc, char **argv) {
   }
   const QByteArray savedWindowGeometry =
       uiSettings.value(QStringLiteral("ui/geometry")).toByteArray();
+  const QByteArray savedWindowState =
+      uiSettings.value(QStringLiteral("ui/state")).toByteArray();
   uiSettings.clear();
   uiSettings.setValue(QStringLiteral("ui/geometry"), savedWindowGeometry);
+  uiSettings.setValue(QStringLiteral("ui/state"), savedWindowState);
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
-  if (window.size() != QSize(777, 555)) {
-    std::cerr << "editor did not restore its saved window geometry\n";
+  if (!window.restoreGeometry(savedWindowGeometry)) {
+    std::cerr << "editor could not restore its saved window geometry\n";
     return 1;
   }
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  auto *restoredAnalysisDock =
+      window.findChild<QDockWidget *>(QStringLiteral("responseAnalysisDock"));
+  auto *restoredAnalysisAction =
+      window.findChild<QAction *>(QStringLiteral("toggleAnalysisPanel"));
+  if (!restoredAnalysisDock || !restoredAnalysisAction ||
+      !restoredAnalysisDock->isHidden() ||
+      window.dockWidgetArea(restoredAnalysisDock) != Qt::BottomDockWidgetArea) {
+    std::cerr << "editor did not restore the hidden bottom Analysis Panel\n";
+    return 1;
+  }
+  window.show();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  restoredAnalysisAction->trigger();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+  if (restoredAnalysisDock->isHidden() ||
+      std::abs(restoredAnalysisDock->height() - savedAnalysisDockHeight) > 8) {
+    std::cerr << "editor did not restore the Analysis Panel dock height; saved="
+              << savedAnalysisDockHeight
+              << " restored=" << restoredAnalysisDock->height() << '\n';
+    return 1;
+  }
+  window.hide();
+#endif
   const auto recentFiles =
       uiSettings.value(QStringLiteral("ui/recentFiles")).toStringList();
   auto *recentMenu =
@@ -1725,21 +2733,42 @@ int main(int argc, char **argv) {
   }
   bool pickerWasValid = false;
   bool pickerWasAccepted = false;
-  QTimer::singleShot(200, &window, [&] {
+  int pickerChoiceCount = -1;
+  QTimer pickerPoll;
+  pickerPoll.setInterval(10);
+  QObject::connect(&pickerPoll, &QTimer::timeout, &window, [&] {
     for (auto *candidate : window.findChildren<QDialog *>()) {
       if (candidate->objectName() != "pluginPicker")
         continue;
       auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
       auto *add = candidate->findChild<QPushButton *>("addPluginButton");
-      pickerWasValid = choices && choices->count() == 1 &&
-                       choices->item(0)->text().contains("Test Gain") && add;
+      pickerChoiceCount = choices ? choices->count() : -1;
+      int testGainRow = -1;
+      if (choices) {
+        for (int row = 0; row < choices->count(); ++row) {
+          const auto *item = choices->item(row);
+          if (item->text().contains("Test Gain") &&
+              item->data(Qt::UserRole).toString() ==
+                  QStringLiteral(
+                      "Plugin: LV2 https://example.test/plugins/gain")) {
+            testGainRow = row;
+            break;
+          }
+        }
+      }
+      pickerWasValid = testGainRow >= 0 && add;
       if (pickerWasValid) {
+        choices->setCurrentRow(testGainRow);
         add->click();
         pickerWasAccepted = true;
+      } else {
+        candidate->reject();
       }
+      pickerPoll.stop();
       break;
     }
   });
+  pickerPoll.start();
   addPluginAction->trigger();
   QElapsedTimer pickerWait;
   pickerWait.start();
@@ -1747,8 +2776,11 @@ int main(int argc, char **argv) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     QThread::msleep(5);
   }
+  pickerPoll.stop();
   if (!pickerWasValid || !pickerWasAccepted) {
-    std::cerr << "plugin picker did not present discovered catalog entries\n";
+    std::cerr << "plugin picker did not present the single discovered catalog "
+                 "entry; count="
+              << pickerChoiceCount << '\n';
     return 1;
   }
   bool insertedPluginDirective = false;

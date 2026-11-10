@@ -4,6 +4,8 @@
 #include "Editor/FilterTable.h"
 #include <QMainWindow>
 #include <QString>
+#include <QStringList>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -12,6 +14,8 @@
 class QComboBox;
 class QCheckBox;
 class QCloseEvent;
+class QDockWidget;
+class QFileSystemWatcher;
 class QLabel;
 class QLineEdit;
 class QMenu;
@@ -20,6 +24,8 @@ class QScrollArea;
 class QSpinBox;
 class QTimer;
 class QThread;
+class QVBoxLayout;
+class QWidget;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -31,6 +37,8 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
+  enum class ResponseAnalysisChange { CurrentDocument, InputDevice };
+
   void openConfig(const QString &path);
   void rebuildRows();
   void addFilter(const QString &line);
@@ -45,12 +53,17 @@ private:
   void refreshStatus();
   void refreshDevices();
   void selectDevice(int index);
+  void finishResponseAnalysisAfterDeviceChange();
   void scheduleLiveValidation();
   void validateLiveConfig();
   void clearRowDiagnostics();
   void setRowDiagnostic(int index, const QString &diagnostic);
   void openDiagnosticSource();
   void analyzeResponse();
+  void updateAnalysisInputChannels(unsigned channels);
+  void clearResponsePlot(const QString &message);
+  bool watchResponseConfigFiles(const QStringList &paths);
+  void markResponseAnalysisStale(ResponseAnalysisChange change);
   void showAbout();
   void refreshRecentFilesMenu();
   void openRecentFile();
@@ -76,10 +89,25 @@ private:
   QPushButton *responseButton{};
   QComboBox *responseSourceCombo{};
   QComboBox *responseResolutionCombo{};
+  QComboBox *analysisChannelCombo{};
   QCheckBox *analysisUseRuntimeFormat{};
   QSpinBox *analysisSampleRate{};
   QSpinBox *analysisChannels{};
+  QDockWidget *responseDock{};
+  QFileSystemWatcher *responseConfigWatcher{};
+  QWidget *responsePlotContainer{};
+  QVBoxLayout *responsePlotLayout{};
+  QLabel *analysisStatusLabel{};
+  QLabel *analysisSummaryLabel{};
+  QLabel *analysisPeakGainLabel{};
+  QLabel *analysisLatencyLabel{};
+  QLabel *analysisInitializationLabel{};
+  QLabel *analysisCpuLabel{};
   QThread *responseThread{};
+  QThread *responseDependencyThread{};
+  std::shared_ptr<std::atomic_bool> responseAnalysisCancellation;
+  QString responseAnalysisDeviceConnectionName;
+  std::vector<std::pair<QString, QString>> responseSymlinkTargets;
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
   FilterTable *rowTable{};
@@ -91,5 +119,11 @@ private:
   bool daemonControlPending{};
   bool pluginRequestPending{};
   quint64 configRevision{};
+  bool responseAnalysisTracksEditor{};
+  bool responseAnalysisHasResult{};
+  bool responseAnalysisPending{};
+  bool responseAnalysisDeviceChangedWhileRunning{};
+  bool responseDependencyCheckPending{};
+  bool responseDependencyChangedWhileChecking{};
   QString saveAsError;
 };
