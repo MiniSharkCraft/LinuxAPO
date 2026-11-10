@@ -923,6 +923,28 @@ int main(int argc, char **argv) {
                 << symlinkStatus->text().toStdString() << '\n';
       return 1;
     }
+    const QString unrelatedPath =
+        QDir(symlinkWatchDirectory).filePath(QStringLiteral("unrelated.txt"));
+    QFile unrelatedFile(unrelatedPath);
+    if (!unrelatedFile.open(QIODevice::WriteOnly) ||
+        unrelatedFile.write("unrelated sibling change") < 0 ||
+        !unrelatedFile.flush()) {
+      std::cerr << "could not create unrelated sibling file\n";
+      return 1;
+    }
+    unrelatedFile.close();
+    QElapsedTimer unrelatedChangeWait;
+    unrelatedChangeWait.start();
+    while (unrelatedChangeWait.elapsed() < 500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Calculated response") ||
+        symlinkStatus->property("analysisState").toString() != "current") {
+      std::cerr << "unrelated sibling file change incorrectly staled the "
+                   "response\n";
+      return 1;
+    }
     if (!QFile::remove(symlinkConfigPath) ||
         !QFile::link(symlinkTargetTwo, symlinkConfigPath)) {
       std::cerr << "could not retarget response config symlink\n";
