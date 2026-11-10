@@ -10,7 +10,11 @@ int main(int argc, char **argv) {
       std::string(argv[2]) == "list") {
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
     std::cout << "LV2 plugins discovered: 1\n"
-                 "LV2\thttps://example.test/plugins/gain\tTest Gain\n";
+                 "CLAP plugins discovered: 1\n"
+                 "VST3 plugins discovered: 1\n"
+                 "LV2\thttps://example.test/plugins/gain\tTest Gain\n"
+                 "CLAP\ttest.clap.gain\tTest CLAP Gain\n"
+                 "VST3\ttest.vst3.uid\tTest VST3 Gain\n";
     return 0;
   }
   if (argc == 4 && std::string(argv[1]) == "plugin" &&

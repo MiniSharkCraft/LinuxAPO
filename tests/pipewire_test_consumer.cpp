@@ -54,6 +54,7 @@ struct Consumer {
   std::atomic<unsigned> sampleRate{0};
   std::atomic<double> energy{0.0};
   std::atomic<double> channelDifferenceEnergy{0.0};
+  std::atomic<double> channelComparisonEnergy{0.0};
   bool expectIdenticalChannels{};
   bool measureSourceLag{};
   std::array<uint32_t, 64> sourceConsumerLatencyUs{};
@@ -192,10 +193,12 @@ struct Consumer {
     }
     c.sampleRate.store(rate, std::memory_order_relaxed);
     const uint32_t count = position->clock.duration;
+    const auto firstFrame = c.frames.load(std::memory_order_relaxed);
     if (count == 0)
       c.zeroDurationCalls.fetch_add(1, std::memory_order_relaxed);
     double blockEnergy = 0.0;
     double blockChannelDifferenceEnergy = 0.0;
+    double blockChannelComparisonEnergy = 0.0;
     uint64_t callbackUs = 0;
     if (c.measureSourceLag) {
       timespec now{};
@@ -237,20 +240,30 @@ struct Consumer {
       }
     }
     if (c.expectIdenticalChannels) {
+      // PipeWire may activate the per-channel links on separate graph cycles.
+      // Keep the strict equality threshold, but exclude the first 100 ms of
+      // startup so partial-link audio cannot look like DSP channel skew.
+      const auto startupFrames = static_cast<uint64_t>(rate) / 10;
       for (uint32_t i = 0; i < count; ++i) {
+        if (firstFrame + i < startupFrames)
+          continue;
+        for (unsigned ch = 0; ch < c.channels; ++ch)
+          blockChannelComparisonEnergy +=
+              static_cast<double>(channelData[ch][i]) * channelData[ch][i];
         for (unsigned ch = 1; ch < c.channels; ++ch) {
           const double difference =
               static_cast<double>(channelData[0][i]) - channelData[ch][i];
           blockChannelDifferenceEnergy += difference * difference;
         }
       }
-      const auto remaining = c.recordedLeft.size() - c.recordedSamples;
-      const auto copyCount = std::min<size_t>(count, remaining);
-      std::copy_n(channelData[0], copyCount,
-                  c.recordedLeft.data() + c.recordedSamples);
-      std::copy_n(channelData[1], copyCount,
-                  c.recordedRight.data() + c.recordedSamples);
-      c.recordedSamples += copyCount;
+      for (uint32_t i = 0; i < count; ++i) {
+        if (firstFrame + i < startupFrames ||
+            c.recordedSamples >= c.recordedLeft.size())
+          continue;
+        c.recordedLeft[c.recordedSamples] = channelData[0][i];
+        c.recordedRight[c.recordedSamples] = channelData[1][i];
+        ++c.recordedSamples;
+      }
     }
     double total = c.energy.load(std::memory_order_relaxed);
     while (!c.energy.compare_exchange_weak(total, total + blockEnergy,
@@ -261,6 +274,12 @@ struct Consumer {
           c.channelDifferenceEnergy.load(std::memory_order_relaxed);
       while (!c.channelDifferenceEnergy.compare_exchange_weak(
           differenceTotal, differenceTotal + blockChannelDifferenceEnergy,
+          std::memory_order_relaxed)) {
+      }
+      double comparisonTotal =
+          c.channelComparisonEnergy.load(std::memory_order_relaxed);
+      while (!c.channelComparisonEnergy.compare_exchange_weak(
+          comparisonTotal, comparisonTotal + blockChannelComparisonEnergy,
           std::memory_order_relaxed)) {
       }
     }
@@ -396,8 +415,9 @@ struct Consumer {
             ? sortedLatency[(sourceConsumerLatencyCount - 1) * 95 / 100]
             : 0u;
     const double channelDifferenceRatio =
-        expectIdenticalChannels && energy.load() > 0.0
-            ? std::sqrt(channelDifferenceEnergy.load() / energy.load())
+        expectIdenticalChannels && channelComparisonEnergy.load() > 0.0
+            ? std::sqrt(channelDifferenceEnergy.load() /
+                        channelComparisonEnergy.load())
             : 0.0;
     int bestChannelLag = 0;
     double bestLagDifferenceRatio = channelDifferenceRatio;

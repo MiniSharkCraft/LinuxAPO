@@ -62,6 +62,34 @@
 #include <iostream>
 
 namespace {
+QMenu *findMenuByTitle(QMenu *parent, const QString &title) {
+  if (!parent)
+    return nullptr;
+  for (auto *action : parent->actions()) {
+    if (auto *submenu = action->menu()) {
+      if (submenu->title() == title)
+        return submenu;
+      if (auto *nested = findMenuByTitle(submenu, title))
+        return nested;
+    }
+  }
+  return nullptr;
+}
+
+QAction *findTemplateAction(QMenu *menu, const QString &line) {
+  if (!menu)
+    return nullptr;
+  for (auto *action : menu->actions()) {
+    if (action->data().canConvert<FilterTemplate>() &&
+        action->data().value<FilterTemplate>().getLine() == line)
+      return action;
+    if (auto *submenu = action->menu())
+      if (auto *nested = findTemplateAction(submenu, line))
+        return nested;
+  }
+  return nullptr;
+}
+
 bool writeTestImpulseResponse(const QString &path) {
   QByteArray wav;
   const auto append16 = [&wav](quint16 value) {
@@ -1338,36 +1366,71 @@ int main(int argc, char **argv) {
     std::cerr << "Linux FilterTable row adapter was not created\n";
     return 1;
   }
-  const auto addActions = rowMenu->actions();
-  bool hasConvolutionTemplate = false;
-  bool hasPluginPicker = false;
-  bool hasIncludeTemplate = false;
-  for (const auto *action : addActions) {
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Convolution: impulse-response.wav") {
-      hasConvolutionTemplate = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "__SKYAPO_PICK_INSTALLED_PLUGIN__") {
-      hasPluginPicker = true;
-    }
-    if (action->data().canConvert<FilterTemplate>() &&
-        action->data().value<FilterTemplate>().getLine() ==
-            "Include: child.txt") {
-      hasIncludeTemplate = true;
-    }
-  }
-  if (addActions.isEmpty() ||
-      !addActions.first()->data().canConvert<FilterTemplate>() ||
-      addActions.first()->data().value<FilterTemplate>().getLine() !=
-          "Preamp: 0 dB" ||
-      !hasConvolutionTemplate || !hasPluginPicker || !hasIncludeTemplate) {
-    std::cerr
-        << "row add-menu did not preserve upstream and Convolution templates\n";
+  auto *controlMenu = findMenuByTitle(rowMenu, "Control");
+  auto *basicMenu = findMenuByTitle(rowMenu, "Basic filters");
+  auto *parametricMenu = findMenuByTitle(rowMenu, "Parametric filters");
+  auto *graphicMenu = findMenuByTitle(rowMenu, "Graphic equalizers");
+  auto *advancedMenu = findMenuByTitle(rowMenu, "Advanced filters");
+  auto *pluginMenu = rowMenu->findChild<QMenu *>("pluginAddMenu");
+  const auto rootActions = rowMenu->actions();
+  const QStringList expectedTopLevel{"Comment",
+                                     "Control",
+                                     "Basic filters",
+                                     "Parametric filters",
+                                     "Graphic equalizers",
+                                     "Advanced filters",
+                                     "Plugins"};
+  QStringList actualTopLevel;
+  for (const auto *action : rootActions)
+    actualTopLevel.append(action->menu() ? action->menu()->title()
+                                         : action->text());
+  const QStringList expectedParametric{
+      "Peaking filter",   "Low-pass filter",  "High-pass filter",
+      "Band-pass filter", "Low-shelf filter", "High-shelf filter",
+      "Notch filter",     "All-pass filter",  "Custom IIR filter"};
+  QStringList actualParametric;
+  if (parametricMenu)
+    for (const auto *action : parametricMenu->actions())
+      actualParametric.append(action->text());
+  if (actualTopLevel != expectedTopLevel || !controlMenu || !basicMenu ||
+      !parametricMenu || !advancedMenu || !pluginMenu ||
+      actualParametric != expectedParametric ||
+      !findTemplateAction(rowMenu, "# ") ||
+      !findTemplateAction(controlMenu, "Include: child.txt") ||
+      !findTemplateAction(controlMenu, "Device: all") ||
+      !findTemplateAction(controlMenu, "Channel: L R") ||
+      !findTemplateAction(controlMenu, "Stage: post-mix") ||
+      !findTemplateAction(basicMenu, "Preamp: 0 dB") ||
+      !findTemplateAction(basicMenu, "Delay: 0 ms") ||
+      !findTemplateAction(basicMenu, "Copy: L=L") ||
+      !findTemplateAction(advancedMenu, "Convolution: impulse-response.wav") ||
+      !findTemplateAction(
+          advancedMenu,
+          "LoudnessCorrection: State 1 ReferenceLevel 0 ReferenceOffset 0 "
+          "Attenuation 1.0") ||
+      !findTemplateAction(pluginMenu, "__SKYAPO_PICK_INSTALLED_PLUGIN__")) {
+    std::cerr << "Add Filter menu is missing the upstream category layout or "
+                 "required template actions\n";
     return 1;
   }
+  QStringList graphicActions;
+  if (graphicMenu)
+    for (const auto *action : graphicMenu->actions())
+      graphicActions.append(action->text());
+#ifdef SKYAPO_HAVE_GRAPHIC_EQ
+  if (graphicActions != QStringList{"15-band graphic equalizer",
+                                    "31-band graphic equalizer",
+                                    "Graphic equalizer with variable bands"}) {
+    std::cerr << "Graphic equalizer menu is missing an upstream template\n";
+    return 1;
+  }
+#else
+  if (graphicActions.size() != 1 ||
+      graphicMenu->actions().first()->isEnabled()) {
+    std::cerr << "Unavailable graphic equalizer state is not explicit\n";
+    return 1;
+  }
+#endif
   if (construction.elapsed() >= 1000) {
     std::cerr << "MainWindow blocked while starting delayed CLI requests\n";
     return 1;
@@ -1731,8 +1794,21 @@ int main(int argc, char **argv) {
         continue;
       auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
       auto *add = candidate->findChild<QPushButton *>("addPluginButton");
-      pickerWasValid = choices && choices->count() == 1 &&
-                       choices->item(0)->text().contains("Test Gain") && add;
+      pickerWasValid = choices && choices->count() == 3 && add;
+      if (pickerWasValid) {
+        bool hasLv2 = false;
+        bool hasClap = false;
+        bool hasVst3 = false;
+        for (int index = 0; index < choices->count(); ++index) {
+          const auto directive =
+              choices->item(index)->data(Qt::UserRole).toString();
+          hasLv2 = hasLv2 ||
+                   directive == "Plugin: LV2 https://example.test/plugins/gain";
+          hasClap = hasClap || directive == "Plugin: CLAP test.clap.gain";
+          hasVst3 = hasVst3 || directive == "Plugin: VST3 test.vst3.uid";
+        }
+        pickerWasValid = hasLv2 && hasClap && hasVst3;
+      }
       if (pickerWasValid) {
         add->click();
         pickerWasAccepted = true;
@@ -1760,6 +1836,209 @@ int main(int argc, char **argv) {
   if (!insertedPluginDirective) {
     std::cerr
         << "choosing a discovered plugin did not insert its config line\n";
+    return 1;
+  }
+
+  auto *filterAddMenu = table->createAddPopupMenu();
+  auto *pluginsMenu = filterAddMenu->findChild<QMenu *>("pluginAddMenu");
+  auto *lv2PluginAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addLv2Plugin") : nullptr;
+  auto *clapPluginAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addClapPlugin")
+                  : nullptr;
+  auto *linuxVstAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addLinuxVstPlugin")
+                  : nullptr;
+  auto *windowsVstAction =
+      pluginsMenu ? pluginsMenu->findChild<QAction *>("addWindowsVstPlugin")
+                  : nullptr;
+  if (!pluginsMenu || pluginsMenu->title() != "Plugins" || !lv2PluginAction ||
+      lv2PluginAction->text() != "LV2 plugin…" || !clapPluginAction ||
+      clapPluginAction->text() != "CLAP plugin…" || !linuxVstAction ||
+      linuxVstAction->text() != "VST plugin (Linux)" || !windowsVstAction ||
+      windowsVstAction->text() != "VST plugin (Windows)") {
+    std::cerr << "plugin menu does not distinguish Linux and Windows VST\n";
+    return 1;
+  }
+
+  bool linuxVstPickerWasValid = false;
+  bool linuxVstPickerWasAccepted = false;
+  QString linuxVstPickerDetails = QStringLiteral("picker was not shown");
+  QTimer::singleShot(200, &window, [&] {
+    for (auto *candidate : window.findChildren<QDialog *>()) {
+      if (candidate->objectName() != "pluginPicker")
+        continue;
+      auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+      auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+      linuxVstPickerDetails =
+          candidate->windowTitle() + QStringLiteral("; ") +
+          (choices ? QStringLiteral("rows=%1").arg(choices->count())
+                   : QStringLiteral("list missing"));
+      if (choices)
+        for (int index = 0; index < choices->count(); ++index)
+          linuxVstPickerDetails += QStringLiteral("; %1").arg(
+              choices->item(index)->data(Qt::UserRole).toString());
+      linuxVstPickerWasValid =
+          choices && choices->count() == 1 &&
+          choices->item(0)->text().contains("Test VST3 Gain") &&
+          choices->item(0)->data(Qt::UserRole).toString() ==
+              "Plugin: VST3 test.vst3.uid" &&
+          candidate->windowTitle() == "Add Linux VST plugin" && add;
+      if (linuxVstPickerWasValid) {
+        add->click();
+        linuxVstPickerWasAccepted = true;
+      }
+      break;
+    }
+  });
+  table->addLine(linuxVstAction->data().value<FilterTemplate>().getLine());
+  QElapsedTimer linuxVstWait;
+  linuxVstWait.start();
+  while (linuxVstWait.elapsed() < 2000 && !linuxVstPickerWasAccepted) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  if (!linuxVstPickerWasValid || !linuxVstPickerWasAccepted) {
+    std::cerr << "Linux VST picker did not limit insertion to native VST3: "
+              << linuxVstPickerDetails.toStdString() << '\n';
+    return 1;
+  }
+  bool insertedVst3Directive = false;
+  for (int index = 0; table->itemAt(index); ++index)
+    insertedVst3Directive =
+        insertedVst3Directive ||
+        table->itemAt(index)->text == "Plugin: VST3 test.vst3.uid";
+  if (!insertedVst3Directive) {
+    std::cerr << "Linux VST selection did not insert the VST3 directive\n";
+    return 1;
+  }
+
+  const int rowCountBeforeWindowsVst = [&] {
+    int count = 0;
+    while (table->itemAt(count))
+      ++count;
+    return count;
+  }();
+  bool windowsVstHelpWasShown = false;
+  QString windowsVstDialogDetails;
+  QTimer::singleShot(100, &window, [&] {
+    auto *message =
+        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+    if (message) {
+      windowsVstDialogDetails =
+          message->windowTitle() + QStringLiteral(": ") + message->text();
+      windowsVstHelpWasShown =
+          message->windowTitle() == "Windows VST plugins" &&
+          message->text().contains("cannot load Windows .dll",
+                                   Qt::CaseInsensitive) &&
+          message->text().contains("yabridge", Qt::CaseInsensitive);
+      message->accept();
+    }
+  });
+  table->addLine(windowsVstAction->data().value<FilterTemplate>().getLine());
+  int rowCountAfterWindowsVst = 0;
+  while (table->itemAt(rowCountAfterWindowsVst))
+    ++rowCountAfterWindowsVst;
+  if (!windowsVstHelpWasShown ||
+      rowCountAfterWindowsVst != rowCountBeforeWindowsVst) {
+    std::cerr << "unsupported Windows VST choice created an inert filter row; "
+              << "help=" << windowsVstHelpWasShown
+              << ", rows=" << rowCountBeforeWindowsVst << "->"
+              << rowCountAfterWindowsVst
+              << ", dialog=" << windowsVstDialogDetails.toStdString() << '\n';
+    return 1;
+  }
+
+  const auto addPluginBeforeRow = [&](QAction *action, const QString &format,
+                                      const QString &directive,
+                                      int beforeIndex) {
+    auto *before = table->itemAt(beforeIndex);
+    if (!action || !before)
+      return false;
+    const QString anchorLine = before->text;
+    bool pickerWasValid = false;
+    bool pickerWasHandled = false;
+    QString pickerDetails = QStringLiteral("picker was not shown");
+    QEventLoop pickerWait;
+    QTimer pickerPoll;
+    pickerPoll.setInterval(10);
+    QTimer pickerTimeout;
+    pickerTimeout.setSingleShot(true);
+    QObject::connect(&pickerPoll, &QTimer::timeout, &pickerWait, [&] {
+      for (auto *candidate : window.findChildren<QDialog *>()) {
+        if (candidate->objectName() != "pluginPicker")
+          continue;
+        auto *choices = candidate->findChild<QListWidget *>("pluginPickerList");
+        auto *add = candidate->findChild<QPushButton *>("addPluginButton");
+        pickerDetails =
+            candidate->windowTitle() + QStringLiteral("; ") +
+            (choices ? QStringLiteral("rows=%1").arg(choices->count())
+                     : QStringLiteral("list missing"));
+        if (choices)
+          for (int index = 0; index < choices->count(); ++index)
+            pickerDetails += QStringLiteral("; %1").arg(
+                choices->item(index)->data(Qt::UserRole).toString());
+        pickerWasValid =
+            choices && choices->count() == 1 &&
+            choices->item(0)->data(Qt::UserRole).toString() == directive &&
+            candidate->windowTitle() ==
+                QStringLiteral("Add %1 plugin").arg(format) &&
+            add;
+        if (pickerWasValid)
+          add->click();
+        else
+          candidate->reject();
+        pickerWasHandled = true;
+        pickerWait.quit();
+        break;
+      }
+      if (pickerWasHandled)
+        return;
+      if (auto *modal =
+              qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        pickerDetails =
+            modal->windowTitle() + QStringLiteral(": unexpected dialog");
+        modal->reject();
+        pickerWasHandled = true;
+        pickerWait.quit();
+      }
+    });
+    QObject::connect(&pickerTimeout, &QTimer::timeout, &pickerWait, [&] {
+      if (auto *modal =
+              qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+        modal->reject();
+      pickerWait.quit();
+    });
+    pickerPoll.start();
+    pickerTimeout.start(2000);
+    table->addLine(action->data().value<FilterTemplate>().getLine(), before);
+    pickerWait.exec();
+    pickerPoll.stop();
+    pickerTimeout.stop();
+    if (!pickerWasValid || !pickerWasHandled ||
+        table->itemAt(beforeIndex)->text != directive ||
+        !table->itemAt(beforeIndex + 1) ||
+        table->itemAt(beforeIndex + 1)->text != anchorLine) {
+      std::cerr << format.toStdString()
+                << " plugin action did not filter discovery and insert before "
+                   "the selected row; "
+                << pickerDetails.toStdString() << '\n';
+      return false;
+    }
+    return true;
+  };
+
+  const QString lv2Directive =
+      QStringLiteral("Plugin: LV2 https://example.test/plugins/gain");
+  const QString clapDirective = QStringLiteral("Plugin: CLAP test.clap.gain");
+  if (!addPluginBeforeRow(lv2PluginAction, QStringLiteral("LV2"), lv2Directive,
+                          0) ||
+      !addPluginBeforeRow(clapPluginAction, QStringLiteral("CLAP"),
+                          clapDirective, 1) ||
+      table->itemAt(0)->text != lv2Directive ||
+      table->itemAt(1)->text != clapDirective) {
+    std::cerr << "format-specific plugin actions changed the existing filter "
+                 "order\n";
     return 1;
   }
 
