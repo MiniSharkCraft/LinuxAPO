@@ -976,6 +976,72 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+
+  {
+    MainWindow inFlightDeviceWindow(deviceAnalysisPath,
+                                    QString::fromLocal8Bit(argv[1]));
+    auto *inFlightDeviceCombo =
+        inFlightDeviceWindow.findChild<QComboBox *>("inputDeviceCombo");
+    auto *inFlightSource =
+        inFlightDeviceWindow.findChild<QComboBox *>("analysisSource");
+    auto *inFlightFormat =
+        inFlightDeviceWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *inFlightChannels =
+        inFlightDeviceWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *inFlightAnalyze =
+        inFlightDeviceWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *inFlightStatus =
+        inFlightDeviceWindow.findChild<QLabel *>("analysisResultStatus");
+    QElapsedTimer inFlightDeviceWait;
+    inFlightDeviceWait.start();
+    while (
+        inFlightDeviceWait.elapsed() < 2000 &&
+        (!inFlightDeviceCombo ||
+         inFlightDeviceCombo->currentData().toString() != "alsa_input.test")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    const int otherDeviceIndex =
+        inFlightDeviceCombo
+            ? inFlightDeviceCombo->findData(QStringLiteral("alsa_input.other"))
+            : -1;
+    if (!inFlightDeviceCombo || !inFlightSource || !inFlightFormat ||
+        !inFlightChannels || !inFlightAnalyze || !inFlightStatus ||
+        otherDeviceIndex < 0) {
+      std::cerr << "could not prepare in-flight device-analysis fixture\n";
+      return 1;
+    }
+    inFlightSource->setCurrentIndex(1);
+    inFlightFormat->setChecked(false);
+    inFlightChannels->setValue(1);
+    inFlightAnalyze->click();
+    inFlightDeviceCombo->setCurrentIndex(otherDeviceIndex);
+    if (!QMetaObject::invokeMethod(inFlightDeviceCombo, "activated",
+                                   Qt::DirectConnection,
+                                   Q_ARG(int, otherDeviceIndex))) {
+      std::cerr << "could not change device during response analysis\n";
+      return 1;
+    }
+    inFlightDeviceWait.restart();
+    while (inFlightDeviceWait.elapsed() < 5000 &&
+           !inFlightStatus->text().startsWith("Stale response") &&
+           !inFlightStatus->text().startsWith("Calculated response") &&
+           !inFlightStatus->text().startsWith("Analysis failed")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!inFlightStatus->text().startsWith("Stale response") ||
+        inFlightStatus->property("analysisState").toString() !=
+            QStringLiteral("stale") ||
+        inFlightDeviceWindow.findChild<QWidget *>("responsePlot")) {
+      std::cerr
+          << "in-flight response analysis was published as current "
+             "after the selected device changed: state="
+          << inFlightStatus->property("analysisState").toString().toStdString()
+          << ", status=" << inFlightStatus->text().toStdString() << '\n';
+      return 1;
+    }
+  }
   qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
   const QString symlinkWatchDirectory =
       temporary.filePath(QStringLiteral("response-symlink-watch"));

@@ -1240,6 +1240,8 @@ void MainWindow::analyzeResponse() {
 #else
   if (configPath.isEmpty())
     return;
+  responseAnalysisPending = false;
+  responseAnalysisDeviceChangedWhileRunning = false;
   auto cancellation = std::make_shared<std::atomic_bool>(false);
   responseAnalysisCancellation = cancellation;
   responseAnalysisHasResult = false;
@@ -1320,11 +1322,13 @@ void MainWindow::analyzeResponse() {
   const bool useRuntimeFormat = analysisUseRuntimeFormat->isChecked();
   const QString analysisConnectionName =
       QString::fromStdWString(deviceContext.connectionName);
+  responseAnalysisDeviceConnectionName = analysisConnectionName;
   const unsigned selectedRate =
       static_cast<unsigned>(analysisSampleRate->value());
   const unsigned selectedChannels =
       static_cast<unsigned>(analysisChannels->value());
   snapshot->close();
+  responseAnalysisPending = true;
   analysisStatusLabel->setProperty("analysisState", "running");
   analysisStatusLabel->setText(tr("Analyzing %1…").arg(sourceName));
   analysisSummaryLabel->setText(
@@ -1367,7 +1371,12 @@ void MainWindow::analyzeResponse() {
             Q_UNUSED(snapshot);
             if (!self)
               return;
+            if (self->responseAnalysisDeviceChangedWhileRunning) {
+              self->finishResponseAnalysisAfterDeviceChange();
+              return;
+            }
             if (result.cancelled) {
+              self->responseAnalysisPending = false;
               self->responseButton->setEnabled(true);
               self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState",
@@ -1380,6 +1389,7 @@ void MainWindow::analyzeResponse() {
             }
             if (sourceTracksEditor &&
                 self->configRevision != requestedRevision) {
+              self->responseAnalysisPending = false;
               self->responseButton->setEnabled(true);
               self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState", "failed");
@@ -1392,6 +1402,7 @@ void MainWindow::analyzeResponse() {
               return;
             }
             if (!result.error.isEmpty()) {
+              self->responseAnalysisPending = false;
               self->responseButton->setEnabled(true);
               self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState", "failed");
@@ -1433,6 +1444,8 @@ void MainWindow::analyzeResponse() {
                     peakGainDb = std::max(peakGainDb, point.y());
               self->responseAnalysisTracksEditor = sourceTracksEditor;
               self->responseAnalysisHasResult = monitored;
+              self->responseAnalysisPending = false;
+              self->responseAnalysisDeviceChangedWhileRunning = false;
               self->responseAnalysisDeviceConnectionName =
                   analysisConnectionName;
               self->responseButton->setEnabled(true);
@@ -1543,8 +1556,13 @@ void MainWindow::analyzeResponse() {
                         if (!self)
                           return;
                         self->responseDependencyCheckPending = false;
+                        if (self->responseAnalysisDeviceChangedWhileRunning) {
+                          self->finishResponseAnalysisAfterDeviceChange();
+                          return;
+                        }
                         if (cancelled ||
                             cancellation->load(std::memory_order_acquire)) {
+                          self->responseAnalysisPending = false;
                           self->responseButton->setEnabled(true);
                           self->responseButton->setText(
                               self->tr("Analyze response"));
@@ -1563,6 +1581,7 @@ void MainWindow::analyzeResponse() {
                         if (!unchanged ||
                             self->responseDependencyChangedWhileChecking ||
                             !editorUnchanged) {
+                          self->responseAnalysisPending = false;
                           self->responseAnalysisHasResult = false;
                           self->responseConfigWatcher->removePaths(
                               self->responseConfigWatcher->files());
@@ -1617,11 +1636,16 @@ void MainWindow::analyzeResponse() {
                                          QByteArray error) {
     if (!self)
       return;
+    if (self->responseAnalysisDeviceChangedWhileRunning) {
+      self->finishResponseAnalysisAfterDeviceChange();
+      return;
+    }
     unsigned sampleRate = 0;
     unsigned channels = 0;
     QString runtimeDevice;
     if (result != 0 ||
         !parseStreamingFormat(output, sampleRate, channels, &runtimeDevice)) {
+      self->responseAnalysisPending = false;
       self->responseButton->setEnabled(true);
       self->responseButton->setText(self->tr("Analyze response"));
       self->responseAnalysisHasResult = false;
@@ -1640,6 +1664,7 @@ void MainWindow::analyzeResponse() {
       return;
     }
     if (!runtimeDevice.isEmpty() && runtimeDevice != analysisConnectionName) {
+      self->responseAnalysisPending = false;
       self->responseButton->setEnabled(true);
       self->responseButton->setText(self->tr("Analyze response"));
       self->responseAnalysisHasResult = false;
@@ -2736,8 +2761,23 @@ void MainWindow::selectDevice(int index) {
   const auto nodeName = deviceCombo->itemData(index).toString();
   if (nodeName.isEmpty())
     return;
-  if (responseAnalysisHasResult &&
-      responseAnalysisDeviceConnectionName != nodeName)
+  if (responseAnalysisPending &&
+      responseAnalysisDeviceConnectionName != nodeName) {
+    responseAnalysisDeviceChangedWhileRunning = true;
+    if (responseAnalysisCancellation)
+      responseAnalysisCancellation->store(true, std::memory_order_release);
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+    const QString message =
+        tr("Stale response: the selected input device changed during "
+           "analysis. Analyze again to update it.");
+    responseAnalysisHasResult = false;
+    analysisStatusLabel->setProperty("analysisState", "stale");
+    analysisStatusLabel->setText(message);
+    analysisSummaryLabel->clear();
+    clearResponsePlot(message);
+#endif
+  } else if (responseAnalysisHasResult &&
+             responseAnalysisDeviceConnectionName != nodeName)
     markResponseAnalysisStale(ResponseAnalysisChange::InputDevice);
   deviceSetPending = true;
   deviceCombo->setEnabled(false);
@@ -2750,4 +2790,23 @@ void MainWindow::selectDevice(int index) {
            refreshDevices();
            refreshStatus();
          });
+}
+
+void MainWindow::finishResponseAnalysisAfterDeviceChange() {
+  responseAnalysisPending = false;
+  responseAnalysisDeviceChangedWhileRunning = false;
+  responseAnalysisHasResult = false;
+  if (responseConfigWatcher)
+    responseConfigWatcher->removePaths(responseConfigWatcher->files());
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  responseButton->setEnabled(true);
+  responseButton->setText(tr("Analyze response"));
+  const QString message =
+      tr("Stale response: the selected input device changed during "
+         "analysis. Analyze again to update it.");
+  analysisStatusLabel->setProperty("analysisState", "stale");
+  analysisStatusLabel->setText(message);
+  analysisSummaryLabel->clear();
+  clearResponsePlot(message);
+#endif
 }

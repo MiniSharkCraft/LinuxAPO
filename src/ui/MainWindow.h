@@ -53,6 +53,7 @@ private:
   void refreshStatus();
   void refreshDevices();
   void selectDevice(int index);
+  void finishResponseAnalysisAfterDeviceChange();
   void scheduleLiveValidation();
   void validateLiveConfig();
   void clearRowDiagnostics();
@@ -120,6 +121,8 @@ private:
   quint64 configRevision{};
   bool responseAnalysisTracksEditor{};
   bool responseAnalysisHasResult{};
+  bool responseAnalysisPending{};
+  bool responseAnalysisDeviceChangedWhileRunning{};
   bool responseDependencyCheckPending{};
   bool responseDependencyChangedWhileChecking{};
   QString saveAsError;
