@@ -516,7 +516,7 @@ def main():
                 "Format: F32 planar DSP", f"Sample rate: {sample_rate} Hz",
                 "Quantum: 1024",
                 "Callback allocations: 0", "Callback deallocations: 0",
-                "Default render endpoint: unavailable"]
+                "Default render endpoint: unavailable (no default audio sink volume)"]
             if stage_warning:
                 expected_status.append(
                     "Config warnings:\n  " + str(dsp_config) + ":1: "
@@ -1193,6 +1193,13 @@ def main():
                     raise RuntimeError(
                         "recorded stereo channels were not aligned after the "
                         f"mono latency plugin/PDC path:\n{captured.stdout}")
+            # The graph may have been rebuilt or recovered after the earlier
+            # status snapshot. Print the live state associated with this
+            # independent recording instead of a pre-reconfigure node ID.
+            final_status = run([str(cli), "status"], env,
+                               timeout=5, check=False)
+            if final_status.returncode == 0:
+                status = final_status.stdout
             print(f"Private PipeWire {mode} recovery and capture passed "
                   f"(destroyed link {link_id}).")
             print(status.rstrip())
