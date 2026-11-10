@@ -1254,6 +1254,61 @@ int main(int argc, char **argv) {
     std::cerr << "opening a config through a symlink created a duplicate tab\n";
     return 1;
   }
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  auto *tabsResponseButton =
+      tabsWindow.findChild<QPushButton *>("analyzeResponse");
+  auto *tabsResponseResolution =
+      tabsWindow.findChild<QComboBox *>("analysisResolution");
+  auto *tabsResponseSource =
+      tabsWindow.findChild<QComboBox *>("analysisSource");
+  auto *tabsUseLiveFormat =
+      tabsWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+  bool staleAnalysisDialogOpened = false;
+  QTimer staleAnalysisDialogCloser;
+  staleAnalysisDialogCloser.setInterval(5);
+  QObject::connect(
+      &staleAnalysisDialogCloser, &QTimer::timeout, &application, [&] {
+        for (auto *widget : QApplication::topLevelWidgets()) {
+          auto *dialog = qobject_cast<QDialog *>(widget);
+          if (!dialog ||
+              (dialog->windowTitle() != "Calculated filter response" &&
+               dialog->windowTitle() != "Response analysis"))
+            continue;
+          staleAnalysisDialogOpened = true;
+          dialog->reject();
+          staleAnalysisDialogCloser.stop();
+        }
+      });
+  const int tabsAnalysisResolutionIndex =
+      tabsResponseResolution ? tabsResponseResolution->findData(8192U) : -1;
+  if (!tabsResponseButton || !tabsResponseResolution ||
+      tabsAnalysisResolutionIndex < 0 || !tabsResponseSource ||
+      !tabsUseLiveFormat) {
+    std::cerr << "tabbed response analysis controls are unavailable\n";
+    return 1;
+  }
+  tabsResponseSource->setCurrentIndex(1);
+  tabsResponseResolution->setCurrentIndex(tabsAnalysisResolutionIndex);
+  tabsUseLiveFormat->setChecked(false);
+  tabsResponseButton->click();
+  tabs->setCurrentIndex(0);
+  staleAnalysisDialogCloser.start();
+  QElapsedTimer staleAnalysisWait;
+  staleAnalysisWait.start();
+  while (!tabsResponseButton->isEnabled() &&
+         staleAnalysisWait.elapsed() < 15000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  staleAnalysisDialogCloser.stop();
+  if (!tabsResponseButton->isEnabled() || staleAnalysisDialogOpened ||
+      tabs->currentIndex() != 0) {
+    std::cerr << "response analysis for the previous tab was shown after "
+                 "switching documents\n";
+    return 1;
+  }
+#endif
+  tabs->setCurrentIndex(1);
   const QString configAliasPath = temporary.filePath("config-alias.txt");
   if (!QFile::link(configPath, configAliasPath) ||
       !QFileInfo(configAliasPath).isSymLink()) {

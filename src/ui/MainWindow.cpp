@@ -1103,6 +1103,7 @@ void MainWindow::analyzeResponse() {
   }
   const QString snapshotPath =
       QFileInfo(snapshot->fileName()).absoluteFilePath();
+  const quint64 requestedRevision = configRevision;
   const unsigned fftFrames = responseResolutionCombo->currentData().toUInt();
   const bool useRuntimeFormat = analysisUseRuntimeFormat->isChecked();
   const unsigned selectedRate =
@@ -1114,26 +1115,35 @@ void MainWindow::analyzeResponse() {
   responseButton->setText(useRuntimeFormat ? tr("Reading format…")
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
-  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames](
+  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames,
+                              requestedRevision, useCurrentFile](
                                  unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
+    if (useCurrentFile && self->configRevision != requestedRevision) {
+      self->responseButton->setEnabled(true);
+      self->responseButton->setText(self->tr("Analyze response"));
+      return;
+    }
     self->responseButton->setText(self->tr("Analyzing…"));
     auto *worker = QThread::create([self, snapshot, snapshotPath, fftFrames,
-                                    sampleRate, channels] {
+                                    sampleRate, channels, requestedRevision,
+                                    useCurrentFile] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
       if (!self)
         return;
       QMetaObject::invokeMethod(
           self,
-          [self, snapshot, fftFrames, sampleRate, channels,
-           result = std::move(result)]() mutable {
+          [self, snapshot, fftFrames, sampleRate, channels, requestedRevision,
+           useCurrentFile, result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
             self->responseButton->setEnabled(true);
             self->responseButton->setText(self->tr("Analyze response"));
+            if (useCurrentFile && self->configRevision != requestedRevision)
+              return;
             if (!result.error.isEmpty()) {
               QMessageBox::warning(self, self->tr("Response analysis"),
                                    result.error);
