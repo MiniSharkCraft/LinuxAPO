@@ -58,6 +58,7 @@
 #include <QMenu>
 #include <QSettings>
 #include <QStandardPaths>
+#include <array>
 #include <cmath>
 #include <limits>
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
@@ -67,7 +68,9 @@
 #include <filesystem>
 
 namespace {
-bool writeTestImpulseResponse(const QString &path) {
+bool writeTestImpulseResponse(const QString &path,
+                              const std::array<qint16, 8> &samples = {
+                                  0, 256, 512, 768, 1024, 1280, 1536, 1792}) {
   QByteArray wav;
   const auto append16 = [&wav](quint16 value) {
     wav.append(static_cast<char>(value & 0xff));
@@ -89,8 +92,8 @@ bool writeTestImpulseResponse(const QString &path) {
   append16(16);
   wav.append("data", 4);
   append32(16);
-  for (int sample = 0; sample < 8; ++sample)
-    append16(static_cast<quint16>(sample * 256));
+  for (const qint16 sample : samples)
+    append16(static_cast<quint16>(sample));
 
   QFile file(path);
   return file.open(QIODevice::WriteOnly) && file.write(wav) == wav.size();
@@ -760,6 +763,95 @@ int main(int argc, char **argv) {
         closest = point;
     return closest->y();
   };
+  const auto writeAnalysisConfig = [](const QString &path,
+                                      const QByteArray &contents) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) ||
+        file.write(contents) != contents.size())
+      return false;
+    file.close();
+    return true;
+  };
+  const QString graphicEqPath = temporary.filePath("analysis-graphic-eq.txt");
+  if (!writeAnalysisConfig(graphicEqPath, "GraphicEQ: 1000 -6\n")) {
+    std::cerr << "could not write GraphicEQ response fixture\n";
+    return 1;
+  }
+  const auto graphicEqResponse =
+      analyzeConfigResponse(graphicEqPath, 48000, 1, 8192);
+  if (!graphicEqResponse.error.isEmpty() ||
+      graphicEqResponse.curves.size() != 1 ||
+      std::abs(gainAt(graphicEqResponse.curves.front(), 1000.0) + 6.0) > 0.25) {
+    std::cerr << "response analysis did not apply the actual GraphicEQ DSP: "
+              << graphicEqResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString delayAnalysisPath = temporary.filePath("analysis-delay.txt");
+  if (!writeAnalysisConfig(delayAnalysisPath, "Delay: 1 ms\n")) {
+    std::cerr << "could not write Delay response fixture\n";
+    return 1;
+  }
+  const auto delayResponse =
+      analyzeConfigResponse(delayAnalysisPath, 48000, 1, 8192);
+  if (!delayResponse.error.isEmpty() || !delayResponse.impulseOnsetSamples ||
+      *delayResponse.impulseOnsetSamples != 48) {
+    std::cerr << "response analysis did not measure the 1 ms DSP delay as 48 "
+                 "samples: "
+              << delayResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString copyAnalysisPath = temporary.filePath("analysis-copy.txt");
+  if (!writeAnalysisConfig(copyAnalysisPath, "Copy: R=L\n")) {
+    std::cerr << "could not write Copy response fixture\n";
+    return 1;
+  }
+  const auto copyResponse =
+      analyzeConfigResponse(copyAnalysisPath, 48000, 2, 8192);
+  bool leftToRightCopyVerified = false;
+  for (const auto &curve : copyResponse.curves) {
+    if (curve.channel == QStringLiteral("L → R") &&
+        std::abs(gainAt(curve, 1000.0)) < 0.1)
+      leftToRightCopyVerified = true;
+  }
+  if (!copyResponse.error.isEmpty() || !leftToRightCopyVerified) {
+    std::cerr << "response analysis did not show the configured L-to-R "
+                 "channel copy: "
+              << copyResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
+  const QString convolutionDirectory =
+      temporary.filePath("analysis-convolution");
+  if (!QDir().mkpath(convolutionDirectory)) {
+    std::cerr << "could not create convolution response fixture directory\n";
+    return 1;
+  }
+  const QString convolutionIrPath =
+      QDir(convolutionDirectory).filePath("half-gain.wav");
+  const QString analysisConvolutionConfigPath =
+      QDir(convolutionDirectory).filePath("config.txt");
+  if (!writeTestImpulseResponse(
+          convolutionIrPath,
+          std::array<qint16, 8>{16384, 0, 0, 0, 0, 0, 0, 0}) ||
+      !writeAnalysisConfig(analysisConvolutionConfigPath,
+                           "Convolution: half-gain.wav\n")) {
+    std::cerr << "could not write convolution response fixture\n";
+    return 1;
+  }
+  const auto convolutionResponse =
+      analyzeConfigResponse(analysisConvolutionConfigPath, 48000, 1, 8192);
+  if (!convolutionResponse.error.isEmpty() ||
+      convolutionResponse.curves.size() != 1 ||
+      std::abs(gainAt(convolutionResponse.curves.front(), 1000.0) + 6.0206) >
+          0.25) {
+    std::cerr << "response analysis did not apply the 0.5-gain convolution "
+                 "IR: "
+              << convolutionResponse.error.toStdString() << '\n';
+    return 1;
+  }
+
   const QString deviceAnalysisPath =
       temporary.filePath(QStringLiteral("device-analysis.txt"));
   QFile deviceAnalysisFile(deviceAnalysisPath);
