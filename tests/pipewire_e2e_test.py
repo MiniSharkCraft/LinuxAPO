@@ -5096,6 +5096,15 @@ def main():
                         f"mono latency plugin/PDC path:\n{captured.stdout}")
             print(f"Private PipeWire {mode} recovery and capture passed "
                   f"(destroyed link {link_id}).")
+            if mode in ("playback-wireplumber-surround51",
+                        "playback-wireplumber-surround71"):
+                status = run([str(cli), "status"], env).stdout
+                if ("Playback graph: streaming / streaming" not in status or
+                        "Playback error:" in status):
+                    raise RuntimeError(
+                        "multichannel playback retained a transient adapter "
+                        "Props error after the graph completed playback:\n"
+                        f"{status}")
             print(status.rstrip())
             print(captured.stdout.rstrip())
             stopped = run([str(cli), "stop"], env, timeout=8)

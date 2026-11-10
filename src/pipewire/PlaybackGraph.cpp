@@ -2268,19 +2268,46 @@ struct PlaybackGraph::Impl {
     if (channelVolume) {
       const auto *value = &channelVolume->value;
       if (SPA_POD_TYPE(value) != SPA_TYPE_Array ||
-          SPA_POD_ARRAY_N_VALUES(value) != channels ||
           SPA_POD_ARRAY_VALUE_TYPE(value) != SPA_TYPE_Float ||
           SPA_POD_ARRAY_VALUE_SIZE(value) != sizeof(float)) {
         error = "invalid playback adapter channel volumes";
         return;
       }
+      const auto volumeCount = SPA_POD_ARRAY_N_VALUES(value);
+      if (volumeCount != channels && !frontendControlsRestored) {
+        // WirePlumber may publish default stereo Props before its PortConfig
+        // transaction applies our multichannel layout. Keep the recovery gate
+        // closed until a matching control snapshot arrives.
+        return;
+      }
+      if (volumeCount == 0 || volumeCount > MaxChannels) {
+        error = "invalid playback adapter channel volumes (" +
+                std::to_string(volumeCount) + " values for " +
+                std::to_string(channels) + " channels; controls-restored=" +
+                (frontendControlsRestored ? "yes" : "no") + ')';
+        return;
+      }
       std::memcpy(next.data(), SPA_POD_ARRAY_VALUES(value),
-                  channels * sizeof(float));
-      for (unsigned channel = 0; channel < channels; ++channel)
+                  volumeCount * sizeof(float));
+      for (unsigned channel = 0; channel < volumeCount; ++channel)
         if (!std::isfinite(next[channel]) || next[channel] < 0.0f) {
           error = "invalid playback adapter channel volume";
           return;
         }
+      if (volumeCount != channels) {
+        const auto common = next[0];
+        if (!std::all_of(
+                next.begin(), next.begin() + volumeCount,
+                [common](float channel) { return channel == common; })) {
+          error = "playback adapter has non-uniform channel volumes for a "
+                  "different channel layout";
+          return;
+        }
+        // A uniform adapter volume remains meaningful across a channel-layout
+        // mismatch. Preserve the master gain for every DSP channel rather than
+        // rejecting a valid PipeWire control snapshot.
+        next.fill(common);
+      }
     }
     const auto *mute = spa_pod_find_prop(pod, nullptr, SPA_PROP_mute);
     bool muted = sinkMuted.load(std::memory_order_acquire);
