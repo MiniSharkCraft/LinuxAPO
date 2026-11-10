@@ -928,23 +928,21 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   responseDock->setAllowedAreas(Qt::BottomDockWidgetArea);
   responseDock->setWidget(analysisPanel);
   responseConfigWatcher = new QFileSystemWatcher(this);
-  const auto
-      configWatchChanged =
-          [this](const QString &path) {
-            if (responseDependencyCheckPending) {
-              responseDependencyChangedWhileChecking = true;
-              return;
-            }
-            if (!responseAnalysisHasResult)
-              return;
-            responseAnalysisHasResult = false;
-            responseConfigWatcher->removePaths(responseConfigWatcher->files());
-            analysisStatusLabel->setProperty("analysisState", "stale");
-            analysisStatusLabel->setText(
-                tr("Stale response: configuration or Include file '%1' "
-                   "changed after analysis. Analyze again to update it.")
-                    .arg(QFileInfo(path).fileName()));
-          };
+  const auto configWatchChanged = [this](const QString &path) {
+    if (responseDependencyCheckPending) {
+      responseDependencyChangedWhileChecking = true;
+      return;
+    }
+    if (!responseAnalysisHasResult)
+      return;
+    responseAnalysisHasResult = false;
+    responseConfigWatcher->removePaths(responseConfigWatcher->files());
+    analysisStatusLabel->setProperty("analysisState", "stale");
+    analysisStatusLabel->setText(
+        tr("Stale response: configuration or Include file '%1' "
+           "changed after analysis. Analyze again to update it.")
+            .arg(QFileInfo(path).fileName()));
+  };
   connect(responseConfigWatcher, &QFileSystemWatcher::fileChanged, this,
           configWatchChanged);
   connect(responseConfigWatcher, &QFileSystemWatcher::directoryChanged, this,
