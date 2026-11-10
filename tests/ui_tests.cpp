@@ -1239,6 +1239,36 @@ int main(int argc, char **argv) {
                  "select the existing tab\n";
     return 1;
   }
+  const QString secondConfigAliasPath =
+      temporary.filePath("second-config-alias.txt");
+  if (!QFile::link(secondConfigPath, secondConfigAliasPath) ||
+      !QFileInfo(secondConfigAliasPath).isSymLink()) {
+    std::cerr << "could not create a symlink for config-path identity test\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigAliasPath)) ||
+      tabs->count() != 2 || tabs->currentIndex() != 1 || !tabPath ||
+      tabPath->text() != QFileInfo(secondConfigPath).absoluteFilePath()) {
+    std::cerr << "opening a config through a symlink created a duplicate tab\n";
+    return 1;
+  }
+  const QString configAliasPath = temporary.filePath("config-alias.txt");
+  if (!QFile::link(configPath, configAliasPath) ||
+      !QFileInfo(configAliasPath).isSymLink()) {
+    std::cerr << "could not create a symlink for Save As collision test\n";
+    return 1;
+  }
+  bool symlinkSaveAsCollisionResult = true;
+  if (!QMetaObject::invokeMethod(
+          &tabsWindow, "saveConfigAsPath", Qt::DirectConnection,
+          Q_RETURN_ARG(bool, symlinkSaveAsCollisionResult),
+          Q_ARG(QString, configAliasPath)) ||
+      symlinkSaveAsCollisionResult || !QFileInfo(configAliasPath).isSymLink()) {
+    std::cerr << "Save As through a symlink bypassed an open-tab collision\n";
+    return 1;
+  }
   tabs->setCurrentIndex(1);
   auto *secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
   auto *secondGain =

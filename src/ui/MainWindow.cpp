@@ -85,6 +85,19 @@ struct PluginParameterModel {
 
 QString withoutInlineComment(const QString &line);
 
+QString configPathIdentity(const QString &path) {
+  const QFileInfo info(path);
+  const QString canonicalPath = info.canonicalFilePath();
+  if (!canonicalPath.isEmpty())
+    return QDir::cleanPath(canonicalPath);
+
+  const QString canonicalParent = info.dir().canonicalPath();
+  if (!canonicalParent.isEmpty())
+    return QDir::cleanPath(QDir(canonicalParent).filePath(info.fileName()));
+
+  return QDir::cleanPath(info.absoluteFilePath());
+}
+
 bool parseMetadataNumber(const QString &text, double &value,
                          bool allowInfinity = false) {
   const auto normalized = text.trimmed().toLower();
@@ -1317,8 +1330,9 @@ void MainWindow::runCli(const QStringList &arguments,
 
 void MainWindow::openConfig(const QString &path) {
   const QString absolutePath = QFileInfo(path).absoluteFilePath();
+  const QString identity = configPathIdentity(absolutePath);
   for (size_t index = 0; index < openDocuments.size(); ++index) {
-    if (openDocuments[index].path == absolutePath) {
+    if (configPathIdentity(openDocuments[index].path) == identity) {
       configTabs->setCurrentIndex(static_cast<int>(index));
       return;
     }
@@ -2080,10 +2094,10 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   if (path.trimmed().isEmpty())
     return false;
   const QString destination = QFileInfo(path).absoluteFilePath();
+  const QString destinationIdentity = configPathIdentity(destination);
   for (size_t index = 0; index < openDocuments.size(); ++index) {
     if (static_cast<int>(index) != activeDocumentIndex &&
-        QFileInfo(openDocuments[index].path).absoluteFilePath() ==
-            destination) {
+        configPathIdentity(openDocuments[index].path) == destinationIdentity) {
       saveAsError = tr("That configuration is already open in another tab.");
       return false;
     }
