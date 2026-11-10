@@ -198,7 +198,6 @@ struct Consumer {
     double blockEnergy = 0.0;
     double blockChannelDifferenceEnergy = 0.0;
     double blockChannelComparisonEnergy = 0.0;
-    const auto firstFrame = c.frames.load(std::memory_order_relaxed);
     uint64_t callbackUs = 0;
     if (c.measureSourceLag) {
       timespec now{};
@@ -240,13 +239,9 @@ struct Consumer {
       }
     }
     if (c.expectIdenticalChannels) {
-      // PipeWire can activate each channel link on a separate graph cycle.
-      // Keep the strict equality check, but measure it after the first 100 ms
-      // so link-startup silence/partial blocks do not masquerade as DSP skew.
-      const auto startupFrames = static_cast<uint64_t>(rate) / 10;
+      // Compare the complete capture, including graph startup, so a partial
+      // channel connection cannot be hidden by a fixed warm-up window.
       for (uint32_t i = 0; i < count; ++i) {
-        if (firstFrame + i < startupFrames)
-          continue;
         for (unsigned ch = 0; ch < c.channels; ++ch)
           blockChannelComparisonEnergy +=
               static_cast<double>(channelData[ch][i]) * channelData[ch][i];
