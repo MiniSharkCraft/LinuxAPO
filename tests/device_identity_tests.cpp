@@ -112,7 +112,51 @@ int main() {
     return 1;
   }
 
+  Devices defaultSinks;
+  defaultSinks.sinks.push_back(
+      AudioDevice{57, "sink.default", "Default output", 2, 48000, {}});
+  defaultSinks.sinks.push_back(
+      AudioDevice{58, "sink.other", "Other output", 6, 96000, {}});
+  markDefaultPlaybackSink(defaultSinks, std::string("sink.default"));
+  if (defaultSinks.sinks[0].isDefault != std::optional<bool>(true) ||
+      defaultSinks.sinks[1].isDefault != std::optional<bool>(false)) {
+    std::cerr << "PipeWire default sink was not mapped to playback nodes\n";
+    return 1;
+  }
+  markDefaultPlaybackSink(defaultSinks, std::nullopt);
+  if (defaultSinks.sinks[0].isDefault.has_value() ||
+      defaultSinks.sinks[1].isDefault.has_value()) {
+    std::cerr << "missing default-sink metadata was not kept unknown\n";
+    return 1;
+  }
+  defaultSinks.sinks.push_back(
+      AudioDevice{59, "sink.renamed", "Renamed output", 2, 48000, identity});
+  const std::string oldSinkName = "sink.old-name";
+  const std::string stableSink = "device.serial=USB-serial-42";
+  if (findSelectedSink(defaultSinks, oldSinkName, stableSink) !=
+          &defaultSinks.sinks[2] ||
+      !isSelectedDevice(defaultSinks.sinks[2], oldSinkName, stableSink)) {
+    std::cerr
+        << "saved stable output identity did not recover a renamed sink\n";
+    return 1;
+  }
+  Devices ambiguousSinks;
+  ambiguousSinks.sinks.push_back(defaultSinks.sinks[2]);
+  ambiguousSinks.sinks.push_back(AudioDevice{
+      60, "sink.duplicate", "Duplicate output", 2, 48000, identity});
+  bool rejectedAmbiguousSink = false;
+  try {
+    (void)findSelectedSink(ambiguousSinks, oldSinkName, stableSink);
+  } catch (const std::runtime_error &) {
+    rejectedAmbiguousSink = true;
+  }
+  if (!rejectedAmbiguousSink) {
+    std::cerr << "ambiguous stable output identity was not rejected\n";
+    return 1;
+  }
+
   std::cout
       << "device identity/default metadata, renamed-node recovery, legacy "
-         "fallback, unknown default state, and ambiguity tests passed\n";
+         "fallback, source/sink selection and default state, and ambiguity "
+         "tests passed\n";
 }

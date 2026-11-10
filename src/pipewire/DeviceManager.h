@@ -18,6 +18,7 @@ struct AudioPort {
 };
 struct Devices {
   std::vector<AudioDevice> sources;
+  std::vector<AudioDevice> sinks;
   std::vector<AudioPort> ports;
 };
 inline void
@@ -27,6 +28,15 @@ markDefaultCaptureSource(Devices &devices,
   for (auto &device : devices.sources)
     device.isDefault =
         known ? std::optional<bool>(device.name == *defaultSourceName)
+              : std::nullopt;
+}
+inline void
+markDefaultPlaybackSink(Devices &devices,
+                        const std::optional<std::string> &defaultSinkName) {
+  const bool known = defaultSinkName && !defaultSinkName->empty();
+  for (auto &device : devices.sinks)
+    device.isDefault =
+        known ? std::optional<bool>(device.name == *defaultSinkName)
               : std::nullopt;
 }
 Devices enumerateDevices();

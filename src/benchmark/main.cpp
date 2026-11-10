@@ -169,6 +169,9 @@ int main(int argc, char **argv) {
               << bufferPayload.totalBytes()
               << ",\"filter_configuration_scratch_bytes\":"
               << bufferPayload.filterConfigurationScratchBytes
+              << ",\"iir_filter_bytes\":" << bufferPayload.iirFilterBytes
+              << ",\"convolution_estimated_bytes\":"
+              << bufferPayload.convolutionEstimatedBytes
               << ",\"eapo_delay_ring_bytes\":"
               << bufferPayload.eapoDelayRingBytes
               << ",\"pdc_ring_capacity_bytes\":"

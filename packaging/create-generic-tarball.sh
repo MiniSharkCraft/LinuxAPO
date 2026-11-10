@@ -28,15 +28,36 @@ if [[ -e "$archive_path" ]]; then
   exit 2
 fi
 
-stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/skyapo-release-stage.XXXXXXXX")
-archive_stage=$(mktemp -d "$output_dir/.skyapo-release-output.XXXXXXXX")
-temporary_archive="$archive_stage/$archive_name"
+temp_root=${SKYAPO_TEMP_DIRECTORY:-}
+if [[ -z "$temp_root" && -f "$build_dir/CMakeCache.txt" ]]; then
+  temp_root=$(sed -n \
+    's/^SKYAPO_TEST_TEMP_DIRECTORY:PATH=//p' "$build_dir/CMakeCache.txt" | head -n 1)
+fi
+temp_root=${temp_root:-"$build_dir/tmp"}
+mkdir -p -- "$temp_root"
+export TMPDIR="$temp_root"
+stage_dir=$(mktemp -d "$temp_root/skyapo-release-stage.XXXXXXXX")
+archive_stage=
 cleanup() {
-  rm -rf -- "$stage_dir"
-  rm -rf -- "$archive_stage"
+  local status=$?
+  if ((status == 0)); then
+    rm -rf -- "$stage_dir"
+    if [[ -n "$archive_stage" ]]; then
+      rm -rf -- "$archive_stage"
+    fi
+  else
+    printf 'generic archive failed; temporary staging retained for diagnosis:\n  %s\n' \
+      "$stage_dir" >&2
+    if [[ -n "$archive_stage" ]]; then
+      printf '  %s\n' "$archive_stage" >&2
+    fi
+  fi
+  return "$status"
 }
 trap cleanup EXIT
 
+archive_stage=$(mktemp -d "$output_dir/.skyapo-release-output.XXXXXXXX")
+temporary_archive="$archive_stage/$archive_name"
 payload_name="skyapo-${version}-linux-x86_64"
 install_root="$stage_dir/$payload_name"
 mkdir -p -- "$install_root"

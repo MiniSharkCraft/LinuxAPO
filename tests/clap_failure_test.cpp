@@ -1,5 +1,6 @@
 #include "CLAPPluginHost.h"
 #include "Engine.h"
+#include "TestTemp.h"
 
 #include <array>
 #include <cstdlib>
@@ -8,21 +9,21 @@
 #include <unistd.h>
 
 static bool engineReportsFailure() {
-  char path[] = "/tmp/skyapo-clap-failure-XXXXXX";
-  const int fd = mkstemp(path);
+  std::string path = skyapo::test::temporaryPattern("skyapo-clap-failure-");
+  const int fd = mkstemp(path.data());
   if (fd < 0)
     return false;
   const std::string config = "Plugin: CLAP org.skyapo.test.error-once\n";
   const auto written = write(fd, config.data(), config.size());
   close(fd);
   if (written != static_cast<ssize_t>(config.size())) {
-    unlink(path);
+    unlink(path.c_str());
     return false;
   }
 
   Engine engine(48000, 2, 64, {L"L", L"R"});
   engine.loadConfig(path);
-  unlink(path);
+  unlink(path.c_str());
   std::array<float, 128> block{};
   block.fill(0.25f);
   engine.process(block.data(), 64);

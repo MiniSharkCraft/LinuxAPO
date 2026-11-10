@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(SKYAPO_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SKYAPO_BUILD_UI "Build the Qt configuration editor when Qt 6 is available" ON)
+option(SKYAPO_BUNDLE_BRANDED_APP_ICON
+  "Bundle the supplied branded app icon only when redistribution rights are confirmed" OFF)
 option(SKYAPO_ENABLE_FFTW3F "Enable upstream GraphicEQ and convolution through FFTW3f" ON)
 option(SKYAPO_ENABLE_MUPARSER "Enable basic EAPO conditional expressions when muParser is available" ON)
 option(SKYAPO_ENABLE_MUPARSERX "Fetch and use Equalizer APO's legacy MuParserX 3.0.1 parser" ON)
@@ -22,6 +24,37 @@ option(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS
 option(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS
   "Enable opt-in recovery tests using the current user's systemd manager" OFF)
 option(SKYAPO_ENABLE_CPACK "Enable DEB and RPM generators for CPack" ON)
+set(SKYAPO_TEST_TEMP_DIRECTORY "${CMAKE_BINARY_DIR}/tmp" CACHE PATH
+  "Disk-backed temporary directory supplied to CTest processes")
+file(MAKE_DIRECTORY "${SKYAPO_TEST_TEMP_DIRECTORY}")
+
+if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/docs/UI_LICENSE_AUDIT.md"
+    _skyapo_icon_rights_marker
+    REGEX "^Release artwork redistribution status: CLEARED$")
+  if(NOT _skyapo_icon_rights_marker)
+    message(FATAL_ERROR
+      "Branded app artwork can only be bundled after redistribution rights "
+      "are documented as CLEARED in docs/UI_LICENSE_AUDIT.md")
+  endif()
+  foreach(_skyapo_icon_size 16 24 32 48 64 128 256 512)
+    if(NOT EXISTS
+       "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps/skyapo.png")
+      message(FATAL_ERROR
+        "Branded app icon size ${_skyapo_icon_size} is missing; the opt-in "
+        "requires all source PNGs to be present")
+    endif()
+  endforeach()
+  set(SKYAPO_DESKTOP_ICON_LINE "Icon=skyapo")
+  set(SKYAPO_DESKTOP_ICON_TEST_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/256x256/apps/skyapo.png")
+else()
+  set(SKYAPO_DESKTOP_ICON_LINE "")
+  set(SKYAPO_DESKTOP_ICON_TEST_PATH "")
+endif()
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/packaging")
+configure_file(packaging/skyapo.desktop.in
+  "${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop" @ONLY)
 
 if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS AND NOT SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   message(FATAL_ERROR
@@ -191,7 +224,9 @@ if(TARGET PkgConfig::SNDFILE)
   target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::SNDFILE)
 endif()
 if(FFTW3F_FOUND)
-  target_link_libraries(skyapo-eapo-dsp PRIVATE PkgConfig::FFTW3F)
+  # Public DSP headers include FFTW types through ConvolutionFilter.h, so
+  # consumers (notably skyapo-core) must inherit the imported include path.
+  target_link_libraries(skyapo-eapo-dsp PUBLIC PkgConfig::FFTW3F)
 endif()
 
 add_library(skyapo-core STATIC src/core/Engine.cpp
@@ -206,6 +241,7 @@ target_include_directories(skyapo-core
 target_compile_definitions(skyapo-core PRIVATE __forceinline=inline)
 target_compile_definitions(skyapo-core PRIVATE SKYAPO_VERSION="${PROJECT_VERSION}")
 target_link_libraries(skyapo-core PUBLIC skyapo-eapo-dsp)
+target_link_libraries(skyapo-core PRIVATE PkgConfig::SNDFILE)
 if(SKYAPO_HAVE_MUPARSERX)
   target_link_libraries(skyapo-core PUBLIC skyapo-muparserx)
   target_compile_definitions(skyapo-core PRIVATE SKYAPO_HAVE_MUPARSERX=1 _UNICODE)
@@ -300,6 +336,7 @@ if(PIPEWIRE_FOUND)
   add_library(skyapo-pipewire STATIC
     src/pipewire/DeviceManager.cpp
     src/pipewire/DefaultSinkVolumeMonitor.cpp
+    src/pipewire/PlaybackGraph.cpp
     src/pipewire/Runtime.cpp
     src/platform/ConfigWatcher.cpp
     src/platform/RealtimeAudit.cpp)
@@ -317,16 +354,25 @@ if(NOT PIPEWIRE_FOUND)
 endif()
 target_link_libraries(skyapod PRIVATE skyapo-pipewire)
 target_link_options(skyapod PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=posix_memalign)
+if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  target_compile_definitions(skyapod PRIVATE SKYAPO_PIPEWIRE_E2E_TESTING=1)
+endif()
 
 enable_testing()
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-  add_test(NAME skyapo-desktop-metadata
+  add_test(NAME skyapo-app-icon-rights-gate
     COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop_metadata_test.py
-      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.desktop
-      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapo.svg
-      ${CMAKE_CURRENT_SOURCE_DIR}/packaging/org.skyapo.SkyAPO.metainfo.xml)
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/app_icon_license_gate_test.py
+      ${CMAKE_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR})
+  if(SKYAPO_BUILD_UI)
+    add_test(NAME skyapo-desktop-metadata
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop_metadata_test.py
+        ${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop
+        "${SKYAPO_DESKTOP_ICON_TEST_PATH}"
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/org.skyapo.SkyAPO.metainfo.xml)
+  endif()
   add_test(NAME skyapo-diagnostics-json
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/diagnostics_json_test.py
@@ -335,10 +381,14 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_check_json_test.py
       $<TARGET_FILE:skyapo>)
+  set(_skyapo_upstream_config_args)
+  if(SKYAPO_HAVE_MUPARSERX)
+    list(APPEND _skyapo_upstream_config_args --expressions-enabled)
+  endif()
   add_test(NAME skyapo-upstream-config-compatibility
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream_config_compatibility_test.py
-      $<TARGET_FILE:skyapo> ${EAPO})
+      $<TARGET_FILE:skyapo> ${EAPO} ${_skyapo_upstream_config_args})
   add_test(NAME skyapo-cli-basics
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_basics_test.py
@@ -369,6 +419,9 @@ add_test(NAME skyapo-config-watcher COMMAND skyapo-config-watcher-tests)
 add_test(NAME skyapo-default-sink-volume
   COMMAND skyapo-default-sink-volume-tests)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME skyapo-pipewire-dump-parser
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_dump_parser_test.py)
   add_test(NAME skyapo-install-license-notices
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_license_notices_test.py
@@ -503,7 +556,12 @@ if(SKYAPO_BUILD_UI)
       src/ui/ChannelCopyEditor.cpp src/ui/ChannelCopyEditor.h
       src/ui/IIRFilterEditor.cpp src/ui/IIRFilterEditor.h
       src/ui/ResponseAnalysis.h)
-    set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      target_sources(skyapo-ui PRIVATE src/ui/resources/skyapo_app_icon.qrc)
+      target_compile_definitions(skyapo-ui PRIVATE
+        SKYAPO_HAVE_BRANDED_APP_ICON=1)
+    endif()
+    set_target_properties(skyapo-ui PROPERTIES AUTOMOC ON AUTORCC ON)
     target_include_directories(skyapo-ui PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui PRIVATE __forceinline=inline)
     target_link_libraries(skyapo-ui PRIVATE skyapo-eapo-editor)
@@ -516,7 +574,13 @@ if(SKYAPO_BUILD_UI)
       src/ui/ConvolutionEditor.h src/ui/ChannelCopyEditor.cpp
       src/ui/ChannelCopyEditor.h src/ui/IIRFilterEditor.cpp
       src/ui/IIRFilterEditor.h src/ui/ResponseAnalysis.h)
-    set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      target_sources(skyapo-ui-tests PRIVATE
+        src/ui/resources/skyapo_app_icon.qrc)
+      target_compile_definitions(skyapo-ui-tests PRIVATE
+        SKYAPO_HAVE_BRANDED_APP_ICON=1)
+    endif()
+    set_target_properties(skyapo-ui-tests PROPERTIES AUTOMOC ON AUTORCC ON)
     target_include_directories(skyapo-ui-tests PRIVATE src/ui)
     target_include_directories(skyapo-ui-tests PRIVATE ${SKYAPO_EDITOR})
     target_compile_definitions(skyapo-ui-tests PRIVATE __forceinline=inline)
@@ -527,6 +591,9 @@ if(SKYAPO_BUILD_UI)
     target_link_libraries(skyapo-ui-tests PRIVATE skyapo-eapo-editor)
     add_test(NAME skyapo-ui-editor COMMAND skyapo-ui-tests
       $<TARGET_FILE:skyapo-ui-test-cli> $<TARGET_FILE:skyapo>)
+    add_test(NAME skyapo-ui-device-selector-polkit
+      COMMAND skyapo-ui-tests --device-selector-polkit
+        $<TARGET_FILE:skyapo-ui-test-cli>)
     if(Python3_Interpreter_FOUND)
       add_test(NAME skyapo-ui-resource-audit
         COMMAND ${Python3_EXECUTABLE}
@@ -534,13 +601,33 @@ if(SKYAPO_BUILD_UI)
           ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW3F_FOUND})
     endif()
     set_tests_properties(skyapo-ui-editor PROPERTIES
-      ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+      ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic;QT_IM_MODULE=compose")
+    set_tests_properties(skyapo-ui-device-selector-polkit PROPERTIES
+      ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic;QT_IM_MODULE=compose"
+      TIMEOUT 30)
+    if(SKYAPO_SANITIZERS)
+      set_property(TEST skyapo-ui-editor APPEND PROPERTY ENVIRONMENT
+        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+      set_property(TEST skyapo-ui-device-selector-polkit APPEND PROPERTY
+        ENVIRONMENT
+        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp")
+    endif()
 
     install(TARGETS skyapo-ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(FILES packaging/skyapo.desktop
+    install(FILES packaging/org.linuxapo.device-selector.policy
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/packaging/skyapo.desktop"
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
-    install(FILES packaging/skyapo.svg
-      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps)
+    if(SKYAPO_BUNDLE_BRANDED_APP_ICON)
+      foreach(_skyapo_icon_size 16 24 32 48 64 128 256 512)
+        install(FILES
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/resources/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps/skyapo.png"
+          DESTINATION
+            "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${_skyapo_icon_size}x${_skyapo_icon_size}/apps")
+      endforeach()
+    endif()
     install(FILES packaging/org.skyapo.SkyAPO.metainfo.xml
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo)
   else()
@@ -642,6 +729,10 @@ add_test(NAME skyapo-realtime-safety COMMAND skyapo-realtime-safety-tests)
 add_executable(skyapo-node-id-parser-tests tests/node_id_parser_tests.cpp)
 target_include_directories(skyapo-node-id-parser-tests PRIVATE src/pipewire)
 add_test(NAME skyapo-node-id-parser COMMAND skyapo-node-id-parser-tests)
+add_executable(skyapo-output-device-settings-tests
+  tests/settings_output_device_test.cpp)
+add_test(NAME skyapo-output-device-settings
+  COMMAND skyapo-output-device-settings-tests)
 if(PIPEWIRE_FOUND)
   add_executable(skyapo-device-identity-tests tests/device_identity_tests.cpp)
   target_link_libraries(skyapo-device-identity-tests PRIVATE PkgConfig::PIPEWIRE)
@@ -821,6 +912,10 @@ add_executable(skyapo-pipewire-lifetime tests/pipewire_lifetime.cpp)
 target_link_libraries(skyapo-pipewire-lifetime PRIVATE PkgConfig::PIPEWIRE)
 add_executable(skyapo-pipewire-test-source tests/pipewire_test_source.cpp)
 target_link_libraries(skyapo-pipewire-test-source PRIVATE PkgConfig::PIPEWIRE)
+add_executable(skyapo-pipewire-test-playback-stream
+  tests/pipewire_test_playback_stream.cpp)
+target_link_libraries(skyapo-pipewire-test-playback-stream PRIVATE
+  PkgConfig::PIPEWIRE)
 add_executable(skyapo-pipewire-test-consumer tests/pipewire_test_consumer.cpp)
 target_link_libraries(skyapo-pipewire-test-consumer PRIVATE PkgConfig::PIPEWIRE)
 add_executable(skyapo-default-sink-volume-tests
@@ -835,10 +930,20 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
   find_program(SKYAPO_PW_CLI_EXECUTABLE pw-cli REQUIRED)
   find_program(SKYAPO_PW_DUMP_EXECUTABLE pw-dump REQUIRED)
   find_program(SKYAPO_PW_METADATA_EXECUTABLE pw-metadata REQUIRED)
+  find_program(SKYAPO_WIREPLUMBER_EXECUTABLE wireplumber)
+  if(SKYAPO_WIREPLUMBER_EXECUTABLE)
+    find_program(SKYAPO_DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
+  endif()
   if(SKYAPO_ENABLE_SYSTEMD_E2E_TESTS)
     find_program(SKYAPO_SYSTEMD_RUN_EXECUTABLE systemd-run REQUIRED)
     find_program(SKYAPO_SYSTEMCTL_EXECUTABLE systemctl REQUIRED)
   endif()
+  add_library(skyapo-pipewire-fault-preload SHARED
+    tests/pipewire_filter_fault_preload.cpp)
+  target_link_libraries(skyapo-pipewire-fault-preload PRIVATE
+    PkgConfig::PIPEWIRE ${CMAKE_DL_LIBS})
+  set_target_properties(skyapo-pipewire-fault-preload PROPERTIES
+    PREFIX "" OUTPUT_NAME "skyapo-pipewire-fault-preload")
   target_compile_definitions(skyapo-pipewire PRIVATE
     SKYAPO_PIPEWIRE_E2E_TESTING=1)
   find_file(SKYAPO_PIPEWIRE_CONFIG pipewire.conf
@@ -863,6 +968,327 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         PROPERTIES TIMEOUT 60 LABELS "pipewire;integration")
     endforeach()
   endforeach()
+  add_test(NAME skyapo-pipewire-e2e-playback-preamp
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      playback-preamp)
+  set_tests_properties(skyapo-pipewire-e2e-playback-preamp PROPERTIES
+    TIMEOUT 60 LABELS "pipewire;integration;playback")
+  add_test(NAME skyapo-pipewire-e2e-playback-existing-target-link
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      playback-preamp)
+  set_tests_properties(skyapo-pipewire-e2e-playback-existing-target-link
+    PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;playback;recovery"
+      ENVIRONMENT "SKYAPO_TEST_PLAYBACK_LINK_ALREADY_EXISTS=1")
+  if(SKYAPO_WIREPLUMBER_EXECUTABLE)
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-configured-write-failure
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-configured-write-failure
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-configured-write-failure
+      PROPERTIES TIMEOUT 75
+        LABELS "pipewire;integration;playback;wireplumber;recovery"
+        ENVIRONMENT
+          "SKYAPO_TEST_FAIL_CONFIGURED_DEFAULT_WRITE=1")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(skyapo-pipewire-e2e-playback-wireplumber
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;playback;wireplumber"
+      ENVIRONMENT
+        "SKYAPO_TEST_FILTER_FAULT_LIBRARY=$<TARGET_FILE:skyapo-pipewire-fault-preload>")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-link-error
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-link-error
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(skyapo-pipewire-e2e-playback-wireplumber-link-error
+      PROPERTIES TIMEOUT 75
+        LABELS "pipewire;integration;playback;wireplumber;recovery"
+        ENVIRONMENT
+          "SKYAPO_TEST_FILTER_FAULT_LIBRARY=$<TARGET_FILE:skyapo-pipewire-fault-preload>")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-quantum-variation
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-quantum-variation
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(skyapo-pipewire-e2e-playback-wireplumber-quantum-variation
+      PROPERTIES TIMEOUT 90
+      LABELS "pipewire;integration;playback;realtime;quantum;reconfiguration")
+    if(SKYAPO_HAVE_MUPARSERX)
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-stage
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-stage
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(skyapo-pipewire-e2e-playback-wireplumber-stage
+        PROPERTIES TIMEOUT 75
+        LABELS "pipewire;integration;playback;config;wireplumber")
+    endif()
+    foreach(playback_control IN ITEMS volume mute)
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-${playback_control}
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-${playback_control}
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-${playback_control}
+        PROPERTIES TIMEOUT 90
+        LABELS "pipewire;integration;playback;wireplumber")
+    endforeach()
+    foreach(playback_layout IN ITEMS surround51 surround71)
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-${playback_layout}
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-${playback_layout}
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-${playback_layout}
+        PROPERTIES TIMEOUT 120
+        LABELS "pipewire;integration;playback;wireplumber;multichannel")
+    endforeach()
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-target-recovery
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-target-recovery
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-target-recovery
+      PROPERTIES TIMEOUT 120
+      LABELS "pipewire;integration;playback;wireplumber;recovery")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-target-recovery-stable-id
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-target-recovery-stable-id
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-target-recovery-stable-id
+      PROPERTIES TIMEOUT 120
+      LABELS "pipewire;integration;playback;wireplumber;recovery")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-startup-recovery
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-startup-recovery
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-startup-recovery
+      PROPERTIES TIMEOUT 90
+      LABELS "pipewire;integration;playback;wireplumber;recovery")
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-server-restart
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-server-restart
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+    set_tests_properties(
+      skyapo-pipewire-e2e-playback-wireplumber-server-restart
+      PROPERTIES TIMEOUT 150
+      LABELS "pipewire;integration;playback;wireplumber;recovery")
+    set(output_switch_ui_args)
+    if(TARGET skyapo-ui-tests)
+      list(APPEND output_switch_ui_args $<TARGET_FILE:skyapo-ui-tests>)
+    endif()
+    add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-output-switch
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        playback-wireplumber-output-switch
+        ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+        $<TARGET_FILE:skyapo-pipewire-test-playback-stream>
+        ${output_switch_ui_args})
+    set_tests_properties(skyapo-pipewire-e2e-playback-wireplumber-output-switch
+      PROPERTIES TIMEOUT 120
+      LABELS "pipewire;integration;playback;wireplumber;device-switch;recovery"
+      ENVIRONMENT
+        "SKYAPO_TEST_FILTER_FAULT_LIBRARY=$<TARGET_FILE:skyapo-pipewire-fault-preload>")
+  endif()
+  if(FFTW3F_FOUND)
+    add_test(NAME skyapo-pipewire-e2e-convolution
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+        convolution)
+    set_tests_properties(skyapo-pipewire-e2e-convolution
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;convolution")
+  endif()
+  add_test(NAME skyapo-pipewire-e2e-callback-exception
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      callback-exception)
+  set_tests_properties(skyapo-pipewire-e2e-callback-exception
+    PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;failure;recovery")
+  add_test(NAME skyapo-pipewire-e2e-callback-transition-exception
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+      ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      ${SKYAPO_PW_CLI_EXECUTABLE}
+      ${SKYAPO_PW_DUMP_EXECUTABLE}
+      $<TARGET_FILE:skyapod>
+      $<TARGET_FILE:skyapo>
+      $<TARGET_FILE:skyapo-pipewire-test-source>
+      $<TARGET_FILE:skyapo-pipewire-test-consumer>
+      ${SKYAPO_PIPEWIRE_CONFIG}
+      ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+      callback-transition-exception)
+  set_tests_properties(skyapo-pipewire-e2e-callback-transition-exception
+    PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;failure;recovery")
   add_test(NAME skyapo-pipewire-e2e-source-consumer-latency
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1061,6 +1487,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     PROPERTIES TIMEOUT 100 LABELS "pipewire;integration;recovery"
       ENVIRONMENT "SKYAPO_PW_METADATA=${SKYAPO_PW_METADATA_EXECUTABLE}")
   if(SKYAPO_TEST_CLAP_DIR)
+    add_test(NAME skyapo-pipewire-e2e-clap-process-failure
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/clap_failure.txt
+        clap-process-failure)
+    set_tests_properties(skyapo-pipewire-e2e-clap-process-failure
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin;failure"
+      ENVIRONMENT
+        "CLAP_PATH=${SKYAPO_TEST_CLAP_DIR};SKYAPO_CLAP_PATHS_ONLY=1")
     add_test(NAME skyapo-pipewire-e2e-plugin-bypass
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1163,6 +1606,22 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     set_tests_properties(skyapo-pipewire-e2e-lv2-live-parameter
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
       ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-state-restart
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_realtime.txt
+        lv2-state-restart)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-state-restart
+      PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;plugin;state;recovery"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
     add_test(NAME skyapo-pipewire-e2e-lv2-dynamic-latency
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1195,8 +1654,133 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
     set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-final
       PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency;pdc"
       ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-pdc-recovery
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_pdc_final.txt
+        lv2-pdc-recovery)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-recovery
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency;pdc;recovery"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH};SKYAPO_PW_METADATA=${SKYAPO_PW_METADATA_EXECUTABLE}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-pdc-config-commit-race
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_pdc_final.txt
+        lv2-pdc-config-commit-race)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-config-commit-race
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency;pdc;recovery"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    add_test(NAME skyapo-pipewire-e2e-lv2-pdc-format-event-order
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_pdc_final.txt
+        lv2-pdc-format-event-order)
+    set_tests_properties(skyapo-pipewire-e2e-lv2-pdc-format-event-order
+      PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;plugin;latency;pdc;recovery;race"
+      ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+    if(SKYAPO_WIREPLUMBER_EXECUTABLE)
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-lv2-latency
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/lv2_latency_realtime.txt
+          playback-wireplumber-lv2-latency
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-lv2-latency
+        PROPERTIES TIMEOUT 90
+          LABELS "pipewire;integration;playback;wireplumber;plugin;latency;pdc"
+          ENVIRONMENT "LV2_PATH=${SKYAPO_TEST_LV2_PATH}")
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-pdc-recovery
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-pdc-recovery
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-pdc-recovery
+        PROPERTIES TIMEOUT 120
+          LABELS "pipewire;integration;playback;wireplumber;plugin;latency;pdc;recovery"
+          ENVIRONMENT
+            "LV2_PATH=${SKYAPO_TEST_LV2_PATH};SKYAPO_PW_METADATA=${SKYAPO_PW_METADATA_EXECUTABLE}")
+    endif()
   endif()
   if(SKYAPO_HAVE_VST3 AND TARGET skyapo-test-vst3)
+    add_test(NAME skyapo-pipewire-e2e-vst3-process-failure
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_gain.txt
+        vst3-process-failure)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-process-failure
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin;failure"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-vst3-exception-failure
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_gain.txt
+        vst3-exception-failure)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-exception-failure
+      PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin;failure"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
     add_test(NAME skyapo-pipewire-e2e-vst3-bypass
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1231,6 +1815,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       PROPERTIES TIMEOUT 60 LABELS "pipewire;integration;plugin"
       ENVIRONMENT
         "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-vst3-state-restart
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_realtime_chain.txt
+        vst3-state-restart)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-state-restart
+      PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;plugin;state;recovery"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
     add_test(NAME skyapo-pipewire-e2e-vst3-dynamic-latency
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
@@ -1246,6 +1847,23 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
         vst3-latency-change)
     set_tests_properties(skyapo-pipewire-e2e-vst3-dynamic-latency
       PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency"
+      ENVIRONMENT
+        "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
+    add_test(NAME skyapo-pipewire-e2e-vst3-nonstandard-latency-exception
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+        ${SKYAPO_PIPEWIRE_EXECUTABLE}
+        ${SKYAPO_PW_CLI_EXECUTABLE}
+        ${SKYAPO_PW_DUMP_EXECUTABLE}
+        $<TARGET_FILE:skyapod>
+        $<TARGET_FILE:skyapo>
+        $<TARGET_FILE:skyapo-pipewire-test-source>
+        $<TARGET_FILE:skyapo-pipewire-test-consumer>
+        ${SKYAPO_PIPEWIRE_CONFIG}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/vst3_latency_change.txt
+        vst3-latency-nonstd-failure)
+    set_tests_properties(skyapo-pipewire-e2e-vst3-nonstandard-latency-exception
+      PROPERTIES TIMEOUT 75 LABELS "pipewire;integration;plugin;latency;failure"
       ENVIRONMENT
         "VST3_PATH=${CMAKE_CURRENT_BINARY_DIR}/test-plugins;SKYAPO_VST3_PATHS_ONLY=1")
   endif()
@@ -1312,7 +1930,143 @@ if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
       PROPERTIES TIMEOUT 90 LABELS "pipewire;integration;recovery;systemd"
       ENVIRONMENT
         "SKYAPO_SYSTEMD_UNIT_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapod.service.in")
+    if(SKYAPO_WIREPLUMBER_EXECUTABLE)
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-systemd-crash-restart
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-systemd-crash-restart
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-systemd-crash-restart
+        PROPERTIES TIMEOUT 120
+          LABELS "pipewire;integration;playback;wireplumber;recovery;systemd"
+          ENVIRONMENT
+            "SKYAPO_SYSTEMD_UNIT_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapod.service.in")
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-systemd-user-override
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-systemd-crash-user-override
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-systemd-user-override
+        PROPERTIES TIMEOUT 120
+          LABELS "pipewire;integration;playback;wireplumber;recovery;systemd"
+          ENVIRONMENT
+            "SKYAPO_SYSTEMD_UNIT_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/packaging/skyapod.service.in")
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-recovery-write-failure
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-recovery-write-failure
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-recovery-write-failure
+        PROPERTIES TIMEOUT 120
+          LABELS "pipewire;integration;playback;wireplumber;recovery")
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-route-confirmation-race
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-route-confirmation-race
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-route-confirmation-race
+        PROPERTIES TIMEOUT 120
+          LABELS "pipewire;integration;playback;wireplumber;recovery")
+      add_test(NAME skyapo-pipewire-e2e-playback-wireplumber-route-sync-failure
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-route-sync-failure
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-route-sync-failure
+        PROPERTIES TIMEOUT 75
+          LABELS "pipewire;integration;playback;wireplumber;recovery"
+          ENVIRONMENT "SKYAPO_TEST_FAIL_DEFAULT_ROUTE_SYNC_ONCE=1")
+      add_test(
+        NAME skyapo-pipewire-e2e-playback-wireplumber-route-confirmation-timeout
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipewire_e2e_test.py
+          ${SKYAPO_PIPEWIRE_EXECUTABLE}
+          ${SKYAPO_PW_CLI_EXECUTABLE}
+          ${SKYAPO_PW_DUMP_EXECUTABLE}
+          $<TARGET_FILE:skyapod>
+          $<TARGET_FILE:skyapo>
+          $<TARGET_FILE:skyapo-pipewire-test-source>
+          $<TARGET_FILE:skyapo-pipewire-test-consumer>
+          ${SKYAPO_PIPEWIRE_CONFIG}
+          ${CMAKE_CURRENT_SOURCE_DIR}/examples/preamp.txt
+          playback-wireplumber-route-confirmation-timeout
+          ${SKYAPO_WIREPLUMBER_EXECUTABLE}
+          $<TARGET_FILE:skyapo-pipewire-test-playback-stream>)
+      set_tests_properties(
+        skyapo-pipewire-e2e-playback-wireplumber-route-confirmation-timeout
+        PROPERTIES TIMEOUT 75
+          LABELS "pipewire;integration;playback;wireplumber;recovery"
+          ENVIRONMENT "SKYAPO_TEST_SUPPRESS_DEFAULT_ROUTE_CONFIRMATION=1")
+    endif()
   endif()
+endif()
+
+if(SKYAPO_ENABLE_PIPEWIRE_E2E_TESTS)
+  add_test(NAME skyapo-pipewire-e2e-playback-native-controls
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/playback_native_controls_test.py
+      --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+      --pipewire-config ${SKYAPO_PIPEWIRE_CONFIG}
+      --pipewire ${SKYAPO_PIPEWIRE_EXECUTABLE}
+      --pw-cli ${SKYAPO_PW_CLI_EXECUTABLE}
+      --pw-dump ${SKYAPO_PW_DUMP_EXECUTABLE})
+  set_tests_properties(skyapo-pipewire-e2e-playback-native-controls PROPERTIES
+    TIMEOUT 120 LABELS "pipewire;integration;playback;volume")
 endif()
 
 # PipeWire's pw_context_load_module currently retains allocations from external
@@ -1332,10 +2086,32 @@ endif()
 
 configure_file(packaging/skyapod.service.in
   ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service @ONLY)
+
+# Test helpers and their child processes must not fill a small /tmp tmpfs.
+# Keep existing per-test environment (plugin paths, sanitizer settings, etc.)
+# while making the build-local disk-backed location the common temp default.
+get_property(_skyapo_registered_tests DIRECTORY PROPERTY TESTS)
+foreach(_skyapo_test IN LISTS _skyapo_registered_tests)
+  get_property(_skyapo_test_environment TEST ${_skyapo_test} PROPERTY ENVIRONMENT)
+  if(NOT _skyapo_test_environment)
+    set(_skyapo_test_environment)
+  endif()
+  list(FILTER _skyapo_test_environment EXCLUDE
+    REGEX "^(TMPDIR|SKYAPO_TEST_TEMP_DIRECTORY)=")
+  list(APPEND _skyapo_test_environment
+    "TMPDIR=${SKYAPO_TEST_TEMP_DIRECTORY}"
+    "SKYAPO_TEST_TEMP_DIRECTORY=${SKYAPO_TEST_TEMP_DIRECTORY}")
+  set_tests_properties(${_skyapo_test} PROPERTIES
+    ENVIRONMENT "${_skyapo_test_environment}")
+endforeach()
+
 install(TARGETS skyapo skyapod skyapo-render skyapo-bench
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/skyapod.service
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user)
+  # systemd unit directories are architecture-independent. Using
+  # CMAKE_INSTALL_LIBDIR here can incorrectly place the unit under a
+  # multiarch path such as lib/x86_64-linux-gnu/systemd/user.
+  DESTINATION lib/systemd/user)
 install(FILES docs/man/skyapo.1 docs/man/skyapod.1 docs/man/skyapo-bench.1
   DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 install(FILES README.md ROADMAP.md CHANGELOG.md docs/THIRD_PARTY_NOTICES.md
@@ -1372,6 +2148,7 @@ if(SKYAPO_HAVE_MUPARSERX)
 endif()
 
 if(SKYAPO_ENABLE_CPACK)
+  set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
   set(CPACK_PACKAGE_NAME "skyapo")
   set(CPACK_PACKAGE_VENDOR "SkyAPO contributors")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
@@ -1403,6 +2180,7 @@ if(SKYAPO_ENABLE_CPACK)
   endif()
   if(SKYAPO_BUILD_UI AND Qt6Widgets_FOUND)
     list(APPEND _skyapo_debian_dependencies "libqt6widgets6")
+    list(APPEND _skyapo_debian_dependencies "polkitd")
   endif()
   list(JOIN _skyapo_debian_dependencies ", " CPACK_DEBIAN_PACKAGE_DEPENDS)
   set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
@@ -1413,6 +2191,9 @@ if(SKYAPO_ENABLE_CPACK)
   set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
   set(CPACK_RPM_PACKAGE_RELEASE "1")
   set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
+  if(SKYAPO_BUILD_UI AND Qt6Widgets_FOUND)
+    set(CPACK_RPM_PACKAGE_REQUIRES "polkit")
+  endif()
   set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
   include(CPack)
 endif()

@@ -176,6 +176,8 @@ The following results were recorded for the published 0.9.0 beta candidate on th
 
 The current development tree has since expanded the test matrix. On 2026-10-14, the source snapshot being prepared for synchronization built locally and passed CTest **66/66** (31 private PipeWire integration cases) and ASan/UBSan CTest **67/67** (32 private PipeWire E2Es, including plugin fixtures). One initial sanitizer run missed timestamp markers in the synthetic latency probe while still recording audio; the isolated case then passed 3/3 repeats and a complete sanitizer rerun passed. This timing-sensitive diagnostic remains distinct from total hardware latency. Hosted CI run [38513757741](https://github.com/MiniSharkCraft/LinuxAPO/actions/runs/38513757741) passed on commit `e1add4c`; that run predates the synchronized local changes. These checks do not certify arbitrary devices/plugins or every distribution.
 
+On 2026-10-16, the latest dirty worktree passed full Release CTest **86/86** sequentially (445.38 s; 50 PipeWire E2Es) and ASan/UBSan CTest **87/87** sequentially with LeakSanitizer enabled (487.09 s; 51 PipeWire E2Es). The build trees use different optional test matrices: Release enables systemd crash-restart and disables FST/VST2; ASan enables the FST/VST2 live-parameter and dynamic-latency tests and disables systemd-run. These are local dirty-worktree results, not clean-commit hosted-CI results. They do not replace audible-level playback, physical device-switch/hotplug or distro-install validation.
+
 ## Current limitations and deferred to 1.0.0
 
 - Full Windows Equalizer APO parser, directive, editor and device semantics are not implemented.

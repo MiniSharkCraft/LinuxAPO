@@ -6,6 +6,7 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include "TestTemp.h"
 
 int main(int argc, char **argv) {
   if (argc < 3 || argc > 5)
@@ -17,7 +18,9 @@ int main(int argc, char **argv) {
     return 1;
   }
   const double expectedDb = argc >= 4 ? std::strtod(argv[3], nullptr) : -6.0;
-  const auto stem = "/tmp/skyapo-render-test-" + std::to_string(getpid());
+  const auto stem = skyapo::test::temporaryPath("skyapo-render-test-" +
+                                                std::to_string(getpid()))
+                        .string();
   const auto input = stem + "-in.wav", output = stem + "-out.wav";
   std::string config = argv[2];
   const std::string device = argc == 5 ? argv[4] : "";

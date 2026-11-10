@@ -9,13 +9,69 @@ libraries resolve beside the config; values are normalized to `[0, 1]`.
 is disabled in default builds and release packages pending licensing and
 third-party compatibility review.
 
-Currently implemented using actual upstream filters/processing: `Preamp:`, parametric `Filter:` (`BiQuad`), IIR `Filter:`, `Delay:`, `Channel:`, `Copy:`, `GraphicEQ:`, and `Convolution:` (the latter two require FFTW3f; convolution IR loading is Linux-specific). `Device:` uses the upstream Equalizer APO AND/OR, case-insensitive substring and GUID-matching rules against Linux PipeWire identity text: stable `node.name`, description, and available serial, bus ID and ALSA hints. Semicolon separates OR groups; whitespace-separated terms in a group are ANDed; `all` matches every device. Each Include has its own Device match scope. The daemon supplies the selected device's discovered metadata. To keep validation independent of a live PipeWire server, `skyapo config check` uses only the persisted stable node name; offline render accepts `--device <pipewire-node-name>`. Description/serial-only matches may differ in config-check filter counts from daemon runtime; without device context, only `Device: all` matches. A nonmatching Device section is intentionally filtered out and may produce a valid empty chain. When built with Lilv, `Plugin: LV2 <URI> [symbol=value ...]` inserts a native LV2 plugin with optional input control-port overrides; values must be finite and within the declared port range. `skyapo plugin info <URI>` reports the plugin name and control-port symbols/defaults/ranges. For an active LV2 node, `skyapo plugin set <URI> <symbol-or-name> <value>` changes a writable control for the next processing block; the change is runtime-only and does not rewrite the config file. `Stage:` maps the Linux capture stage to `capture`; `pre-mix` and `post-mix` sections are skipped because the Linux runtime has no playback graph. They are not silently ignored: `skyapo config check` prints a file/line warning (also present in `config check --json`), and daemon status/logs expose it while capture-stage processing continues. A child `Include:` inherits the current stage but its stage changes do not leak back to its parent. Channel selection affects later selected-channel filters; Copy uses upstream assignments and is routed through the upstream `FilterConfiguration` channel map. `Include: path` is expanded by the Linux adapter at its location in the ordered chain; relative paths resolve from the including file, double-quoted paths are accepted (including spaces and `#` characters), nesting is limited to 100 files, and active recursion cycles are diagnosed. Unquoted trailing `#` comments are removed. Child-file parser errors report that child's path and line.
+Currently implemented using actual upstream filters/processing: `Preamp:`,
+parametric `Filter:` (`BiQuad`), IIR `Filter:`, `Delay:`, `Channel:`,
+`Copy:`, `GraphicEQ:`, and `Convolution:` (GraphicEQ and Convolution require
+FFTW3f; convolution IR loading is Linux-specific). `Device:` uses upstream
+Equalizer APO AND/OR, case-insensitive substring, and GUID matching against
+PipeWire identity text: stable `node.name`, description, and available serial,
+bus ID, and ALSA hints. Semicolons separate OR groups; whitespace-separated
+terms in a group are ANDed; `all` matches every device. Each Include has its
+own Device match scope. The daemon supplies discovered device metadata. To
+keep validation independent of a live PipeWire server, `skyapo config check`
+uses only the persisted stable node name; offline render accepts `--device
+<pipewire-node-name>`. Description/serial-only matches may differ in config
+check filter counts from daemon runtime; without device context, only
+`Device: all` matches. A nonmatching Device section is intentionally filtered
+out and may produce a valid empty chain.
+
+The expression variable `stage` reflects the active Linux graph while preserving
+Equalizer APO stage names: the virtual-microphone graph uses `capture`, and the
+system playback graph uses `post-mix` because it processes the mixed PipeWire
+playback stream. Thus `If: stage == "post-mix"` can distinguish playback from
+capture. `Stage: capture` and `Stage: post-mix` sections are applied only to
+their corresponding graph. PipeWire does not provide the Windows per-app
+pre-mix APO placement, so `Stage: pre-mix` sections are skipped with a
+file/line warning; this is reported by `skyapo config check` and daemon
+diagnostics rather than silently ignored. A child `Include:` inherits the
+current `Stage:` scope, but stage changes in that child do not leak back to its
+parent.
+
+When built with Lilv, `Plugin: LV2 <URI> [symbol=value ...]` inserts a native
+LV2 plugin with optional input control-port overrides; values must be finite
+and within the declared port range. `skyapo plugin info <URI>` reports plugin
+name and control-port symbols/defaults/ranges. For an active LV2 node,
+`skyapo plugin set <URI> <symbol-or-name> <value>` changes a writable control
+for the next processing block; the change is runtime-only and does not rewrite
+the config file. Channel selection affects later selected-channel filters;
+Copy uses upstream assignments routed through upstream
+`FilterConfiguration`. `Include: path` is expanded by the Linux adapter at its
+position in the ordered chain; relative paths resolve from the including file,
+double-quoted paths (including spaces and `#`) are accepted, nesting is limited
+to 100 files, and active recursion cycles are diagnosed. Unquoted trailing `#`
+comments are removed. Child-file parser errors report that child's path and
+line.
 
 Convolution graph construction preflights the decoded IR plus the concrete
 `libHybridConv` FFT/segment buffers against a 64 MiB estimated per-graph
 convolution-memory budget. This rejects oversized or aggregate IR graphs
 before decoding their sample payloads; the estimate includes allocator/FFTW
 headroom and is a safety bound, not an exact RSS prediction.
+Upstream Equalizer APO does not resample convolution IRs: the IR sample rate
+must match the active processing rate (within 1 Hz). The upstream filter logs
+a warning and skips initialization on mismatch; the Linux adapter rejects the
+config with a file/line error before graph activation. A failed mismatched-IR
+reload is tested to preserve the active valid DSP graph. Numerical tests
+compare the actual upstream convolution output with direct FIR references at
+44.1, 48, 96 and 192 kHz.
+
+IIR filters retain the upstream DSP implementation, but Linux preflights their
+allocation sizes: individual order is limited to 65,536 and the combined
+coefficient plus per-channel state arrays are limited to 64 MiB per graph.
+This is a resource-safety bound, not a recommended high-order range; very high
+orders can be computationally expensive in realtime. The engine/benchmark
+memory breakdown reports the IIR allocation estimate separately from
+convolution's estimated workspace and from process RSS.
 
 With the default MuParserX 3.0.1 build, `If:`, `ElseIf:`, `Else:` and `EndIf:` support nested numeric/boolean expressions, including comparisons and semicolon sequencing. The expression variables `sampleRate`, `inputChannelCount` and `outputChannelCount` are constants from the Engine being initialized. `Eval:` assignments and numeric inline backtick expressions (for example, ``Preamp: `-6` dB``) use one parser context across nested Includes. The upstream-compatible `regexSearch` and `regexReplace` functions are available in these expressions. Upstream Equalizer APO's `+` string concatenation and infix `not` operators are also compiled from the pinned SourceForge sources in generated build-tree copies and tested through the production config path. A false branch is skipped before command validation and file inclusion; malformed nesting and expression errors include source path and line. This is a portable subset, **not** the full upstream muParserX feature set: Windows registry functions, other upstream string-operator overrides and full string/matrix expression semantics are unsupported. When built with classic muParser as the optional fallback, nested numeric/boolean conditionals work, but `Eval:` and inline backtick expressions fail explicitly with a dependency diagnostic; the upstream `+`/`not` overrides are only enabled with MuParserX.
 

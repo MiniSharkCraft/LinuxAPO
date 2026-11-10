@@ -72,9 +72,36 @@ jobs:
             printf 'Annotated tag must include a short release summary after its title.\n' >&2
             exit 1
           fi
-          if ! rg -q '^Release artwork redistribution status: CLEARED$' \
+          if rg -q '^Release artwork redistribution status: CLEARED$' \
             docs/UI_LICENSE_AUDIT.md; then
-            printf 'Release blocked: docs/UI_LICENSE_AUDIT.md lacks the explicit artwork-rights clearance marker.\n' >&2
+            : # The release documentation records the verified permission.
+          elif rg -q '^Release artwork redistribution status: EXCLUDED$' \
+            docs/UI_LICENSE_AUDIT.md; then
+            python3 - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          cmake = Path("CMakeLists.txt").read_text(encoding="utf-8")
+          option = re.search(
+              r'option\s*\(\s*SKYAPO_BUNDLE_BRANDED_APP_ICON\s+"[^"]+"\s+(ON|OFF)\s*\)',
+              cmake,
+              re.DOTALL,
+          )
+          tracked_icons = subprocess.run(
+              ["git", "ls-files", "src/ui/resources/icons/hicolor"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+          if option is None or option.group(1) != "OFF" or tracked_icons:
+              raise SystemExit(
+                  "EXCLUDED artwork status requires the branded icon option "
+                  "to default OFF and no branded icon assets in the source tree"
+              )
+          PY
+          else
+            printf 'Release blocked: artwork must be explicitly CLEARED or safely EXCLUDED in docs/UI_LICENSE_AUDIT.md.\n' >&2
             exit 1
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -105,7 +132,7 @@ jobs:
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_INSTALL_PREFIX=/usr
-          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
+          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=OFF
 
       - name: Build
         run: cmake --build build --parallel 2
@@ -116,7 +143,7 @@ jobs:
       - name: Configure ASan/UBSan release gate
         run: >-
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
-          -DSKYAPO_SANITIZERS=ON -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
+          -DSKYAPO_SANITIZERS=ON -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=OFF
 
       - name: Build ASan/UBSan
         run: cmake --build build-asan --parallel 2
@@ -156,6 +183,47 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
           retention-days: 5
+
+  pipewire-integration:
+    needs: validate-tag
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out the exact tag and pinned upstreams
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+
+      - name: Install PipeWire integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            cmake g++ ninja-build pkg-config python3 \
+            libsndfile1-dev libpipewire-0.3-dev pipewire-bin libfftw3-dev \
+            liblilv-dev libmuparser-dev lv2-dev qt6-base-dev wireplumber \
+            dbus-daemon
+          pipewire --version
+          pipewire_version=$(pipewire --version | sed -n \
+            's/^Linked with libpipewire \([0-9][0-9.]*\)$/\1/p')
+          if [[ -z "$pipewire_version" ]] || \
+             ! dpkg --compare-versions "$pipewire_version" ge 1.0.6; then
+            printf 'PipeWire >= 1.0.6 is required for graph-mutation integration tests (found %s).\n' \
+              "${pipewire_version:-unknown}" >&2
+            exit 1
+          fi
+
+      - name: Configure PipeWire integration suite
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DSKYAPO_BUILD_VST2_PROTOTYPE_TESTS=ON
+          -DSKYAPO_ENABLE_FST_VST2_HOST=ON
+          -DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Run all PipeWire integration tests
+        run: ctest --test-dir build --output-on-failure --parallel 1 -L pipewire
 
   arch-package:
     needs: validate-tag
@@ -205,8 +273,8 @@ jobs:
           retention-days: 5
 
   publish-prerelease:
-    needs: [validate-tag, linux-build-test-packages, arch-package]
-    if: needs.validate-tag.result == 'success' && needs.linux-build-test-packages.result == 'success' && needs.arch-package.result == 'success'
+    needs: [validate-tag, linux-build-test-packages, pipewire-integration, arch-package]
+    if: needs.validate-tag.result == 'success' && needs.linux-build-test-packages.result == 'success' && needs.pipewire-integration.result == 'success' && needs.arch-package.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -69,6 +69,55 @@ the raw/processed microphone WAV files were deleted after measurement. Node
 IDs are specific to this PipeWire session; the persisted selection is the
 stable `node.name`.
 
+Fresh physical Convolution check on 2026-10-15 (PipeWire 1.6.9): with an
+isolated `XDG_CONFIG_HOME` and foreground daemon, the selected built-in capture
+device was `alsa_input.pci-0000_00_1f.3.analog-stereo` (node 54). A mono, 48 kHz
+PCM16 impulse response containing one sample at 0.5 was applied by the actual
+upstream Convolution filter. The daemon exposed `SkyAPO Virtual Mic`
+(`skyapo.virtual_mic`, node 70) at F32 planar DSP, 48 kHz stereo FL/FR, quantum
+1024. After the graph was ready, status showed one Convolution filter, 0
+overruns, and 0 audited callback allocations/deallocations (55.56 μs average,
+158.99 μs maximum in the captured interval). `skyapo-realtime-probe` explicitly
+recorded 192000 frames from the physical input and virtual source with fallback
+disabled; correlation was 1.0, alignment lag 1024 frames, and RMS ratio was
+0.5 (−6.0206 dB), matching the single-tap IR. `wpctl status` showed both the
+built-in device and virtual mic. Temporary config, impulse, and microphone WAVs
+were automatically removed; the daemon exited and removed its virtual source.
+This closes physical same-rate convolution verification on this machine only;
+it does not test alternate hardware rates, multichannel IRs, physical hotplug,
+or total end-to-end latency.
+
+Current-worktree physical Preamp revalidation on 2026-10-15 (PipeWire 1.6.9):
+using isolated `XDG_CONFIG_HOME`, foreground `build/skyapod --config
+examples/preamp.txt`, and the actual selected source
+`alsa_input.pci-0000_00_1f.3.analog-stereo` (node 54), `wpctl status` and
+`pw-dump` both showed `SkyAPO Virtual Mic` (`skyapo.virtual_mic`, node 70).
+The negotiated graph was F32 planar, 48 kHz stereo FL/FR, quantum 1024, with
+2/2 capture links. An independent native PipeWire recorder explicitly
+captured the physical and virtual sources with fallback disabled for 192000
+frames each. Correlation was 1.0, alignment lag 0 frames, RMS ratio 0.501187,
+and gain −6 dB for the actual upstream `Preamp: -6 dB` filter. Streaming
+status showed one filter, input/output RMS 0.0283227/0.014195, 13.975/24.095
+μs average/maximum processing time, zero overruns and zero audited callback
+allocations/deallocations. The daemon exited cleanly, the virtual source
+disappeared, and the two temporary microphone WAVs were unlinked after
+measurement. This revalidates current source/runtime on this physical device;
+it does not cover device unplug/replug, other hardware, or calibrated
+end-to-end latency.
+
+A fast status poll immediately after launching a foreground daemon on this
+physical source also caught the startup race before graph negotiation: PipeWire
+reported `Daemon: streaming` while SkyAPO reported
+`DSP state: initializing (awaiting negotiated format)`,
+`Filters: unknown (DSP engine not initialized)`, and an uninitialized filter
+chain. The next poll showed 48 kHz and the configured Preamp. The daemon was
+stopped cleanly and removed its virtual source. This verifies truthful
+transient status on this host; it is not an audio-capture or recovery test. The
+same immediate-state assertion passed with the ASan/UBSan daemon
+(`ASAN_OPTIONS=detect_leaks=0` for the known external PipeWire context leak),
+which then reached the same negotiated 48 kHz/one-filter state without memory
+access or undefined-behavior diagnostics.
+
 Verified 2026-09-30 on the existing Arch user PipeWire 1.6.8 / WirePlumber session. No GUI/plugin work was undertaken.
 
 ## Actual chain
@@ -119,6 +168,20 @@ Both builds succeeded; both CTest suites passed **3/3** (core, realtime allocati
 
 On 2026-10-14, `skyapo-pipewire-e2e-source-consumer-latency` added a bounded stereo timestamp probe through the private graph. The synthetic producer encodes `CLOCK_MONOTONIC` timestamps in 17–18 low-amplitude impulses; an independent PipeWire consumer decodes them after the live daemon's upstream `Preamp: -6 dB` path and measures producer-callback to consumer-callback wall delay. Three serial repetitions passed at 48 kHz / 1024 frames: median 116–178 µs and p95 182–221 µs. This boundary is a useful measurement of the synthetic graph's processing handoff, not sample age/quantum buffering as seen by an application, physical ADC/device latency, or total end-to-end latency. A prior draft used shared PipeWire graph frame positions and returned 0 frames/correlation 1.0; that only established a common logical timeline and is not treated as latency evidence.
 
+Playback server-restart coverage was added on 2026-10-17. The dedicated
+`skyapo-pipewire-e2e-playback-wireplumber-server-restart` test stops and
+recreates the private PipeWire server, WirePlumber policy process, selected
+SPA null sink, and deterministic capture source. It waits for both playback
+link pairs and capture links to recover, then launches an ordinary playback
+test stream and independently records the sink monitor. Release and
+ASan/UBSan runs passed **1/1** each. Release measured a post-restart
+sink-monitor output/expected RMS ratio of **0.991431** (within the 3%
+tolerance); daemon status reported `Preamp: -6 dB`, capture links 2/2,
+playback internal/target links 2/2, zero audited callback
+allocations/deallocations, and zero overruns. This is synthetic private-graph
+recovery evidence, not physical sink restart/hotplug validation or proof of
+uninterrupted audio during server downtime.
+
 The private E2E matrix now forces and verifies 44100, 48000 and 96000 Hz independently for both mono and stereo. The helper fails closed if the installed base `pipewire.conf` no longer has exactly one commented setting for each forced clock property. Both daemon status and an independent consumer's negotiated graph clock are checked, along with `MONO` or `FL FR`, F32 planar DSP, 1024-frame quantum, capture-link count and numerical -6 dB output. Local regression on 2026-10-01 passed all six cases; RMS ratio to expected processed output ranged from 1.000004 to 1.000031, with zero audited callback allocations/deallocations and zero overruns. The default full PipeWire-enabled CTest suite passed 58/58; the opt-in FST/VST2 suite passed 57/57, including a 32→64-sample VST2 latency notification, updated PDC/bypass impulse assertions and a private PipeWire E2E with an independent consumer. The ASan/UBSan/LeakSanitizer suite passed 35/35; PipeWire E2E remains disabled in that build. The E2E suites use an isolated synthetic PipeWire source and consumer, not the workstation microphone; hardware-specific claims above remain separate.
 
 The E2E harness now also runs independent 5.1 and 7.1 source → SkyAPO → consumer graphs. On this source revision both tests passed at F32P, 48 kHz, quantum 1024. The 5.1 graph negotiated `FL FR FC LFE RL RR`, 6/6 capture links, 143360 consumer frames, expected-output RMS ratio `1.000017`, zero callback allocations/deallocations and zero overruns. The 7.1 case independently checks `FL FR FC LFE RL RR SL SR` and all 8 links; both use the deterministic identical-channel signal and `Preamp: -6 dB`. Together with the mono E2E, these exercise all nine channel labels accepted by the current runtime. Both tests also pass under ASan/UBSan with `ASAN_OPTIONS=detect_leaks=0`; LeakSanitizer is disabled for this integration run because PipeWire context/library allocations are independently known to persist at teardown. The full default CTest run passed 64/64 and the sanitizer suite 35/35. This is PipeWire graph/mapping evidence, not a physical multichannel microphone test or exhaustive real-device channel-mask proof.
@@ -155,6 +218,21 @@ On 2026-09-30, an isolated PipeWire 1.6.9 server used the non-installed `skyapo-
 
 The fixtures can be built with `cmake --build build --target skyapo-pipewire-test-source skyapo-pipewire-test-consumer`; they are test-only and are not installed in the product package. Run the source with no arguments for stereo or `skyapo-pipewire-test-source --mono` for its stable mono test source. Run the consumer with no arguments for stereo or `skyapo-pipewire-test-consumer --mono` for a mono virtual mic.
 
+### DSP callback exception containment
+
+Unexpected C++ exceptions from `Engine::process()` are caught inside the
+PipeWire process callback. SkyAPO zeros the current output buffer, latches the
+DSP fault, and signals the control loop; the daemon and virtual source remain
+available while audio stays silent. A valid config reload drains/discards an
+interrupted graph transition, builds a fresh Engine off-thread, then resumes
+processing. A failed reload leaves the graph faulted and silent. Two private
+PipeWire E2Es verify an exception at callback entry and an exception after a
+crossfade has processed at least one block; an independent consumer checks
+silence, invalid-reload retention, and recovery to the expected −6 dB output.
+This exception path may allocate for C++ exception unwinding, so zero-allocation
+claims apply to normal processing rather than exception handling. This is not
+native crash/hang isolation or protection against memory corruption.
+
 ### Live capture-device selection
 
 The private `skyapo-pipewire-e2e-device-switch` test starts with `skyapo.test.input`, starts a second independent source named `skyapo.test.alternate`, then runs `skyapo device set skyapo.test.alternate` while `skyapod` is streaming. On the 2026-10-01 run, the runtime rebuilt from capture node 33 to node 45, reported `Selected device: skyapo.test.alternate`, restored 2/2 FL/FR capture links, and kept `SkyAPO Virtual Mic` visible. An independent native PipeWire consumer captured 144384 frames at 48 kHz stereo; measured RMS ratio was 1.000004 against expected output for `Preamp: -6 dB`. Status reported zero overruns and zero audited callback allocations/deallocations. These IDs are private-graph runtime IDs only. This verifies switching between two available stable node names; it does not verify unplug/replug of physical hardware or automatic client policy/default-source selection.
@@ -162,6 +240,18 @@ The private `skyapo-pipewire-e2e-device-switch` test starts with `skyapo.test.in
 ### Plugin process failure and virtual-source consumption
 
 On 2026-09-30, a private PipeWire graph used `skyapo.test.input` node 33, `SkyAPO Virtual Mic` node 37, F32 planar, 48 kHz stereo FL/FR and quantum 1024. The config loaded the test CLAP plugin `org.skyapo.test.error-once`, which returns `CLAP_PROCESS_ERROR` on its first callback. `skyapo status` then reported `Plugin failures: org.skyapo.test.error-once — Plugin — .../config.txt:1`, remained `streaming` with 2/2 capture links, and showed output RMS 0, zero overruns, and zero audited callback allocations/deallocations. `pw-dump` showed `skyapo.virtual_mic`. The independent native PipeWire consumer explicitly linked to the virtual source and captured 141312 stereo frames at RMS `0.00000000`; it exited 0 with `--expect-silent`. This confirms the failed node becomes silence while the PipeWire source remains consumable; it is not a third-party plugin crash/hang isolation test. The private source/server/daemon were stopped afterward and the desktop server was untouched.
+
+On 2026-10-14, `skyapo-pipewire-e2e-vst3-exception-failure` loaded a fixture
+whose VST3 `IAudioProcessor::process()` throws a C++ exception. SkyAPO caught
+it within the `noexcept` adapter, latched the plugin failed, and an independent
+consumer recorded silence while the daemon stayed streaming and the virtual
+source remained available. Status retained the failing VST3 ID. The realtime
+allocation audit observed exactly one allocation and one deallocation during
+the exception path; this is not an allocation-free failure path. Ordinary
+processing and reported API-error paths remain zero-allocation. Release CTest
+passed 70/70 and ASan/UBSan with LeakSanitizer enabled passed 71/71 including
+this test. This does not contain native crashes, `abort()`, memory corruption
+or hangs; those still require process isolation.
 
 ### Mono layout and selected-source loss
 
@@ -177,6 +267,14 @@ With the same isolated PipeWire 1.6.9 server, deterministic stereo source, nativ
 
 This live-reconfiguration path is now an automated `skyapo-pipewire-e2e-renegotiate` test. On 2026-10-01 it forced 48 kHz/512, 44.1 kHz/512, then 96 kHz/2048 while the daemon stayed running; independent recordings measured expected-output RMS ratios 1.000006, 0.999991, and 1.000039. It then removed and recovered a physical-to-virtual test link and captured again at 96 kHz (ratio 1.000007). This automates sample-rate/quantum changes between stable graphs; the following E2E covers a format change during a pending config crossfade.
 
+Runtime status now compares the active Engine's sample rate and `maxFrames()`
+against PipeWire's latest negotiated rate and quantum. During the existing
+fail-silent format-mismatch path it reports `DSP state: reconfiguring` rather
+than `running`; the Qt status summary identifies the output-silent rebuild.
+The Release and ASan/UBSan renegotiation E2Es still reach each target format and
+independent recording successfully. Those E2Es validate recovery/audio after
+rebuild, but do not guarantee they sample the short intermediate status window.
+
 The separate `skyapo-pipewire-e2e-transition-format` case compiles an E2E-only transition-duration override (500 ms; normal builds stay at 10 ms), waits until `Graph transition: crossfading` is observable, then changes the private server to 44.1 kHz. Runtime reported `Format rebuilds during transition: 1`, settled at 44.1 kHz / quantum 512 with 2/2 links and zero overruns/audited callback allocations, and the independent consumer measured ratio 1.000027 to the accepted −3 dB graph. This directly exercises the pending-graph format-rebuild branch; the longer duration exists only to make that scheduling window deterministic in E2E.
 
 ### Explicit daemon process restart
@@ -189,13 +287,150 @@ On 2026-10-14, the opt-in `skyapo-pipewire-e2e-systemd-crash-restart` test ran a
 
 The test is opt-in because it requires a functioning user systemd manager and intentionally kills a daemon process: configure with `-DSKYAPO_ENABLE_PIPEWIRE_E2E_TESTS=ON -DSKYAPO_ENABLE_SYSTEMD_E2E_TESTS=ON`, build, then run `ctest --test-dir build --output-on-failure -R '^skyapo-pipewire-e2e-systemd-crash-restart$'`. It uses a transient test-only unit and does not start/stop the installed `skyapod.service`.
 
+Playback crash recovery was added on 2026-10-17 as the separate opt-in
+`skyapo-pipewire-e2e-playback-wireplumber-systemd-crash-restart` test. It uses
+the same transient-unit policy, a private PipeWire/WirePlumber graph and SPA
+null sink; after SIGKILL it requires a new daemon PID, the playback internal
+and sink links (2/2 each), and a fresh ordinary playback stream recorded
+independently from the sink monitor. Release CTest passed **1/1** and the
+ASan/UBSan test passed **1/1** (`detect_leaks=0` for this PipeWire integration
+process). The Release monitor measured an output/expected RMS ratio of
+**0.991431** for `Preamp: -6 dB`; status reported capture links 2/2, zero
+audited callback allocations/deallocations and zero overruns. The related
+capture-systemd crash test and playback PipeWire-server-restart test also
+passed in the same Release run (**3/3** total). This verifies fresh playback
+after supervised process recovery, not uninterrupted audio across SIGKILL or
+physical hardware behavior. Run it with the same CMake option, selecting the
+new test name in CTest.
+
 ### Sustained-load overrun reporting
 
 On 2026-09-30, an isolated PipeWire 1.6.9 graph used deterministic source `skyapo.test.input` (node 33) and virtual source node 37 at F32 planar, 48 kHz, stereo FL/FR, quantum 1024 (21.33 ms callback budget). Baseline `Preamp: -6 dB` had 2/2 links, zero overruns and zero audited callback allocations/deallocations. A validated hot reload replaced it with 2048 upstream BiQuad `Filter` directives. Over a 20-second observation, block count rose from 607 to 1015 and overruns from 607 to 1015: 408/408 callbacks exceeded budget. Reported process average was 51–53 ms and maximum 338.093 ms; status still showed `streaming`, 2/2 links and zero host-audited allocations/deallocations. This deliberately overloaded setup proves the overrun counter/telemetry responds; it does not establish usable realtime audio under overload, nor does the allocation audit cover allocations inside shared-library plugin code. The private daemon/source/server were stopped, and the desktop PipeWire session remained intact.
 
-The actual upstream Convolution and GraphicEQ implementations now execute in offline core tests. A separate allocation audit executes 1000 fixed-size upstream Convolution blocks with zero audited callback allocations/deallocations. Convolution is fixed-block: Engine rejects variable callback blocks; the daemon delays graph construction until negotiated quantum and handles rate/quantum changes on the control loop. The current physical-device recording exercise used Preamp, not a convolution IR. Exact PipeWire hardware tests of convolution at alternate rates/quantums remain outstanding.
+The actual upstream Convolution and GraphicEQ implementations execute in offline core tests. A separate allocation audit executes 1000 fixed-size upstream Convolution blocks with zero audited callback allocations/deallocations. Convolution is fixed-block: Engine rejects variable callback blocks; the daemon delays graph construction until negotiated quantum and handles rate/quantum changes on the control loop. Physical same-rate convolution is now verified in the 2026-10-15 workstation test above. Hardware tests of convolution at alternate rates/quantums remain outstanding.
 
-### PipeWire default render-volume status
+### PipeWire playback and default render-volume status
+
+Playback-processing follow-up (2026-10-15): `skyapo device output
+list/set/current` enumerates output sinks and persists the selected sink by
+stable identity where available. The daemon creates a PipeWire `Audio/Sink`
+node named `SkyAPO Playback`, negotiates F32 format, and processes its input
+with a separate EAPO-backed engine before linking output ports to the chosen
+sink. The direct-link private-graph E2E records `Preamp: -6 dB` at 48 kHz
+stereo/Q1024 (RMS ratio 0.999956). A second opt-in E2E starts private
+WirePlumber 0.5.18 and PipeWire 1.6.9, creates a real SPA
+`support.null-audio-sink` test endpoint, then launches an ordinary untargeted
+PipeWire playback stream. WirePlumber routes that stream through `SkyAPO
+Playback`; an independent recorder is linked to the selected sink's monitor
+ports and captured 144384 frames. The measured RMS ratio was **0.999997** of
+the expected -6 dB output. Status showed F32 48 kHz, stereo, Q1024, internal
+links 2/2, target links 2/2, zero reported overruns and zero audited callback
+allocations/deallocations. This demonstrates policy-based application
+routing, DSP and delivery to a sink monitor in the isolated test session.
+
+Playback isolation follow-up (2026-10-16): the same private WirePlumber E2E now
+runs a second ordinary PipeWire client explicitly targeted at a separate null
+sink while the first client is processed by SkyAPO. It checks the client-to-sink
+links, verifies that the active playback-node subgraph is acyclic, and records
+both sink monitors independently. The processed path measured an output / −6
+dB expected ratio of **0.999998**; the explicitly targeted, unprocessed path
+measured a unity ratio of **0.995718**. A sequential rerun on 2026-10-17 passed
+1/1 and measured **1.000002** on the processed path and **0.993581** on the
+separate unity path. `skyapo-pipewire-e2e-playback-wireplumber` passed both
+runs. This proves isolation in the private fixture only; it does not
+replace physical-output, desktop-session or hardware feedback validation.
+
+It is not physical-speaker or desktop-session validation. Real ALSA/Bluetooth
+outputs, behavior across different WirePlumber policy configurations, device
+hot-unplug during playback, and audible feedback/listening remain unverified.
+The test fixture's SPA null sink is not evidence of a hardware output. The
+v0.10.0 playback milestone remains open pending those checks plus the remaining
+playback recovery/configuration regression gates.
+
+Historical compatibility check (2026-11-05, pre-`944ace4`): an earlier
+playback implementation used WirePlumber Smart Filters, which are a 0.5
+feature ([official policy documentation](https://pipewire.pages.freedesktop.org/wireplumber/policies/smart_filters.html)).
+On WirePlumber 0.4.17, 15 E2Es then failed with **0/2 target links** and the
+ordinary stream suspended. This is not the current route implementation: the
+playback frontend was changed to a regular virtual sink, and `944ace4` added a
+paused-port refresh for WirePlumber 0.4 adapter activation. A private
+WirePlumber 0.4.17/PipeWire 1.6.10 graph passed at that commit with an
+independent `-6 dB` recording and complete app → SkyAPO → DSP → sink links.
+
+That result does not establish compatibility with Ubuntu 24.04's exact
+PipeWire 1.0.5 stack, nor with later playback commits on WirePlumber 0.4. The
+Ubuntu 24.04 CI build disables graph-mutation E2Es because they require
+PipeWire 1.0.6 or newer; the full PipeWire integration suite runs on Ubuntu
+26.04. Physical output, desktop-session routing and hardware recovery also
+remain unverified. See [the WirePlumber 0.4 investigation](development/wireplumber-0.4-playback.md)
+for the failure history and test details.
+
+Playback target switching/recovery follow-up (2026-10-16): while the daemon is
+running, `skyapo device output set <node>` now retargets the paired stream
+filter without recreating the smart-filter node or restarting the capture
+graph. A private WirePlumber E2E kept an ordinary application stream linked to
+`SkyAPO Playback`, switched the child stream to a second null sink, confirmed
+both target-channel links and recorded the expected processed signal from the
+new sink's monitor. Selected-sink disappearance/reappearance was separately
+verified for same-name and stable-identity rename cases. The focused IPC/UI and
+playback Release group passed **9/9**; the three switch/recovery E2Es passed
+ASan/UBSan **3/3** (`detect_leaks=0` for the PipeWire subprocess harness).
+These graph fixtures do not verify physical sink hotplug or switching an
+ordinary app stream across real hardware outputs. A stopped daemon only saves
+the selected output preference; it does not restart itself.
+
+Focused playback revalidation (2026-10-17): after rebuilding the current dirty
+candidate, seven sequential Release E2Es passed (**7/7**, 152.36 seconds):
+WirePlumber app routing/isolation, quantum variation, `Stage: post-mix`,
+selected-target recovery, live output switching, LV2 latency refresh and
+playback PDC recovery. The relevant CMake build passed at `--parallel 2`.
+The ASan/UBSan `skyapod` target rebuilt at `--parallel 1`, and the focused
+WirePlumber playback E2E passed **1/1** in 34.30 seconds with
+`ASAN_OPTIONS=detect_leaks=0` (the known external PipeWire teardown limitation).
+These are private PipeWire/WirePlumber graph tests; this retest did not emit
+audio through physical speakers or validate ordinary desktop routing on the
+active user session. No hardware acceptance is inferred from these results.
+An additional sequential sanitizer rerun passed **3/3** (69.73 seconds):
+playback isolation (34.46 s), callback exception (10.24 s), and playback PDC
+recovery (25.03 s). The PipeWire subprocess tests use the project's existing
+LeakSanitizer exclusion; this result is ASan/UBSan evidence, not LSan coverage
+for external PipeWire teardown allocations.
+
+Full candidate regression (2026-10-17): the current Release build tree passed
+all **92/92 CTest tests** sequentially in 580.13 seconds, including 54 private
+PipeWire integration tests, 14 playback tests, 20 plugin tests, and five PDC
+tests. The current `skyapod`, PipeWire test consumer, and playback-stream test
+targets were rebuilt successfully before the focused PDC run. The same
+playback PDC recovery E2E passed **1/1** under the `SKYAPO_SANITIZERS=ON`
+build (24.86 seconds); `skyapo-core` and `skyapo-realtime-safety` passed
+**2/2** under that build (26.07 seconds). This records working-tree evidence,
+not a clean checkout or hosted-CI build. The PipeWire scenarios use private
+virtual graphs and do not establish physical-hardware playback or capture.
+
+Repeated output-switch continuity check (2026-10-17): the output-switch E2E
+now keeps an independent recorder attached to the stable `SkyAPO Playback`
+node while the ordinary test application remains active and the selected sink
+makes four live round trips between two WirePlumber null sinks. It checks after
+each switch that the playback node and app-to-filter link remain present, both
+playback target channels and capture links return to streaming, and callback
+allocation/deallocation counters remain zero. The recorder measured RMS ratio
+`0.999998` against expected processed output across the switches; a separate
+recording from the final selected sink measured `1.000004`. The test passed
+three sequential Release runs (34.76, 34.68 and 34.76 seconds). This is
+stronger private-graph continuity evidence, not physical sink, audible-level,
+or active desktop-session validation.
+
+Playback `SPA_PARAM_Props` controls are applied on both the processing
+`Audio/Sink` and paired `Stream/Output/Audio` nodes. Control-loop callbacks
+validate and atomically publish `mute`, effective per-channel
+`channelVolumes`, or scalar `volume` when per-channel values are absent;
+realtime callbacks apply gains without heap allocation. Private WirePlumber
+E2Es verified an ordinary untargeted app stream: −6 dB EAPO Preamp plus 0.5
+per-channel sink gain and 0.5 scalar stream gain produced the expected −18 dB
+at the independent selected-sink monitor recorder; stream mute produced
+measured silence. Baseline and control runs reported zero callback
+allocations/deallocations and zero overruns. These fixture-backed checks do
+not establish every desktop mixer or hardware-volume convention.
 
 On 2026-09-30, the live daemon resolved the `default.audio.sink` metadata to `alsa_output.pci-0000_00_1f.3.analog-stereo`. The monitor enumerates `SPA_PARAM_Props` and reports the RMS of `channelVolumes` plus `mute`; unrelated ALSA device Props from the same enumeration are ignored. During desktop verification `wpctl get-volume @DEFAULT_AUDIO_SINK@` reported `0.50`, PipeWire exposed `volume=1.0` but effective per-channel volumes `0.124989`, and SkyAPO status reported `-18.0626 dB` from the channel gains. This demonstrates why generic `SPA_PROP_volume` alone is not a reliable endpoint master level for this ALSA sink. The monitor separately exposes `uniformChannelGainDb` only when all channel gains are equal and positive; asymmetric or zero channel gains are explicitly unavailable, and mute remains separate. The actual upstream `LoudnessCorrection` filter now consumes this conservative Linux snapshot in daemon mode, but SkyAPO does not claim exact equivalence to Windows endpoint master-volume semantics. Offline renderer/config validation rejects the endpoint-dependent directive.
 
@@ -239,7 +474,42 @@ separate 64 MiB cap and a 256-lane/65,536-frame dimension limit. The payload
 total excludes plugin-private and convolution-internal buffers, PipeWire
 runtime scratch, object/pointer storage, allocator metadata, and shared-library
 allocations; it is not total graph memory. Ring storage is replaced on
-control-thread latency changes so a shrink releases historical capacity.
+control-thread latency changes so a shrink releases historical capacity. The
+16 MiB ring limit is a steady-state schedule limit, not a strict peak-RSS
+limit: transactional PDC refresh temporarily keeps the old schedule while
+allocating the replacement, so ring payload can approach 32 MiB per Engine.
+The scratch, ring and estimated convolution limits are independent; their
+nominal known-buffer maximum is 144 MiB per Engine, before PipeWire/runtime
+scratch, plugin-private allocations, metadata and allocator overhead. Config
+reload may also overlap the active Engine and one candidate. If plugins have
+persistent state, the runtime validates old sidecar state, saves the active
+state, releases that first candidate, then builds a state-updated candidate;
+there is at most one replacement candidate from this state-save path at a
+time. An Engine retired after a graph transition may remain alive until all
+callbacks that could reference it have drained, so this is not a global
+two-Engine guarantee. Nor is it a hard process-memory cap: third-party plugins
+and shared libraries can allocate outside SkyAPO's budget.
+
+On 2026-10-14, the new
+`skyapo-pipewire-e2e-lv2-pdc-recovery` test exercised an active LV2 latency
+increase from 32 to 9999 samples with a 430-term `Copy` fan-in, forcing the
+aggregate 16 MiB PDC budget check to reject the new schedule. The test verified
+that the daemon PID/control socket and `SkyAPO Virtual Mic` remained present,
+the independent PipeWire consumer measured silence, and `skyapo config reload`
+returned a failure for an unsupported directive without resuming the invalid
+graph. Replacing it with `Preamp: -6 dB` then hard-swapped a new Engine; an
+independent consumer measured the expected processed amplitude. While faulted,
+the test also forced a PipeWire quantum change from 1024 to 512 frames. The
+daemon stayed alive and silent while an invalid config deferred format rebuild;
+a valid config reload then rebuilt at the negotiated format and restored
+processing. This proves bounded recovery for the deterministic fixture/budget
+and invalid-config paths, not rollback of plugin-internal state, recovery from
+arbitrary plugin faults, or general third-party plugin stability. The current
+Release suite passed 69/69 in 170.70 seconds (34 private PipeWire E2Es), and
+the ASan/UBSan suite passed 70/70 in 196.68 seconds (35 private PipeWire
+E2Es). These runs also include private PipeWire failure-path tests for CLAP
+`CLAP_PROCESS_ERROR` and VST3 `kResultFalse`; they verify fail-closed silence
+and daemon survival, not isolation from native plugin crashes or hangs.
 
 Separately, Engine preflight estimates each convolution IR's decoded samples
 and the arrays allocated by the pinned `libHybridConv::hcInitSingle()` path,
@@ -248,8 +518,9 @@ reading the IR payload into memory. The estimate adds 25% workspace headroom
 and a fixed allowance for FFTW plans/allocator overhead; it is not included in
 the benchmark's known-buffer byte breakdown and is not an exact RSS bound.
 `skyapo-core` creates a sparse 60-second stereo float WAV and verifies that
-loading it is rejected by this budget before payload decoding, while the
-three-tap reference convolution continues to process correctly.
+loading it is rejected by this budget before payload decoding. It also checks
+the upstream convolution output against direct stereo FIR references for
+3-, 257- and 4097-tap impulse responses across fixed blocks.
 
 Example filter-count scaling on a development shell:
 
@@ -281,4 +552,4 @@ PipeWire scheduling jitter.
 
 ## Remaining limitations / next task
 
-The physical-to-virtual hardware chain, transactional reload, private-graph recovery (source/link loss and PipeWire server restart), mono/stereo routing, 44.1/48/96 kHz negotiation, and LV2/CLAP/VST3 fixture graphs have automated numerical consumer evidence. The existing physical-microphone -6 dB regression remains documented above. Channel and Copy pass offline expected-sample and callback-allocation tests, including intermediate EAPO channels mixed back into the fixed PipeWire virtual-source layout. Full upstream FilterEngine/config-parser compatibility remains incomplete. Convolution hardware/rate variation and physical-device unplug/replug with ordinary desktop clients remain outstanding. LV2/CLAP/VST3 support is limited; CLAP/VST3 standard bypass parameters and LV2's `lv2:enabled` control are synchronized when advertised, while plugins without those controls and FST/VST2 still use host dry bypass. Delay compensation is fixture-backed but end-to-end latency and plugin process isolation remain incomplete; CLAP/LV2/VST3 state persistence has limited fixture-backed tests. FST-based VST2-compatible processing is opt-in and fixture-tested but not production support or validated against third-party VST2 plugins. The Qt editor is a growing daemon client and reuses upstream editor components, but plugin GUI/management and some workflows are still missing.
+The physical-to-virtual hardware chain, same-rate Convolution, transactional reload, private-graph recovery (source/link loss and PipeWire server restart), mono/stereo routing, 44.1/48/96 kHz negotiation, and LV2/CLAP/VST3 fixture graphs have numerical consumer evidence. Channel and Copy pass offline expected-sample and callback-allocation tests, including intermediate EAPO channels mixed back into the fixed PipeWire virtual-source layout. Full upstream FilterEngine/config-parser compatibility remains incomplete. Convolution hardware rate/quantum variation and physical-device unplug/replug with ordinary desktop clients remain outstanding. LV2/CLAP/VST3 support is limited; CLAP/VST3 standard bypass parameters and LV2's `lv2:enabled` control are synchronized when advertised, while plugins without those controls and FST/VST2 still use host dry bypass. Delay compensation is fixture-backed but end-to-end latency and plugin process isolation remain incomplete; CLAP/LV2/VST3 state persistence has limited fixture-backed tests. FST-based VST2-compatible processing is opt-in and fixture-tested but not production support or validated against third-party VST2 plugins. The Qt editor supports discovered LV2/CLAP/VST3 insertion, writable config-backed parameter editing, bypass controls and Save & Reload; embedded native plugin GUIs, live parameter readback/automation and some workflows remain missing.

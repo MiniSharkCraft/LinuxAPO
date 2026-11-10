@@ -14,6 +14,7 @@ constexpr unsigned MinAnalysisFrames = 128;
 constexpr unsigned MaxAnalysisFrames = 1U << 20;
 constexpr unsigned MaxAnalysisChannels = 8;
 constexpr size_t MaxAnalysisWorkspaceBytes = 64U * 1024U * 1024U;
+constexpr double DegreesPerRadian = 57.2957795130823208768;
 
 bool exceedsWorkspaceBudget(unsigned frames, unsigned channels) {
   const auto multiply = [](size_t a, size_t b, size_t &out) {
@@ -34,7 +35,7 @@ bool exceedsWorkspaceBudget(unsigned frames, unsigned channels) {
       !multiply(impulseSamples, sizeof(float), impulseBytes) ||
       !multiply(channels, channels, channelPairs) ||
       !multiply(channelPairs, frames / 2, curvePoints) ||
-      !multiply(curvePoints, sizeof(QPointF), curveBytes) ||
+      !multiply(curvePoints, 2 * sizeof(QPointF), curveBytes) ||
       !multiply(frames + 2 * (frames / 2 + 1), 1, fftFloats) ||
       !multiply(fftFloats, sizeof(float), fftBytes) ||
       !add(impulseBytes, curveBytes, total) || !add(total, fftBytes, total))
@@ -123,12 +124,22 @@ ResponseAnalysisResult analyzeConfigResponse(const QString &configPath,
         curve.channel = QStringLiteral("%1 → %2").arg(
             channelName(inputChannel), channelName(outputChannel));
         curve.points.reserve(static_cast<qsizetype>(fftFrames / 2));
+        curve.phasePoints.reserve(static_cast<qsizetype>(fftFrames / 2));
         for (unsigned bin = 1; bin <= fftFrames / 2; ++bin) {
           const double frequency =
               static_cast<double>(bin) * sampleRate / fftFrames;
           const double magnitude = std::hypot(output[bin][0], output[bin][1]);
           const double db = 20.0 * std::log10(std::max(magnitude, 1.0e-12));
           curve.points.append(QPointF(frequency, db));
+          if (std::isfinite(db) &&
+              (!result.peakGainDb || db > *result.peakGainDb))
+            result.peakGainDb = db;
+          const double phase =
+              magnitude > 1.0e-12 && std::isfinite(magnitude)
+                  ? std::atan2(output[bin][1], output[bin][0]) *
+                        DegreesPerRadian
+                  : std::numeric_limits<double>::quiet_NaN();
+          curve.phasePoints.append(QPointF(frequency, phase));
         }
         fftwf_free(input);
         fftwf_free(output);
