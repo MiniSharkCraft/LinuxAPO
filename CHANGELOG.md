@@ -2,6 +2,10 @@
 
 ## Unreleased — development after 0.9.0
 
+- Fix `skyapo stop` reporting an IPC read failure after the daemon already
+  acknowledged shutdown. The CLI now waits for control-socket removal instead
+  of polling a daemon event loop that is stopping. Add an IPC teardown
+  regression and verify the private PipeWire CLAP live-parameter E2E.
 - Improve PipeWire device identity/default-source reporting, device switching and actionable notices when `Stage: pre-mix/post-mix` cannot run in the capture graph.
 - Harden graph reconfiguration and bounded-memory accounting for FilterConfiguration scratch, Convolution, EAPO Delay, plugin bypass and PDC rings; release stale ring capacity when reported latency shrinks.
 - Extend the editor's response-analysis format/size controls and saved plugin-parameter editing for supported native formats; these remain config-backed, not live plugin GUI/readback.
