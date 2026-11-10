@@ -890,7 +890,9 @@ int main(int argc, char **argv) {
       "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
       "STABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA PATH\tDEFAULT\n"
       "42\talsa_input.test\tUSB Microphone\tyes\t1\t48000\t"
-      "device.serial=SERIAL-42\t\t\t\tno\n";
+      "device.serial=SERIAL-42\t\t\t\tno\n"
+      "43\talsa_input.other\tOther Microphone\t\t1\t48000\t"
+      "device.serial=SERIAL-43\t\t\t\tno\n";
   if (!deviceListFile.open(QIODevice::WriteOnly) ||
       deviceListFile.write(deviceListContents) != deviceListContents.size()) {
     std::cerr << "could not create selected-device UI fixture\n";
@@ -948,6 +950,29 @@ int main(int argc, char **argv) {
       std::cerr << "UI response analysis did not use selected PipeWire device "
                    "identity; status="
                 << deviceAnalysisStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    const int otherDeviceIndex =
+        deviceCombo->findData(QStringLiteral("alsa_input.other"));
+    if (otherDeviceIndex < 0 ||
+        deviceAnalysisStatus->property("analysisState").toString() !=
+            QStringLiteral("current")) {
+      std::cerr << "device-specific response fixture did not reach current "
+                   "state before switching devices\n";
+      return 1;
+    }
+    deviceCombo->setCurrentIndex(otherDeviceIndex);
+    if (!QMetaObject::invokeMethod(deviceCombo, "activated",
+                                   Qt::DirectConnection,
+                                   Q_ARG(int, otherDeviceIndex))) {
+      std::cerr << "could not trigger the input-device selection path\n";
+      return 1;
+    }
+    if (deviceAnalysisStatus->property("analysisState").toString() !=
+            QStringLiteral("stale") ||
+        !deviceAnalysisStatus->text().startsWith("Stale response")) {
+      std::cerr << "changing the selected device left a device-specific "
+                   "response marked current\n";
       return 1;
     }
   }

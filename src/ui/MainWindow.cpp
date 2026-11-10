@@ -1418,9 +1418,12 @@ void MainWindow::analyzeResponse() {
             const auto showResult = [self, sharedResult, sourceName,
                                      sourceTracksEditor, requestedRevision,
                                      fftFrames, sampleRate, channels,
-                                     analysisDeviceLabel](const QString &status,
-                                                          const char *state,
-                                                          bool monitored) {
+                                     analysisDeviceLabel,
+                                     analysisConnectionName =
+                                         QString::fromStdWString(
+                                             deviceContext.connectionName)](
+                                        const QString &status,
+                                        const char *state, bool monitored) {
               if (!self)
                 return;
               double peakGainDb = -std::numeric_limits<double>::infinity();
@@ -1430,6 +1433,8 @@ void MainWindow::analyzeResponse() {
                     peakGainDb = std::max(peakGainDb, point.y());
               self->responseAnalysisTracksEditor = sourceTracksEditor;
               self->responseAnalysisHasResult = monitored;
+              self->responseAnalysisDeviceConnectionName =
+                  analysisConnectionName;
               self->responseButton->setEnabled(true);
               self->responseButton->setText(self->tr("Analyze response"));
               self->analysisStatusLabel->setProperty("analysisState", state);
@@ -1758,12 +1763,20 @@ bool MainWindow::watchResponseConfigFiles(const QStringList &paths) {
   return true;
 }
 
-void MainWindow::markResponseAnalysisStale() {
+void MainWindow::markResponseAnalysisStale(ResponseAnalysisChange change) {
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
-  if (responseAnalysisHasResult && responseAnalysisTracksEditor) {
+  const bool shouldInvalidate =
+      responseAnalysisHasResult &&
+      (change == ResponseAnalysisChange::InputDevice ||
+       responseAnalysisTracksEditor);
+  if (shouldInvalidate) {
+    const QString changedContext = change == ResponseAnalysisChange::InputDevice
+                                       ? tr("the selected input device context")
+                                       : tr("the current configuration");
     analysisStatusLabel->setText(
-        tr("Stale response: the current configuration changed after this "
-           "analysis. Analyze again to update it."));
+        tr("Stale response: %1 changed after this analysis. Analyze again "
+           "to update it.")
+            .arg(changedContext));
     analysisStatusLabel->setProperty("analysisState", "stale");
   }
 #endif
@@ -1916,7 +1929,7 @@ void MainWindow::openConfig(const QString &path) {
     QMessageBox::critical(this, tr("Open failed"), file.errorString());
     return;
   }
-  markResponseAnalysisStale();
+  markResponseAnalysisStale(ResponseAnalysisChange::CurrentDocument);
   configPath = QFileInfo(path).absoluteFilePath();
   rememberConfig(configPath);
   document.load(file.readAll());
@@ -2346,7 +2359,7 @@ void MainWindow::markModified() {
   modified = true;
   clearRowDiagnostics();
   ++configRevision;
-  markResponseAnalysisStale();
+  markResponseAnalysisStale(ResponseAnalysisChange::CurrentDocument);
   updateTitle();
   validationLabel->setText(tr("Checking unsaved configuration edits…"));
   scheduleLiveValidation();
@@ -2577,7 +2590,7 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   configPath = destination;
   modified = false;
   ++configRevision;
-  markResponseAnalysisStale();
+  markResponseAnalysisStale(ResponseAnalysisChange::CurrentDocument);
   pathEdit->setText(configPath);
   rebuildRows();
   rememberConfig(configPath);
@@ -2723,6 +2736,9 @@ void MainWindow::selectDevice(int index) {
   const auto nodeName = deviceCombo->itemData(index).toString();
   if (nodeName.isEmpty())
     return;
+  if (responseAnalysisHasResult &&
+      responseAnalysisDeviceConnectionName != nodeName)
+    markResponseAnalysisStale(ResponseAnalysisChange::InputDevice);
   deviceSetPending = true;
   deviceCombo->setEnabled(false);
   runCli({"device", "set", nodeName},

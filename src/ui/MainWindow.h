@@ -37,6 +37,8 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
+  enum class ResponseAnalysisChange { CurrentDocument, InputDevice };
+
   void openConfig(const QString &path);
   void rebuildRows();
   void addFilter(const QString &line);
@@ -60,7 +62,7 @@ private:
   void updateAnalysisInputChannels(unsigned channels);
   void clearResponsePlot(const QString &message);
   bool watchResponseConfigFiles(const QStringList &paths);
-  void markResponseAnalysisStale();
+  void markResponseAnalysisStale(ResponseAnalysisChange change);
   void showAbout();
   void refreshRecentFilesMenu();
   void openRecentFile();
@@ -103,6 +105,7 @@ private:
   QThread *responseThread{};
   QThread *responseDependencyThread{};
   std::shared_ptr<std::atomic_bool> responseAnalysisCancellation;
+  QString responseAnalysisDeviceConnectionName;
   std::vector<std::pair<QString, QString>> responseSymlinkTargets;
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
