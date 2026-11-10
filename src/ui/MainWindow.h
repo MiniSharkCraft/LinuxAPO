@@ -103,6 +103,7 @@ private:
   QThread *responseThread{};
   QThread *responseDependencyThread{};
   std::shared_ptr<std::atomic_bool> responseAnalysisCancellation;
+  std::vector<std::pair<QString, QString>> responseSymlinkTargets;
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
   FilterTable *rowTable{};

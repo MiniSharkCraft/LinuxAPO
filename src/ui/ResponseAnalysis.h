@@ -18,6 +18,12 @@ struct ResponseConfigDependency {
   QByteArray sha256;
 };
 
+struct ResponseAnalysisDeviceContext {
+  std::wstring matchText;
+  std::wstring deviceName;
+  std::wstring connectionName;
+};
+
 struct ResponseAnalysisResult {
   QVector<ResponseCurve> curves;
   QVector<ResponseConfigDependency> configDependencies;
@@ -40,4 +46,5 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate = 48000,
                       unsigned channels = 2, unsigned fftFrames = 16384,
                       const QString &sourceConfigPath = {},
                       const QByteArray &sourceConfigSha256 = {},
-                      std::function<bool()> cancellationRequested = {});
+                      std::function<bool()> cancellationRequested = {},
+                      ResponseAnalysisDeviceContext deviceContext = {});

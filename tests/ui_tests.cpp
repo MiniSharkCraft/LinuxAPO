@@ -611,6 +611,26 @@ int main(int argc, char **argv) {
               << monoResponse.error.toStdString() << '\n';
     return 1;
   }
+  const QString unsupportedStagePath =
+      temporary.filePath(QStringLiteral("unsupported-analysis-stage.txt"));
+  QFile unsupportedStageFile(unsupportedStagePath);
+  if (!unsupportedStageFile.open(QIODevice::WriteOnly) ||
+      unsupportedStageFile.write("Stage: pre-mix\nPreamp: 12 dB\n") < 0) {
+    std::cerr << "could not create unsupported-stage analysis fixture\n";
+    return 1;
+  }
+  unsupportedStageFile.close();
+  const auto unsupportedStageResponse =
+      analyzeConfigResponse(unsupportedStagePath, 48000, 1, 2048);
+  if (unsupportedStageResponse.error.isEmpty() ||
+      !unsupportedStageResponse.error.contains("pre-mix/post-mix") ||
+      !unsupportedStageResponse.error.contains(
+          QStringLiteral("unsupported-analysis-stage.txt:1"))) {
+    std::cerr << "response analysis silently modeled a config with an "
+                 "unsupported processing stage: "
+              << unsupportedStageResponse.error.toStdString() << '\n';
+    return 1;
+  }
   const QString includeAnalysisDirectory =
       temporary.filePath(QStringLiteral("response-includes"));
   if (!QDir().mkpath(includeAnalysisDirectory)) {
@@ -740,6 +760,188 @@ int main(int argc, char **argv) {
         closest = point;
     return closest->y();
   };
+  const QString deviceAnalysisPath =
+      temporary.filePath(QStringLiteral("device-analysis.txt"));
+  QFile deviceAnalysisFile(deviceAnalysisPath);
+  const QByteArray deviceAnalysisConfig =
+      "Device: device.serial=SERIAL-42\n"
+      "If: deviceName == \"USB Microphone\"\n"
+      "If: connectionName == \"alsa_input.test\"\n"
+      "Preamp: -6 dB\n"
+      "EndIf:\nEndIf:\nDevice: all\n";
+  if (!deviceAnalysisFile.open(QIODevice::WriteOnly) ||
+      deviceAnalysisFile.write(deviceAnalysisConfig) !=
+          deviceAnalysisConfig.size()) {
+    std::cerr << "could not write device-specific response fixture\n";
+    return 1;
+  }
+  deviceAnalysisFile.close();
+  ResponseAnalysisDeviceContext selectedDeviceContext{
+      L"node.name=alsa_input.test device.description=USB Microphone "
+      L"device.serial=SERIAL-42",
+      L"USB Microphone", L"alsa_input.test"};
+  const auto deviceSpecificResponse = analyzeConfigResponse(
+      deviceAnalysisPath, 48000, 1, 8192, {}, {}, {}, selectedDeviceContext);
+  if (!deviceSpecificResponse.error.isEmpty() ||
+      deviceSpecificResponse.curves.size() != 1 ||
+      std::abs(gainAt(deviceSpecificResponse.curves.front(), 1000.0) + 6.0) >
+          0.1) {
+    std::cerr << "response analysis did not apply the selected device's "
+                 "Device/If conditions: "
+              << deviceSpecificResponse.error.toStdString() << '\n';
+    return 1;
+  }
+  const QString deviceListPath =
+      temporary.filePath(QStringLiteral("analysis-device-list.tsv"));
+  QFile deviceListFile(deviceListPath);
+  const QByteArray deviceListContents =
+      "ID\tNODE NAME\tDESCRIPTION\tSELECTED\tCHANNELS\tSAMPLE RATE\t"
+      "STABLE PROPERTY\tDEVICE BUS ID\tALSA CARD\tALSA PATH\tDEFAULT\n"
+      "42\talsa_input.test\tUSB Microphone\tyes\t1\t48000\t"
+      "device.serial=SERIAL-42\t\t\t\tno\n";
+  if (!deviceListFile.open(QIODevice::WriteOnly) ||
+      deviceListFile.write(deviceListContents) != deviceListContents.size()) {
+    std::cerr << "could not create selected-device UI fixture\n";
+    return 1;
+  }
+  deviceListFile.close();
+  qputenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE", deviceListPath.toLocal8Bit());
+  {
+    MainWindow deviceAnalysisWindow(deviceAnalysisPath,
+                                    QString::fromLocal8Bit(argv[1]));
+    auto *deviceCombo =
+        deviceAnalysisWindow.findChild<QComboBox *>("inputDeviceCombo");
+    auto *deviceAnalysisSource =
+        deviceAnalysisWindow.findChild<QComboBox *>("analysisSource");
+    auto *deviceAnalysisFormat =
+        deviceAnalysisWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *deviceAnalysisChannels =
+        deviceAnalysisWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *deviceAnalysisButton =
+        deviceAnalysisWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *deviceAnalysisStatus =
+        deviceAnalysisWindow.findChild<QLabel *>("analysisResultStatus");
+    QElapsedTimer deviceReadyWait;
+    deviceReadyWait.start();
+    while (deviceReadyWait.elapsed() < 2000 &&
+           (!deviceCombo ||
+            deviceCombo->currentData().toString() != "alsa_input.test")) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!deviceCombo || !deviceAnalysisSource || !deviceAnalysisFormat ||
+        !deviceAnalysisChannels || !deviceAnalysisButton ||
+        !deviceAnalysisStatus ||
+        deviceCombo->currentData().toString() != "alsa_input.test") {
+      std::cerr << "selected-device response analysis fixture did not load\n";
+      return 1;
+    }
+    deviceAnalysisSource->setCurrentIndex(1);
+    deviceAnalysisFormat->setChecked(false);
+    deviceAnalysisChannels->setValue(1);
+    deviceAnalysisButton->click();
+    QElapsedTimer deviceAnalysisWait;
+    deviceAnalysisWait.start();
+    while (!deviceAnalysisStatus->text().startsWith("Calculated response") &&
+           !deviceAnalysisStatus->text().startsWith("Analysis failed") &&
+           deviceAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    auto *devicePlot =
+        deviceAnalysisWindow.findChild<QWidget *>("responsePlot");
+    if (!devicePlot ||
+        std::abs(devicePlot->property("responseAt1000HzLtoLDb").toDouble() +
+                 6.0) > 0.25) {
+      std::cerr << "UI response analysis did not use selected PipeWire device "
+                   "identity; status="
+                << deviceAnalysisStatus->text().toStdString() << '\n';
+      return 1;
+    }
+  }
+  qunsetenv("SKYAPO_UI_TEST_DEVICE_LIST_FILE");
+  const QString symlinkWatchDirectory =
+      temporary.filePath(QStringLiteral("response-symlink-watch"));
+  if (!QDir().mkpath(symlinkWatchDirectory)) {
+    std::cerr << "could not create response symlink-watch directory\n";
+    return 1;
+  }
+  const QString symlinkTargetOne =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("one.txt"));
+  const QString symlinkTargetTwo =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("two.txt"));
+  const QString symlinkConfigPath =
+      QDir(symlinkWatchDirectory).filePath(QStringLiteral("active.txt"));
+  QFile targetOne(symlinkTargetOne);
+  QFile targetTwo(symlinkTargetTwo);
+  if (!targetOne.open(QIODevice::WriteOnly) ||
+      targetOne.write("Preamp: -6 dB\n") != 14 ||
+      !targetTwo.open(QIODevice::WriteOnly) ||
+      targetTwo.write("Preamp: -12 dB\n") != 15) {
+    std::cerr << "could not create response symlink targets\n";
+    return 1;
+  }
+  targetOne.close();
+  targetTwo.close();
+  if (!QFile::link(symlinkTargetOne, symlinkConfigPath)) {
+    std::cerr << "could not create response config symlink\n";
+    return 1;
+  }
+  {
+    MainWindow symlinkWatchWindow(symlinkConfigPath,
+                                  QString::fromLocal8Bit(argv[1]));
+    auto *symlinkSource =
+        symlinkWatchWindow.findChild<QComboBox *>("analysisSource");
+    auto *symlinkFormat =
+        symlinkWatchWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+    auto *symlinkChannels =
+        symlinkWatchWindow.findChild<QSpinBox *>("analysisChannels");
+    auto *symlinkAnalyze =
+        symlinkWatchWindow.findChild<QPushButton *>("analyzeResponse");
+    auto *symlinkStatus =
+        symlinkWatchWindow.findChild<QLabel *>("analysisResultStatus");
+    if (!symlinkSource || !symlinkFormat || !symlinkChannels ||
+        !symlinkAnalyze || !symlinkStatus) {
+      std::cerr << "could not prepare response symlink freshness test\n";
+      return 1;
+    }
+    symlinkSource->setCurrentIndex(1);
+    symlinkFormat->setChecked(false);
+    symlinkChannels->setValue(1);
+    symlinkAnalyze->click();
+    QElapsedTimer initialSymlinkAnalysisWait;
+    initialSymlinkAnalysisWait.start();
+    while (!symlinkStatus->text().startsWith("Calculated response") &&
+           !symlinkStatus->text().startsWith("Analysis failed") &&
+           initialSymlinkAnalysisWait.elapsed() < 5000) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Calculated response") ||
+        symlinkStatus->property("analysisState").toString() != "current") {
+      std::cerr << "analysis of symlinked config did not complete: "
+                << symlinkStatus->text().toStdString() << '\n';
+      return 1;
+    }
+    if (!QFile::remove(symlinkConfigPath) ||
+        !QFile::link(symlinkTargetTwo, symlinkConfigPath)) {
+      std::cerr << "could not retarget response config symlink\n";
+      return 1;
+    }
+    QElapsedTimer retargetWait;
+    retargetWait.start();
+    while (!symlinkStatus->text().startsWith("Stale response") &&
+           retargetWait.elapsed() < 1500) {
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+      QThread::msleep(5);
+    }
+    if (!symlinkStatus->text().startsWith("Stale response") ||
+        symlinkStatus->property("analysisState").toString() != "stale") {
+      std::cerr << "retargeting an analyzed config symlink left its response "
+                   "marked current\n";
+      return 1;
+    }
+  }
   for (const auto &curve : response.curves) {
     if (curve.channel != "L → L" && curve.channel != "R → R")
       continue;

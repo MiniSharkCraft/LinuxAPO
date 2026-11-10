@@ -149,7 +149,8 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
                       unsigned channels, unsigned fftFrames,
                       const QString &sourceConfigPath,
                       const QByteArray &sourceConfigSha256,
-                      std::function<bool()> cancellationRequested) {
+                      std::function<bool()> cancellationRequested,
+                      ResponseAnalysisDeviceContext deviceContext) {
   ResponseAnalysisResult result;
   if (sampleRate == 0 || channels == 0 || channels > MaxAnalysisChannels ||
       fftFrames < MinAnalysisFrames || fftFrames > MaxAnalysisFrames ||
@@ -179,8 +180,30 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
     QVector<ResponseConfigDependency> engineDependencies;
     {
       // Capture the loaded config/Include set before response engines parse it.
-      Engine probe(sampleRate, channels, 1024, {}, false, false);
+      Engine probe(sampleRate, channels, 1024, {}, false, false,
+                   deviceContext.matchText, deviceContext.deviceName,
+                   deviceContext.connectionName);
       probe.loadConfig(configPath.toStdString());
+      if (!probe.configNotices().empty()) {
+        QStringList notices;
+        for (const auto &notice : probe.configNotices()) {
+          const std::string nativePath = notice.file.string();
+          const QString path = QString::fromLocal8Bit(
+              nativePath.data(), static_cast<qsizetype>(nativePath.size()));
+          notices.append(
+              QStringLiteral("%1:%2: %3")
+                  .arg(path)
+                  .arg(notice.line)
+                  .arg(QString::fromLocal8Bit(
+                      notice.message.data(),
+                      static_cast<qsizetype>(notice.message.size()))));
+        }
+        result.error =
+            QStringLiteral("Response is incomplete because the Engine "
+                           "cannot apply these configuration stages:\n%1")
+                .arg(notices.join(QLatin1Char('\n')));
+        return result;
+      }
       engineDependencies = captureConfigDependencies(
           probe.configFiles(), dependencyError, cancellationRequested);
     }
@@ -233,7 +256,9 @@ analyzeConfigResponse(const QString &configPath, unsigned sampleRate,
       // Never load third-party module code in the editor process. Plugin
       // directives are reported as unsupported for this diagnostic analysis.
       const auto initializationStarted = std::chrono::steady_clock::now();
-      Engine engine(sampleRate, channels, 1024, {}, false, false);
+      Engine engine(sampleRate, channels, 1024, {}, false, false,
+                    deviceContext.matchText, deviceContext.deviceName,
+                    deviceContext.connectionName);
       engine.loadConfig(configPath.toStdString());
       totalInitializationMs +=
           std::chrono::duration<double, std::milli>(

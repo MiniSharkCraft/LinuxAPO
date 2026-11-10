@@ -18,6 +18,9 @@
 #ifdef SKYAPO_HAVE_GRAPHIC_EQ
 #include "Editor/guis/GraphicEQFilterGUIFactory.h"
 #endif
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+#include "helpers/StringHelper.h"
+#endif
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QComboBox>
@@ -110,7 +113,7 @@ bool parseMetadataNumber(const QString &text, double &value,
 
 #ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
 bool parseStreamingFormat(const QByteArray &status, unsigned &sampleRate,
-                          unsigned &channels) {
+                          unsigned &channels, QString *selectedDevice) {
   bool streaming = false;
   bool hasRate = false;
   bool hasChannels = false;
@@ -121,6 +124,8 @@ bool parseStreamingFormat(const QByteArray &status, unsigned &sampleRate,
   for (const auto &line : QString::fromUtf8(status).split(QLatin1Char('\n'))) {
     if (line == QStringLiteral("Daemon: streaming"))
       streaming = true;
+    if (selectedDevice && line.startsWith(QStringLiteral("Selected device: ")))
+      *selectedDevice = line.mid(QStringLiteral("Selected device: ").size());
     const auto rateMatch = ratePattern.match(line);
     if (rateMatch.hasMatch()) {
       bool ok = false;
@@ -141,6 +146,12 @@ bool parseStreamingFormat(const QByteArray &status, unsigned &sampleRate,
     }
   }
   return streaming && hasRate && hasChannels;
+}
+
+std::wstring toEngineString(const QString &value) {
+  const QByteArray utf8 = value.toUtf8();
+  return StringHelper::toWString(
+      std::string(utf8.constData(), static_cast<size_t>(utf8.size())), 65001);
 }
 #endif
 
@@ -917,7 +928,8 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   responseDock->setAllowedAreas(Qt::BottomDockWidgetArea);
   responseDock->setWidget(analysisPanel);
   responseConfigWatcher = new QFileSystemWatcher(this);
-  connect(responseConfigWatcher, &QFileSystemWatcher::fileChanged, this,
+  const auto
+      configWatchChanged =
           [this](const QString &path) {
             if (responseDependencyCheckPending) {
               responseDependencyChangedWhileChecking = true;
@@ -932,6 +944,18 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
                 tr("Stale response: configuration or Include file '%1' "
                    "changed after analysis. Analyze again to update it.")
                     .arg(QFileInfo(path).fileName()));
+          };
+  connect(responseConfigWatcher, &QFileSystemWatcher::fileChanged, this,
+          configWatchChanged);
+  connect(responseConfigWatcher, &QFileSystemWatcher::directoryChanged, this,
+          [this, configWatchChanged](const QString &) {
+            for (const auto &[linkPath, previousTarget] :
+                 responseSymlinkTargets) {
+              if (QFileInfo(linkPath).canonicalFilePath() != previousTarget) {
+                configWatchChanged(linkPath);
+                return;
+              }
+            }
           });
 
   auto *deviceRow = new QHBoxLayout;
@@ -1236,6 +1260,29 @@ void MainWindow::analyzeResponse() {
   const bool sourceTracksEditor = useCurrentFile;
   const QString sourceName =
       useCurrentFile ? tr("Current file") : tr("Default config.txt");
+  ResponseAnalysisDeviceContext deviceContext;
+  QString analysisDeviceLabel;
+  if (deviceCombo && deviceCombo->currentIndex() >= 0) {
+    const int deviceIndex = deviceCombo->currentIndex();
+    QString connectionName = deviceCombo->currentData().toString();
+    if (connectionName.isEmpty())
+      connectionName =
+          deviceCombo->itemData(deviceIndex, Qt::UserRole + 1).toString();
+    const QString deviceName =
+        deviceCombo->itemData(deviceIndex, Qt::UserRole + 2).toString();
+    QString matchText =
+        deviceCombo->itemData(deviceIndex, Qt::UserRole + 3).toString();
+    if (matchText.isEmpty() && !connectionName.isEmpty())
+      matchText = QStringLiteral("node.name=") + connectionName;
+    deviceContext.matchText = toEngineString(matchText);
+    deviceContext.deviceName = toEngineString(deviceName);
+    deviceContext.connectionName = toEngineString(connectionName);
+    if (!connectionName.isEmpty())
+      analysisDeviceLabel =
+          deviceName.isEmpty()
+              ? connectionName
+              : QStringLiteral("%1 (%2)").arg(deviceName, connectionName);
+  }
   QByteArray contents;
   if (useCurrentFile) {
     contents = document.serialize();
@@ -1273,6 +1320,8 @@ void MainWindow::analyzeResponse() {
       QFileInfo(snapshot->fileName()).absoluteFilePath();
   const unsigned fftFrames = responseResolutionCombo->currentData().toUInt();
   const bool useRuntimeFormat = analysisUseRuntimeFormat->isChecked();
+  const QString analysisConnectionName =
+      QString::fromStdWString(deviceContext.connectionName);
   const unsigned selectedRate =
       static_cast<unsigned>(analysisSampleRate->value());
   const unsigned selectedChannels =
@@ -1291,8 +1340,8 @@ void MainWindow::analyzeResponse() {
                               sourceWatchPath = sourcePath,
                               sourcePathForValidation, sourceDigest,
                               sourceTracksEditor, requestedRevision, fftFrames,
-                              cancellation](unsigned sampleRate,
-                                            unsigned channels) {
+                              cancellation, deviceContext, analysisDeviceLabel](
+                                 unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
     self->responseButton->setText(self->tr("Analyzing…"));
@@ -1300,19 +1349,23 @@ void MainWindow::analyzeResponse() {
                                     sourceWatchPath, sourcePathForValidation,
                                     sourceDigest, sourceTracksEditor,
                                     requestedRevision, fftFrames, sampleRate,
-                                    channels, cancellation] {
+                                    channels, cancellation, deviceContext,
+                                    analysisDeviceLabel] {
       auto result = analyzeConfigResponse(
           snapshotPath, sampleRate, channels, fftFrames,
-          sourcePathForValidation, sourceDigest, [cancellation] {
+          sourcePathForValidation, sourceDigest,
+          [cancellation] {
             return cancellation->load(std::memory_order_acquire);
-          });
+          },
+          deviceContext);
       if (!self)
         return;
       QMetaObject::invokeMethod(
           self,
           [self, snapshot, snapshotPath, sourceName, sourceWatchPath,
            sourceTracksEditor, requestedRevision, fftFrames, sampleRate,
-           channels, cancellation, result = std::move(result)]() mutable {
+           channels, cancellation, deviceContext, analysisDeviceLabel,
+           result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
@@ -1360,16 +1413,16 @@ void MainWindow::analyzeResponse() {
               if (QFileInfo(dependencyPath).absoluteFilePath() != snapshotFile)
                 dependencyPaths.append(dependencyPath);
             }
-            if (!sourceTracksEditor)
-              dependencyPaths.append(sourceWatchPath);
+            dependencyPaths.append(sourceWatchPath);
 
             auto sharedResult =
                 std::make_shared<ResponseAnalysisResult>(std::move(result));
             const auto showResult = [self, sharedResult, sourceName,
                                      sourceTracksEditor, requestedRevision,
-                                     fftFrames, sampleRate, channels](
-                                        const QString &status,
-                                        const char *state, bool monitored) {
+                                     fftFrames, sampleRate, channels,
+                                     analysisDeviceLabel](const QString &status,
+                                                          const char *state,
+                                                          bool monitored) {
               if (!self)
                 return;
               double peakGainDb = -std::numeric_limits<double>::infinity();
@@ -1393,6 +1446,13 @@ void MainWindow::analyzeResponse() {
                       .arg(channels == 1 ? self->tr("channel")
                                          : self->tr("channels"))
                       .arg(fftFrames);
+              analysisSummary +=
+                  analysisDeviceLabel.isEmpty()
+                      ? self->tr(" · device context unavailable; "
+                                 "device-dependent directives may differ "
+                                 "from runtime")
+                      : self->tr(" · device context: %1")
+                            .arg(analysisDeviceLabel);
               if (sourceTracksEditor)
                 analysisSummary +=
                     self->tr(" · editor revision %1").arg(requestedRevision);
@@ -1548,14 +1608,17 @@ void MainWindow::analyzeResponse() {
     startAnalysis(selectedRate, selectedChannels);
     return;
   }
-  runCli({QStringLiteral("status")}, [self, startAnalysis](int result,
-                                                           QByteArray output,
-                                                           QByteArray error) {
+  runCli({QStringLiteral("status")}, [self, startAnalysis,
+                                      analysisConnectionName](
+                                         int result, QByteArray output,
+                                         QByteArray error) {
     if (!self)
       return;
     unsigned sampleRate = 0;
     unsigned channels = 0;
-    if (result != 0 || !parseStreamingFormat(output, sampleRate, channels)) {
+    QString runtimeDevice;
+    if (result != 0 ||
+        !parseStreamingFormat(output, sampleRate, channels, &runtimeDevice)) {
       self->responseButton->setEnabled(true);
       self->responseButton->setText(self->tr("Analyze response"));
       self->responseAnalysisHasResult = false;
@@ -1569,6 +1632,20 @@ void MainWindow::analyzeResponse() {
                    "format.%1")
               .arg(detail.isEmpty() ? QString{}
                                     : QStringLiteral("\n") + detail));
+      self->analysisSummaryLabel->clear();
+      self->clearResponsePlot(self->analysisStatusLabel->text());
+      return;
+    }
+    if (!runtimeDevice.isEmpty() && runtimeDevice != analysisConnectionName) {
+      self->responseButton->setEnabled(true);
+      self->responseButton->setText(self->tr("Analyze response"));
+      self->responseAnalysisHasResult = false;
+      self->analysisStatusLabel->setProperty("analysisState", "failed");
+      self->analysisStatusLabel->setText(
+          self->tr("Analysis failed: the selected device context does not "
+                   "match the daemon's active device (%1). Refresh devices "
+                   "and retry.")
+              .arg(runtimeDevice));
       self->analysisSummaryLabel->clear();
       self->clearResponsePlot(self->analysisStatusLabel->text());
       return;
@@ -1615,20 +1692,68 @@ bool MainWindow::watchResponseConfigFiles(const QStringList &paths) {
   if (!responseConfigWatcher)
     return false;
   responseConfigWatcher->removePaths(responseConfigWatcher->files());
+  responseConfigWatcher->removePaths(responseConfigWatcher->directories());
+  responseSymlinkTargets.clear();
   if (paths.isEmpty())
     return true;
 
   QStringList canonicalPaths;
+  QStringList symlinkEntryDirectories;
+  const auto trackSymlink = [this](const QString &path) {
+    const QFileInfo info(path);
+    if (!info.isSymLink())
+      return;
+    const QString absolutePath = QDir::cleanPath(info.absoluteFilePath());
+    const QString canonicalPath = info.canonicalFilePath();
+    const auto found = std::find_if(responseSymlinkTargets.begin(),
+                                    responseSymlinkTargets.end(),
+                                    [&absolutePath](const auto &entry) {
+                                      return entry.first == absolutePath;
+                                    });
+    if (found == responseSymlinkTargets.end())
+      responseSymlinkTargets.emplace_back(absolutePath, canonicalPath);
+  };
   for (const auto &path : paths) {
-    const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+    const QFileInfo sourceInfo(path);
+    const QString absolutePath = QDir::cleanPath(sourceInfo.absoluteFilePath());
+    const QString canonicalPath = sourceInfo.canonicalFilePath();
     if (canonicalPath.isEmpty())
       return false;
     if (!canonicalPaths.contains(canonicalPath))
       canonicalPaths.append(canonicalPath);
+
+    if (sourceInfo.isSymLink()) {
+      trackSymlink(absolutePath);
+      const QString parent = sourceInfo.absolutePath();
+      if (!symlinkEntryDirectories.contains(parent))
+        symlinkEntryDirectories.append(parent);
+    }
+    QString directory = QFileInfo(absolutePath).absolutePath();
+    while (!directory.isEmpty()) {
+      const QFileInfo directoryInfo(directory);
+      if (directoryInfo.isSymLink()) {
+        trackSymlink(directory);
+        const QString parent = directoryInfo.absolutePath();
+        if (!symlinkEntryDirectories.contains(parent))
+          symlinkEntryDirectories.append(parent);
+      }
+      const QString parent = directoryInfo.absolutePath();
+      if (parent == directory)
+        break;
+      directory = parent;
+    }
   }
   for (const auto &path : canonicalPaths) {
     if (!responseConfigWatcher->addPath(path)) {
       responseConfigWatcher->removePaths(responseConfigWatcher->files());
+      responseConfigWatcher->removePaths(responseConfigWatcher->directories());
+      return false;
+    }
+  }
+  for (const auto &path : symlinkEntryDirectories) {
+    if (!responseConfigWatcher->addPath(path)) {
+      responseConfigWatcher->removePaths(responseConfigWatcher->files());
+      responseConfigWatcher->removePaths(responseConfigWatcher->directories());
       return false;
     }
   }
@@ -2543,7 +2668,23 @@ void MainWindow::refreshDevices() {
         if (channelCount != "unknown" || sampleRate != "unknown")
           label += tr("  (%1 ch, %2 Hz)").arg(channelCount, sampleRate);
       }
+      QStringList matchFields{QStringLiteral("node.name=") + nodeName};
+      if (!description.isEmpty())
+        matchFields.append(QStringLiteral("device.description=") + description);
+      if (columns.size() >= 7 && !columns[6].isEmpty() &&
+          !columns[6].startsWith(QStringLiteral("device.bus-id=")))
+        matchFields.append(columns[6]);
+      if (columns.size() >= 8 && !columns[7].isEmpty())
+        matchFields.append(QStringLiteral("device.bus-id=") + columns[7]);
+      if (columns.size() >= 9 && !columns[8].isEmpty())
+        matchFields.append(QStringLiteral("api.alsa.card=") + columns[8]);
+      if (columns.size() >= 10 && !columns[9].isEmpty())
+        matchFields.append(QStringLiteral("api.alsa.path=") + columns[9]);
       deviceCombo->addItem(label, nodeName);
+      const int deviceIndex = deviceCombo->count() - 1;
+      deviceCombo->setItemData(deviceIndex, description, Qt::UserRole + 2);
+      deviceCombo->setItemData(deviceIndex, matchFields.join(QLatin1Char(' ')),
+                               Qt::UserRole + 3);
       if (columns[3] == "yes") {
         deviceCombo->setCurrentIndex(deviceCombo->count() - 1);
         selectedByDaemon = true;
@@ -2563,6 +2704,8 @@ void MainWindow::refreshDevices() {
             0, tr("Selected input unavailable — %1").arg(previousNode),
             QString{});
         deviceCombo->setItemData(0, previousNode, Qt::UserRole + 1);
+        deviceCombo->setItemData(0, QStringLiteral("node.name=") + previousNode,
+                                 Qt::UserRole + 3);
         deviceCombo->setCurrentIndex(0);
       }
     }
