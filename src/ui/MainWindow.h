@@ -18,6 +18,7 @@ class QMenu;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+class QTabBar;
 class QTimer;
 class QThread;
 
@@ -30,8 +31,22 @@ public:
 protected:
   void closeEvent(QCloseEvent *event) override;
 
-private:
+private slots:
   void openConfig(const QString &path);
+  void closeConfigTab(int index);
+
+private:
+  struct OpenDocument {
+    QString path;
+    ConfigFile document;
+    bool modified{};
+  };
+
+  void activateDocument(int index);
+  void snapshotActiveDocument();
+  void updateActiveTabLabel();
+  bool saveDocumentAt(int index);
+  bool confirmDocumentClose(int index);
   void rebuildRows();
   void addFilter(const QString &line);
   void addPluginToConfiguration(std::optional<qsizetype> beforeIndex = {});
@@ -82,6 +97,9 @@ private:
   QThread *responseThread{};
   QComboBox *deviceCombo{};
   QMenu *recentFilesMenu{};
+  QTabBar *configTabs{};
+  std::vector<OpenDocument> openDocuments;
+  int activeDocumentIndex{-1};
   FilterTable *rowTable{};
   QTimer *validationTimer{};
   std::vector<std::shared_ptr<FilterTable::Item>> rowItems;

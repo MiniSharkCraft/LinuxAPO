@@ -58,6 +58,7 @@
 #include <QStandardPaths>
 #include <QSpinBox>
 #include <QSettings>
+#include <QTabBar>
 #include <QTimer>
 #include <QThread>
 #include <algorithm>
@@ -83,6 +84,19 @@ struct PluginParameterModel {
 };
 
 QString withoutInlineComment(const QString &line);
+
+QString configPathIdentity(const QString &path) {
+  const QFileInfo info(path);
+  const QString canonicalPath = info.canonicalFilePath();
+  if (!canonicalPath.isEmpty())
+    return QDir::cleanPath(canonicalPath);
+
+  const QString canonicalParent = info.dir().canonicalPath();
+  if (!canonicalParent.isEmpty())
+    return QDir::cleanPath(QDir(canonicalParent).filePath(info.fileName()));
+
+  return QDir::cleanPath(info.absoluteFilePath());
+}
 
 bool parseMetadataNumber(const QString &text, double &value,
                          bool allowInfinity = false) {
@@ -739,6 +753,17 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
   toolbar->addWidget(responseButton);
   outer->addLayout(toolbar);
 
+  configTabs = new QTabBar(root);
+  configTabs->setObjectName(QStringLiteral("configTabs"));
+  configTabs->setDocumentMode(true);
+  configTabs->setExpanding(false);
+  configTabs->setTabsClosable(true);
+  connect(configTabs, &QTabBar::currentChanged, this,
+          &MainWindow::activateDocument);
+  connect(configTabs, &QTabBar::tabCloseRequested, this,
+          &MainWindow::closeConfigTab);
+  outer->addWidget(configTabs);
+
   auto *analysisFormatRow = new QHBoxLayout;
   analysisUseRuntimeFormat =
       new QCheckBox(tr("Use live PipeWire format"), root);
@@ -953,12 +978,6 @@ MainWindow::MainWindow(QString path, QString cliExecutable)
           &MainWindow::validateLiveConfig);
 
   connect(openButton, &QPushButton::clicked, this, [this] {
-    if (modified &&
-        QMessageBox::question(
-            this, tr("Unsaved changes"),
-            tr("Discard unsaved edits and open another configuration?")) !=
-            QMessageBox::Yes)
-      return;
     QSettings settings;
     const QString initialDirectory =
         configPath.isEmpty()
@@ -1084,6 +1103,7 @@ void MainWindow::analyzeResponse() {
   }
   const QString snapshotPath =
       QFileInfo(snapshot->fileName()).absoluteFilePath();
+  const quint64 requestedRevision = configRevision;
   const unsigned fftFrames = responseResolutionCombo->currentData().toUInt();
   const bool useRuntimeFormat = analysisUseRuntimeFormat->isChecked();
   const unsigned selectedRate =
@@ -1095,26 +1115,35 @@ void MainWindow::analyzeResponse() {
   responseButton->setText(useRuntimeFormat ? tr("Reading format…")
                                            : tr("Analyzing…"));
   QPointer<MainWindow> self(this);
-  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames](
+  const auto startAnalysis = [self, snapshot, snapshotPath, fftFrames,
+                              requestedRevision, useCurrentFile](
                                  unsigned sampleRate, unsigned channels) {
     if (!self)
       return;
+    if (useCurrentFile && self->configRevision != requestedRevision) {
+      self->responseButton->setEnabled(true);
+      self->responseButton->setText(self->tr("Analyze response"));
+      return;
+    }
     self->responseButton->setText(self->tr("Analyzing…"));
     auto *worker = QThread::create([self, snapshot, snapshotPath, fftFrames,
-                                    sampleRate, channels] {
+                                    sampleRate, channels, requestedRevision,
+                                    useCurrentFile] {
       auto result =
           analyzeConfigResponse(snapshotPath, sampleRate, channels, fftFrames);
       if (!self)
         return;
       QMetaObject::invokeMethod(
           self,
-          [self, snapshot, fftFrames, sampleRate, channels,
-           result = std::move(result)]() mutable {
+          [self, snapshot, fftFrames, sampleRate, channels, requestedRevision,
+           useCurrentFile, result = std::move(result)]() mutable {
             Q_UNUSED(snapshot);
             if (!self)
               return;
             self->responseButton->setEnabled(true);
             self->responseButton->setText(self->tr("Analyze response"));
+            if (useCurrentFile && self->configRevision != requestedRevision)
+              return;
             if (!result.error.isEmpty()) {
               QMessageBox::warning(self, self->tr("Response analysis"),
                                    result.error);
@@ -1184,24 +1213,15 @@ void MainWindow::analyzeResponse() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-  if (!modified) {
-    saveWindowPreferences();
-    event->accept();
-    return;
+  snapshotActiveDocument();
+  for (int index = 0; index < static_cast<int>(openDocuments.size()); ++index) {
+    if (!confirmDocumentClose(index)) {
+      event->ignore();
+      return;
+    }
   }
-  const auto choice = QMessageBox::warning(
-      this, tr("Unsaved configuration"),
-      tr("Save changes to %1 before closing?").arg(configPath),
-      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-      QMessageBox::Save);
-  if (choice == QMessageBox::Cancel) {
-    event->ignore();
-  } else if (choice == QMessageBox::Save && !saveConfig()) {
-    event->ignore();
-  } else {
-    saveWindowPreferences();
-    event->accept();
-  }
+  saveWindowPreferences();
+  event->accept();
 }
 
 void MainWindow::saveWindowPreferences() {
@@ -1255,12 +1275,6 @@ void MainWindow::refreshRecentFilesMenu() {
 void MainWindow::openRecentFile() {
   auto *action = qobject_cast<QAction *>(sender());
   if (!action)
-    return;
-  if (modified &&
-      QMessageBox::question(
-          this, tr("Unsaved changes"),
-          tr("Discard unsaved edits and open another configuration?")) !=
-          QMessageBox::Yes)
     return;
   openConfig(action->data().toString());
 }
@@ -1325,21 +1339,134 @@ void MainWindow::runCli(const QStringList &arguments,
 }
 
 void MainWindow::openConfig(const QString &path) {
+  const QString absolutePath = QFileInfo(path).absoluteFilePath();
+  const QString identity = configPathIdentity(absolutePath);
+  for (size_t index = 0; index < openDocuments.size(); ++index) {
+    if (configPathIdentity(openDocuments[index].path) == identity) {
+      configTabs->setCurrentIndex(static_cast<int>(index));
+      return;
+    }
+  }
+
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) {
     QMessageBox::critical(this, tr("Open failed"), file.errorString());
     return;
   }
-  configPath = QFileInfo(path).absoluteFilePath();
-  rememberConfig(configPath);
-  document.load(file.readAll());
-  modified = false;
+  if (activeDocumentIndex >= 0)
+    snapshotActiveDocument();
+
+  OpenDocument opened;
+  opened.path = absolutePath;
+  opened.document.load(file.readAll());
+  openDocuments.push_back(std::move(opened));
+  const int tab = configTabs->addTab(QFileInfo(absolutePath).fileName());
+  configTabs->setTabData(tab, absolutePath);
+  configTabs->setTabToolTip(tab, absolutePath);
+  configTabs->setCurrentIndex(tab);
+  if (activeDocumentIndex == tab)
+    activateDocument(tab);
+}
+
+void MainWindow::snapshotActiveDocument() {
+  if (activeDocumentIndex < 0 ||
+      static_cast<size_t>(activeDocumentIndex) >= openDocuments.size())
+    return;
+  auto &active = openDocuments[static_cast<size_t>(activeDocumentIndex)];
+  active.path = configPath;
+  active.document = document;
+  active.modified = modified;
+}
+
+void MainWindow::activateDocument(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size() ||
+      index == activeDocumentIndex)
+    return;
+
+  snapshotActiveDocument();
+  activeDocumentIndex = index;
+  auto &active = openDocuments[static_cast<size_t>(index)];
+  configPath = active.path;
+  document = active.document;
+  modified = active.modified;
   ++configRevision;
+  clearRowDiagnostics();
   pathEdit->setText(configPath);
   rebuildRows();
   updateTitle();
   validationLabel->setText(tr("Checking configuration…"));
   scheduleLiveValidation();
+  rememberConfig(configPath);
+}
+
+void MainWindow::updateActiveTabLabel() {
+  if (activeDocumentIndex < 0 || activeDocumentIndex >= configTabs->count())
+    return;
+  const QString filename = QFileInfo(configPath).fileName();
+  configTabs->setTabText(activeDocumentIndex,
+                         modified ? QStringLiteral("* %1").arg(filename)
+                                  : filename);
+  configTabs->setTabToolTip(activeDocumentIndex, configPath);
+}
+
+bool MainWindow::saveDocumentAt(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size())
+    return false;
+  if (index == activeDocumentIndex)
+    return saveConfig();
+  auto &target = openDocuments[static_cast<size_t>(index)];
+  if (!target.modified)
+    return true;
+  QSaveFile file(target.path);
+  const QByteArray contents = target.document.serialize();
+  if (!file.open(QIODevice::WriteOnly) ||
+      file.write(contents) != contents.size() || !file.commit()) {
+    QMessageBox::critical(this, tr("Save failed"), file.errorString());
+    return false;
+  }
+  target.modified = false;
+  configTabs->setTabText(index, QFileInfo(target.path).fileName());
+  return true;
+}
+
+bool MainWindow::confirmDocumentClose(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= openDocuments.size())
+    return false;
+  const auto &target = openDocuments[static_cast<size_t>(index)];
+  if (!target.modified)
+    return true;
+  const auto choice = QMessageBox::warning(
+      this, tr("Unsaved configuration"),
+      tr("Save changes to %1 before closing?").arg(target.path),
+      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+      QMessageBox::Save);
+  if (choice == QMessageBox::Cancel)
+    return false;
+  return choice != QMessageBox::Save || saveDocumentAt(index);
+}
+
+void MainWindow::closeConfigTab(int index) {
+  if (configTabs->count() <= 1 || index < 0 || index >= configTabs->count() ||
+      static_cast<size_t>(index) >= openDocuments.size())
+    return;
+  snapshotActiveDocument();
+  if (!confirmDocumentClose(index))
+    return;
+
+  const bool wasActive = index == activeDocumentIndex;
+  int nextIndex = activeDocumentIndex;
+  if (wasActive)
+    nextIndex = std::min(index, configTabs->count() - 2);
+  configTabs->blockSignals(true);
+  configTabs->removeTab(index);
+  openDocuments.erase(openDocuments.begin() + index);
+  configTabs->blockSignals(false);
+  if (wasActive) {
+    activeDocumentIndex = -1;
+    activateDocument(nextIndex);
+  } else if (index < activeDocumentIndex) {
+    --activeDocumentIndex;
+  }
 }
 
 void MainWindow::rebuildRows() {
@@ -1757,6 +1884,8 @@ void MainWindow::configureSelectedPluginParameters() {
 
 void MainWindow::markModified() {
   modified = true;
+  snapshotActiveDocument();
+  updateActiveTabLabel();
   clearRowDiagnostics();
   ++configRevision;
   updateTitle();
@@ -1936,6 +2065,7 @@ void MainWindow::updateTitle() {
   setWindowTitle(
       QStringLiteral("%1%2 — Equalizer APO Configuration Editor — SkyAPO")
           .arg(modified ? QStringLiteral("* ") : QString{}, configPath));
+  updateActiveTabLabel();
 }
 
 bool MainWindow::saveConfig() {
@@ -1950,6 +2080,7 @@ bool MainWindow::saveConfig() {
     return false;
   }
   modified = false;
+  snapshotActiveDocument();
   updateTitle();
   return true;
 }
@@ -1973,6 +2104,14 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   if (path.trimmed().isEmpty())
     return false;
   const QString destination = QFileInfo(path).absoluteFilePath();
+  const QString destinationIdentity = configPathIdentity(destination);
+  for (size_t index = 0; index < openDocuments.size(); ++index) {
+    if (static_cast<int>(index) != activeDocumentIndex &&
+        configPathIdentity(openDocuments[index].path) == destinationIdentity) {
+      saveAsError = tr("That configuration is already open in another tab.");
+      return false;
+    }
+  }
   ConfigFile savedDocument = document;
   if (!rebaseRelativeIncludes(savedDocument, configPath, destination,
                               saveAsError))
@@ -1988,6 +2127,14 @@ bool MainWindow::saveConfigAsPath(const QString &path) {
   document = std::move(savedDocument);
   configPath = destination;
   modified = false;
+  if (activeDocumentIndex >= 0) {
+    auto &active = openDocuments[static_cast<size_t>(activeDocumentIndex)];
+    active.path = configPath;
+    active.document = document;
+    active.modified = false;
+    configTabs->setTabData(activeDocumentIndex, configPath);
+    configTabs->setTabToolTip(activeDocumentIndex, configPath);
+  }
   ++configRevision;
   pathEdit->setText(configPath);
   rebuildRows();

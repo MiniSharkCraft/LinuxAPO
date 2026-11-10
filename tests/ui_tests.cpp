@@ -47,6 +47,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QThread>
@@ -1187,6 +1188,12 @@ int main(int argc, char **argv) {
   uiSettings.clear();
   uiSettings.setValue(QStringLiteral("ui/geometry"), savedWindowGeometry);
   MainWindow window(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *configTabs = window.findChild<QTabBar *>("configTabs");
+  if (!configTabs || configTabs->count() != 1 ||
+      configTabs->tabText(0) != QFileInfo(configPath).fileName()) {
+    std::cerr << "editor did not show the active config in its tab strip\n";
+    return 1;
+  }
   if (window.size() != QSize(777, 555)) {
     std::cerr << "editor did not restore its saved window geometry\n";
     return 1;
@@ -1200,6 +1207,274 @@ int main(int argc, char **argv) {
       !recentMenu || recentMenu->actions().isEmpty() ||
       recentMenu->actions().first()->data().toString() != recentFiles.first()) {
     std::cerr << "opening a config did not persist it in Open Recent\n";
+    return 1;
+  }
+  const QString secondConfigPath = temporary.filePath("second-config.txt");
+  QFile secondConfig(secondConfigPath);
+  if (!secondConfig.open(QIODevice::WriteOnly) ||
+      secondConfig.write("Preamp: -3 dB\n") != 14) {
+    std::cerr << "could not create second configuration fixture\n";
+    return 1;
+  }
+  secondConfig.close();
+  MainWindow tabsWindow(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *tabs = tabsWindow.findChild<QTabBar *>("configTabs");
+  auto *tabPath = tabsWindow.findChild<QLineEdit *>("configPath");
+  if (!tabs ||
+      !QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigPath)) ||
+      tabs->count() != 2 ||
+      tabs->tabText(1) != QFileInfo(secondConfigPath).fileName() || !tabPath ||
+      tabPath->text() != QFileInfo(secondConfigPath).absoluteFilePath()) {
+    std::cerr << "opening another config did not create a second tab\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, configPath)) ||
+      tabs->count() != 2 || tabs->currentIndex() != 0 || !tabPath ||
+      tabPath->text() != QFileInfo(configPath).absoluteFilePath()) {
+    std::cerr << "reopening a config created a duplicate tab or failed to "
+                 "select the existing tab\n";
+    return 1;
+  }
+  const QString secondConfigAliasPath =
+      temporary.filePath("second-config-alias.txt");
+  if (!QFile::link(secondConfigPath, secondConfigAliasPath) ||
+      !QFileInfo(secondConfigAliasPath).isSymLink()) {
+    std::cerr << "could not create a symlink for config-path identity test\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigAliasPath)) ||
+      tabs->count() != 2 || tabs->currentIndex() != 1 || !tabPath ||
+      tabPath->text() != QFileInfo(secondConfigPath).absoluteFilePath()) {
+    std::cerr << "opening a config through a symlink created a duplicate tab\n";
+    return 1;
+  }
+#ifdef SKYAPO_UI_HAVE_RESPONSE_ANALYSIS
+  auto *tabsResponseButton =
+      tabsWindow.findChild<QPushButton *>("analyzeResponse");
+  auto *tabsResponseResolution =
+      tabsWindow.findChild<QComboBox *>("analysisResolution");
+  auto *tabsResponseSource =
+      tabsWindow.findChild<QComboBox *>("analysisSource");
+  auto *tabsUseLiveFormat =
+      tabsWindow.findChild<QCheckBox *>("analysisUseLiveFormat");
+  bool staleAnalysisDialogOpened = false;
+  QTimer staleAnalysisDialogCloser;
+  staleAnalysisDialogCloser.setInterval(5);
+  QObject::connect(
+      &staleAnalysisDialogCloser, &QTimer::timeout, &application, [&] {
+        for (auto *widget : QApplication::topLevelWidgets()) {
+          auto *dialog = qobject_cast<QDialog *>(widget);
+          if (!dialog ||
+              (dialog->windowTitle() != "Calculated filter response" &&
+               dialog->windowTitle() != "Response analysis"))
+            continue;
+          staleAnalysisDialogOpened = true;
+          dialog->reject();
+          staleAnalysisDialogCloser.stop();
+        }
+      });
+  const int tabsAnalysisResolutionIndex =
+      tabsResponseResolution ? tabsResponseResolution->findData(8192U) : -1;
+  if (!tabsResponseButton || !tabsResponseResolution ||
+      tabsAnalysisResolutionIndex < 0 || !tabsResponseSource ||
+      !tabsUseLiveFormat) {
+    std::cerr << "tabbed response analysis controls are unavailable\n";
+    return 1;
+  }
+  tabsResponseSource->setCurrentIndex(1);
+  tabsResponseResolution->setCurrentIndex(tabsAnalysisResolutionIndex);
+  tabsUseLiveFormat->setChecked(false);
+  tabsResponseButton->click();
+  tabs->setCurrentIndex(0);
+  staleAnalysisDialogCloser.start();
+  QElapsedTimer staleAnalysisWait;
+  staleAnalysisWait.start();
+  while (!tabsResponseButton->isEnabled() &&
+         staleAnalysisWait.elapsed() < 15000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(5);
+  }
+  staleAnalysisDialogCloser.stop();
+  if (!tabsResponseButton->isEnabled() || staleAnalysisDialogOpened ||
+      tabs->currentIndex() != 0) {
+    std::cerr << "response analysis for the previous tab was shown after "
+                 "switching documents\n";
+    return 1;
+  }
+#endif
+  tabs->setCurrentIndex(1);
+  const QString configAliasPath = temporary.filePath("config-alias.txt");
+  if (!QFile::link(configPath, configAliasPath) ||
+      !QFileInfo(configAliasPath).isSymLink()) {
+    std::cerr << "could not create a symlink for Save As collision test\n";
+    return 1;
+  }
+  bool symlinkSaveAsCollisionResult = true;
+  if (!QMetaObject::invokeMethod(
+          &tabsWindow, "saveConfigAsPath", Qt::DirectConnection,
+          Q_RETURN_ARG(bool, symlinkSaveAsCollisionResult),
+          Q_ARG(QString, configAliasPath)) ||
+      symlinkSaveAsCollisionResult || !QFileInfo(configAliasPath).isSymLink()) {
+    std::cerr << "Save As through a symlink bypassed an open-tab collision\n";
+    return 1;
+  }
+  tabs->setCurrentIndex(1);
+  auto *secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  auto *secondGain =
+      secondPreamp ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain) {
+    std::cerr << "second configuration tab did not load its filter editor\n";
+    return 1;
+  }
+  secondGain->setValue(-8.0);
+  tabs->setCurrentIndex(0);
+  tabs->setCurrentIndex(1);
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  secondGain = secondPreamp
+                   ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain || qAbs(secondGain->value() + 8.0) >= 1e-9 ||
+      !tabs->tabText(1).startsWith("* ") ||
+      !tabsWindow.windowTitle().startsWith("* ")) {
+    std::cerr << "switching config tabs lost the edited document state\n";
+    return 1;
+  }
+  QPushButton *saveActiveTab = nullptr;
+  for (auto *button : tabsWindow.findChildren<QPushButton *>())
+    if (button->text() == "Save")
+      saveActiveTab = button;
+  if (!saveActiveTab) {
+    std::cerr << "could not locate active-document Save action\n";
+    return 1;
+  }
+  saveActiveTab->click();
+  QFile savedSecondConfig(secondConfigPath);
+  if (!savedSecondConfig.open(QIODevice::ReadOnly) ||
+      savedSecondConfig.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "switching back did not restore the document serialized by "
+                 "Save\n";
+    return 1;
+  }
+  const QString multiTabSaveAsPath =
+      temporary.filePath("second-config-save-as.txt");
+  bool multiTabSaveAsSucceeded = false;
+  if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, multiTabSaveAsSucceeded),
+                                 Q_ARG(QString, multiTabSaveAsPath)) ||
+      !multiTabSaveAsSucceeded ||
+      tabPath->text() != QFileInfo(multiTabSaveAsPath).absoluteFilePath() ||
+      tabs->tabToolTip(1) != QFileInfo(multiTabSaveAsPath).absoluteFilePath()) {
+    std::cerr << "Save As did not update the selected document tab/path\n";
+    return 1;
+  }
+  QFile secondConfigAfterSaveAs(secondConfigPath);
+  QFile multiTabSaveAs(multiTabSaveAsPath);
+  if (!secondConfigAfterSaveAs.open(QIODevice::ReadOnly) ||
+      secondConfigAfterSaveAs.readAll() != "Preamp: -8 dB\n" ||
+      !multiTabSaveAs.open(QIODevice::ReadOnly) ||
+      multiTabSaveAs.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "Save As did not isolate source and selected tab contents\n";
+    return 1;
+  }
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  secondPreamp = tabsWindow.findChild<PreampFilterGUI *>();
+  secondGain = secondPreamp
+                   ? secondPreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+                   : nullptr;
+  if (!secondGain) {
+    std::cerr << "Save As did not rebuild the selected filter editor\n";
+    return 1;
+  }
+  secondGain->setValue(-9.0);
+  secondGain->setValue(-8.0);
+  tabs->setCurrentIndex(0);
+  bool saveAsCollisionResult = true;
+  if (!QMetaObject::invokeMethod(&tabsWindow, "saveConfigAsPath",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(bool, saveAsCollisionResult),
+                                 Q_ARG(QString, multiTabSaveAsPath)) ||
+      saveAsCollisionResult) {
+    std::cerr << "Save As allowed overwriting a configuration open in another "
+                 "tab\n";
+    return 1;
+  }
+  QFile collisionTarget(multiTabSaveAsPath);
+  if (!collisionTarget.open(QIODevice::ReadOnly) ||
+      collisionTarget.readAll() != "Preamp: -8 dB\n") {
+    std::cerr << "rejected Save As collision modified the open target file\n";
+    return 1;
+  }
+  const auto closeWithChoice = [](MainWindow &target, int index,
+                                  QMessageBox::StandardButton choice) {
+    QTimer clickChoice;
+    clickChoice.setInterval(5);
+    QObject::connect(&clickChoice, &QTimer::timeout, &target, [&] {
+      auto *message =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      if (message && message->button(choice))
+        message->button(choice)->click();
+    });
+    clickChoice.start();
+    const bool invoked = QMetaObject::invokeMethod(
+        &target, "closeConfigTab", Qt::DirectConnection, Q_ARG(int, index));
+    clickChoice.stop();
+    return invoked;
+  };
+  if (!closeWithChoice(tabsWindow, 1, QMessageBox::Cancel) ||
+      tabs->count() != 2 || !tabs->tabText(1).startsWith("* ")) {
+    std::cerr << "Cancel did not preserve the dirty configuration tab\n";
+    return 1;
+  }
+  if (!closeWithChoice(tabsWindow, 1, QMessageBox::Discard) ||
+      tabs->count() != 1 || tabs->currentIndex() != 0) {
+    std::cerr << "Discard did not close only the selected configuration tab\n";
+    return 1;
+  }
+  if (!QMetaObject::invokeMethod(&tabsWindow, "closeConfigTab",
+                                 Qt::DirectConnection, Q_ARG(int, 0)) ||
+      tabs->count() != 1) {
+    std::cerr << "editor allowed closing its final configuration tab\n";
+    return 1;
+  }
+  MainWindow saveCloseWindow(configPath, QString::fromLocal8Bit(argv[1]));
+  auto *saveCloseTabs = saveCloseWindow.findChild<QTabBar *>("configTabs");
+  if (!saveCloseTabs ||
+      !QMetaObject::invokeMethod(&saveCloseWindow, "openConfig",
+                                 Qt::DirectConnection,
+                                 Q_ARG(QString, secondConfigPath))) {
+    std::cerr << "could not prepare dirty-tab Save close test\n";
+    return 1;
+  }
+  saveCloseTabs->setCurrentIndex(1);
+  auto *saveClosePreamp = saveCloseWindow.findChild<PreampFilterGUI *>();
+  auto *saveCloseGain =
+      saveClosePreamp
+          ? saveClosePreamp->findChild<QDoubleSpinBox *>("doubleSpinBox")
+          : nullptr;
+  if (!saveCloseGain) {
+    std::cerr << "could not locate inactive-tab Save test control\n";
+    return 1;
+  }
+  saveCloseGain->setValue(-7.0);
+  saveCloseTabs->setCurrentIndex(0);
+  if (!closeWithChoice(saveCloseWindow, 1, QMessageBox::Save) ||
+      saveCloseTabs->count() != 1) {
+    std::cerr << "Save did not persist and close the selected dirty tab\n";
+    return 1;
+  }
+  QFile savedClosedConfig(secondConfigPath);
+  if (!savedClosedConfig.open(QIODevice::ReadOnly) ||
+      savedClosedConfig.readAll() != "Preamp: -7 dB\n") {
+    std::cerr << "Save on tab close did not write the inactive config state\n";
     return 1;
   }
   const QString saveAsSourcePath = temporary.filePath("save-as-source.txt");
