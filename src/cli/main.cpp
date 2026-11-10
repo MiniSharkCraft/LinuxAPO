@@ -633,9 +633,14 @@ void stopDaemon() {
   }
   std::cout << settings::daemonRequest("STOP\n");
   for (unsigned attempt = 0; attempt < 30; ++attempt) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (!daemonReachable())
+    std::error_code ec;
+    const bool socketPresent =
+        std::filesystem::exists(settings::socketPath(), ec);
+    if (ec)
+      throw std::runtime_error("cannot check daemon shutdown: " + ec.message());
+    if (!socketPresent)
       return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   throw std::runtime_error("skyapod did not stop within 3 seconds");
 }

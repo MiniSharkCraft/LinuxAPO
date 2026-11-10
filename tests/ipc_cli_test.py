@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 
 def cli_exchange(executable, command, request, response):
@@ -52,6 +53,57 @@ def cli_exchange(executable, command, request, response):
         if worker.is_alive():
             raise RuntimeError("IPC fixture server did not finish")
         assert received == [request], received
+        return result
+
+
+def cli_stop_during_teardown(executable):
+    with tempfile.TemporaryDirectory(prefix="skyapo-stop-test-") as temporary:
+        root = pathlib.Path(temporary)
+        runtime = root / "runtime"
+        config = root / "config"
+        runtime.mkdir(mode=0o700)
+        config.mkdir()
+        socket_path = runtime / "skyapo.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(4)
+        requests = []
+
+        def serve_stop_then_tear_down():
+            for payload in (b"Daemon: streaming\n", b"Stopping skyapod\n"):
+                connection, _ = server.accept()
+                request = bytearray()
+                while chunk := connection.recv(128):
+                    request.extend(chunk)
+                requests.append(bytes(request))
+                connection.sendall(ok(payload))
+                connection.close()
+            # Model the daemon's acknowledged STOP while its control socket is
+            # still present but its event loop no longer accepts/serves IPC.
+            time.sleep(2.25)
+            server.close()
+            socket_path.unlink()
+
+        worker = threading.Thread(target=serve_stop_then_tear_down)
+        worker.start()
+        environment = os.environ.copy()
+        environment.update(
+            XDG_RUNTIME_DIR=str(runtime),
+            XDG_CONFIG_HOME=str(config),
+            HOME=str(config),
+        )
+        result = subprocess.run(
+            [executable, "stop"],
+            env=environment,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=6,
+        )
+        worker.join(timeout=3)
+        if worker.is_alive():
+            raise RuntimeError("daemon teardown fixture did not finish")
+        assert requests == [b"SKYAPO/1 STATUS\n", b"SKYAPO/1 STOP\n"], requests
         return result
 
 
@@ -125,8 +177,12 @@ def main():
     assert result.returncode == 0, result.stderr
     assert result.stdout == bypass_reply.decode()
 
+    stopped = cli_stop_during_teardown(executable)
+    assert stopped.returncode == 0, stopped.stderr
+    assert stopped.stdout == "Stopping skyapod\n", stopped.stdout
+
     print("IPC CLI framing, plugin parameter/bypass control, status compatibility, "
-          "and peer rejection tests passed")
+          "peer rejection, and stop teardown tests passed")
 
 
 if __name__ == "__main__":
